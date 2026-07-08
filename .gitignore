@@ -1,0 +1,9 @@
+# Swift / SwiftPM
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/
+*.xcodeproj
+.netrc
