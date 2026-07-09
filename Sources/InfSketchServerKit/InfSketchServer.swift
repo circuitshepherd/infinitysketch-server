@@ -91,5 +91,12 @@ public final class InfSketchServer: Sendable {
         }
 
         await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager)))
+
+        await http.appendRoute("GET /") { _ in
+            HTTPResponse(
+                statusCode: .ok,
+                headers: [.contentType: "text/html; charset=utf-8"],
+                body: Data(WebUI.indexHTML.utf8))
+        }
     }
 }

@@ -55,6 +55,20 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
         await server.stop()
     }
 
+    @Test func rootServesOverviewPage() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let url = URL(string: "http://127.0.0.1:\(port)/")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 200)
+        #expect(http.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/html") == true)
+        let html = String(decoding: data, as: UTF8.self)
+        #expect(html.contains("infsketch-server"))
+        #expect(html.contains("/api/docs"))
+        await server.stop()
+    }
+
     #if canImport(Darwin)
     @Test func webSocketEndToEnd() async throws {
         let (server, port, task) = try await startServer()
