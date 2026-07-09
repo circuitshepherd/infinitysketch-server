@@ -115,22 +115,39 @@ actor Connection {
         output.finish()
     }
 
+    /// Called by a pump on natural (server-initiated) stream completion:
+    /// clears connection-local bookkeeping and releases the manager-side
+    /// subscription so a later client re-subscribe works.
+    private func releaseDocSubscription(docId: String, token: UUID) async {
+        if let sub = docSubscriptions[docId], sub.token == token {
+            docSubscriptions.removeValue(forKey: docId)
+        }
+        await manager.unsubscribe(docId: docId, token: token)
+    }
+
+    private func releaseStatusSubscription(token: UUID) async {
+        if let sub = statusSubscription, sub.token == token {
+            statusSubscription = nil
+        }
+        await manager.unsubscribeStatus(token)
+    }
+
     /// Forwards session events out as JSON text frames. When the stream
     /// finishes server-side (e.g. buffer-overflow disconnect), releases the
     /// subscription so SessionManager's count stays accurate.
     private func pump(
         _ events: AsyncStream<ServerMessage>, docId: String?, token: UUID
     ) -> Task<Void, Never> {
-        Task { [manager, output] in
+        Task { [output] in
             for await event in events {
                 guard let json = try? event.jsonText() else { continue }
                 output.yield(.text(json))
             }
             guard !Task.isCancelled else { return }
             if let docId {
-                await manager.unsubscribe(docId: docId, token: token)
+                await self.releaseDocSubscription(docId: docId, token: token)
             } else {
-                await manager.unsubscribeStatus(token)
+                await self.releaseStatusSubscription(token: token)
             }
         }
     }
