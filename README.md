@@ -3,10 +3,13 @@
 Cross-platform server backend for **InfinitySketch** — a Swift command-line application
 intended to run on macOS, Linux, and Windows.
 
-> **Status: early scaffold.** This repository currently contains only an empty, buildable
-> skeleton — no server functionality yet. The server's role (REST API, real-time sync,
-> document storage, …) is deliberately undecided. See [`docs/design.md`](docs/design.md)
-> for the setup rationale and roadmap.
+> **Status: v0 walking skeleton.** The server hosts WebSocket document sessions
+> (JSON wire protocol, seq-ordered broadcast), a directory-backed document store,
+> a REST listing API with thumbnails, and a live web overview page at `/`.
+> Protocol design: the transport spec in the InfinitySketch app repo
+> (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
+> Not yet here: MCP endpoint, resume/backlog replay, render delegation, auth
+> (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy).
 
 ## Requirements
 
@@ -15,15 +18,16 @@ intended to run on macOS, Linux, and Windows.
 ## Build & run
 
 ```sh
-swift build                    # compile
-swift run infsketch-server     # run the placeholder executable
+swift test                                     # run the test suite
+swift run infsketch-server --docs ./docs       # serve; open http://localhost:8080
+swift run infsketch-demo --doc <id>            # demo client (macOS): ticks a doc
 ```
 
 ## Platforms
 
 The code is plain Swift + Foundation with no Apple-only APIs, so it is designed to compile
-and run on **macOS, Linux, and Windows**. Automated cross-platform CI is intentionally not
-set up yet (see `docs/design.md`); until then, cross-platform builds are verified locally.
+and run on **macOS, Linux, and Windows**. Linux tests run on GitLab CI (`swift:6.1` image).
+Windows support is experimental and CI-verified via the GitHub mirror workflow (`.github/workflows/windows.yml`).
 
 ## License
 
