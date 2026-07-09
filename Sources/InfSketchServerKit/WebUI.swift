@@ -30,6 +30,12 @@ public enum WebUI {
     const docsEl = document.getElementById("docs");
     let refreshTimer = null;
 
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
     async function refresh() {
       const docs = await (await fetch("/api/docs")).json();
       docsEl.innerHTML = "";
@@ -39,7 +45,7 @@ public enum WebUI {
         row.innerHTML =
           `<td><img class="thumb" src="/api/docs/${encodeURIComponent(d.id)}/frame?v=${d.seq ?? "s"}"` +
           ` onerror="this.style.visibility='hidden'"></td>` +
-          `<td>${d.name}</td><td>${d.sizeBytes} B</td>` +
+          `<td>${esc(d.name)}</td><td>${d.sizeBytes} B</td>` +
           `<td>${d.seq ?? "–"}</td>` +
           `<td class="${live ? "live" : ""}">${d.subscriberCount ?? "–"}</td>`;
         docsEl.appendChild(row);
