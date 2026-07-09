@@ -18,6 +18,10 @@ let package = Package(
             name: "infsketch-server",
             dependencies: ["InfSketchServerKit"]
         ),
+        .executableTarget(
+            name: "infsketch-demo",
+            dependencies: ["InfSketchServerKit"]
+        ),
         .testTarget(
             name: "InfSketchServerKitTests",
             dependencies: ["InfSketchServerKit"]
