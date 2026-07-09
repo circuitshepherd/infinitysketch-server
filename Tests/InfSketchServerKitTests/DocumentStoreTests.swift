@@ -41,6 +41,20 @@ private func makeTempStore() throws -> (DirectoryDocumentStore, URL) {
                 _ = try store.load(docId: bad)
             }
         }
+        for bad in ["../x", "a/b", "a\\b", ""] {
+            #expect(throws: DocumentStoreError.invalidDocId) {
+                try store.save(docId: bad, bytes: Data())
+            }
+        }
+    }
+
+    @Test func worksWhenDirectoryDoesNotExistYet() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("store-tests-\(UUID().uuidString)/nested", isDirectory: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        #expect(try store.list().isEmpty)
+        try store.save(docId: "fresh", bytes: Data([1]))
+        #expect(try store.load(docId: "fresh") == Data([1]))
     }
 
     @Test func thumbnailExtraction() {

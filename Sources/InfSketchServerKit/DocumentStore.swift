@@ -24,6 +24,7 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public init(directory: URL) {
         self.directory = directory
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
     public func list() throws -> [StoredDocInfo] {
