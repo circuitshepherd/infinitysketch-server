@@ -11,6 +11,11 @@ public struct WSAdapter: WSMessageHandler, Sendable {
     }
 
     public func makeMessages(for client: AsyncStream<WSMessage>) async throws -> AsyncStream<WSMessage> {
+        // KNOWN GAP: this output stream is unbounded, and FlyingFox itself
+        // drains it eagerly into another unbounded buffer before the socket
+        // writer — so the session-level bounded-buffer disconnect (DocumentSession)
+        // never engages for a slow *socket*. A stalled client therefore buffers
+        // events in memory until keepalive/reaping (future plan) drops it.
         let (output, outputCont) = AsyncStream<WSMessage>.makeStream()
         let connection = Connection(manager: manager, output: outputCont)
         Task {
@@ -39,6 +44,10 @@ actor Connection {
 
     func handle(_ frame: WSMessage) async {
         guard !closed else { return }
+        if case .close = frame {
+            await close()
+            return
+        }
         guard case .text(let text) = frame else {
             return send(.error(reason: "expectedTextFrame"))
         }

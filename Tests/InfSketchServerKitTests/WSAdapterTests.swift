@@ -111,6 +111,29 @@ private func nextServerMessage(
         #expect(await manager.liveInfo()["d"]?.subscriberCount == 0)
     }
 
+    @Test func clientCloseFrameClosesCleanly() async throws {
+        let manager = try makeManager()
+        let harness = try await Harness(manager: manager)
+        var it = harness.output.makeAsyncIterator()
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await nextServerMessage(&it)
+        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        _ = try await nextServerMessage(&it)
+
+        harness.input.yield(.close(.normalClosure))
+        // Drain: no error frame may appear; the stream must finish.
+        while let message = try await nextServerMessage(&it) {
+            if case .error(let reason) = message {
+                Issue.record("unexpected error frame on clean close: \(reason)")
+            }
+        }
+        for _ in 0..<50 {
+            if await manager.liveInfo()["d"]?.subscriberCount == 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await manager.liveInfo()["d"]?.subscriberCount == 0)
+    }
+
     @Test func statusSubscriptionDeliversEvents() async throws {
         let manager = try makeManager()
         let harness = try await Harness(manager: manager)

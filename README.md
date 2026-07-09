@@ -9,7 +9,8 @@ intended to run on macOS, Linux, and Windows.
 > Protocol design: the transport spec in the InfinitySketch app repo
 > (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
 > Not yet here: MCP endpoint, resume/backlog replay, render delegation, auth
-> (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy).
+> (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy),
+> slow-socket backpressure (a stalled client buffers server-side until keepalive lands).
 
 ## Requirements
 

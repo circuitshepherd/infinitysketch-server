@@ -24,7 +24,12 @@ while let argument = arguments.next() {
 }
 
 let docsDirectory = URL(fileURLWithPath: docsPath, isDirectory: true)
-try FileManager.default.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
+do {
+    try FileManager.default.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
+} catch {
+    print("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
+    exit(1)
+}
 
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory)
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")

@@ -9,6 +9,10 @@ public struct SessionConfig: Sendable {
     }
 }
 
+/// If `events` finishes server-side (e.g. buffer-overflow disconnect), the
+/// consumer MUST call SessionManager.unsubscribe(docId:token:) — otherwise
+/// the subscriber count leaks and the session never tears down. (The WS
+/// adapter's pump does this.)
 public struct SubscribeResult: Sendable {
     public let snapshot: ServerMessage
     public let events: AsyncStream<ServerMessage>
@@ -58,6 +62,7 @@ actor DocumentSession {
         do {
             try store.save(docId: docId, bytes: payload.data)
         } catch {
+            FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
             return .reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq)
         }
         bytes = payload.data
