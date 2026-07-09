@@ -27,7 +27,7 @@ swift run infsketch-demo --doc <id>            # demo client (macOS): ticks a do
 
 The code is plain Swift + Foundation with no Apple-only APIs, so it is designed to compile
 and run on **macOS, Linux, and Windows**. Linux tests run on GitLab CI (`swift:6.1` image).
-Windows support is experimental and CI-verified via the GitHub mirror workflow (`.github/workflows/windows.yml`).
+Windows support is experimental and currently unverified; it will be CI-verified by the GitHub mirror workflow (`.github/workflows/windows.yml`) once a GitHub mirror is set up.
 
 ## License
 
