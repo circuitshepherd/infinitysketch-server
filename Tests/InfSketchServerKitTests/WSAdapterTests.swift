@@ -116,17 +116,26 @@ private func nextServerMessage(
         let harness = try await Harness(manager: manager)
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
-        _ = try await nextServerMessage(&it)
+        _ = try await nextServerMessage(&it)  // helloAck
         try harness.send(.subscribeStatus)
-        // Trigger a status event through a second path.
-        let r = try await manager.subscribe(docId: "d")
-        let message = try await nextServerMessage(&it)
-        if case .statusEvent(let p) = message {
-            #expect(p.docId == "d")
-            #expect(p.kind == "sessionOpened")
-        } else {
-            Issue.record("expected statusEvent, got \(String(describing: message))")
+        // Trigger the status event through the SAME connection: frames are
+        // handled strictly in order, so the status subscription is registered
+        // before this subscribe emits sessionOpened. (A direct manager call
+        // here would race the async subscribeStatus handling.)
+        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        // The output interleaves the .subscribed reply with pumped statusEvents;
+        // the first statusEvent must be sessionOpened (emitted before
+        // subscriberCount, and the pump preserves stream order).
+        var firstStatus: StatusPayload?
+        for _ in 0..<5 {
+            guard let message = try await nextServerMessage(&it) else { break }
+            if case .statusEvent(let payload) = message {
+                firstStatus = payload
+                break
+            }
         }
-        _ = r
+        let payload = try #require(firstStatus)
+        #expect(payload.docId == "d")
+        #expect(payload.kind == "sessionOpened")
     }
 }
