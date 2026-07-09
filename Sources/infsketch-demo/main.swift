@@ -63,28 +63,38 @@ print("subscribed to '\(docId)' at seq \(seq), snapshot \(snapshot.count) bytes"
 
 // Print everything the server pushes.
 let printer = Task {
-    while true {
-        let message = try await receive()
-        switch message {
-        case .event(_, let seq, let kind, let opId, _):
-            print("event  seq=\(seq)  kind=\(kind)  opId=\(opId)")
-        case .reject(_, let opId, let reason, _):
-            print("REJECT opId=\(opId)  reason=\(reason)")
-        default:
-            print("received: \(message)")
+    do {
+        while true {
+            let message = try await receive()
+            switch message {
+            case .event(_, let seq, let kind, let opId, _):
+                print("event  seq=\(seq)  kind=\(kind)  opId=\(opId)")
+            case .reject(_, let opId, let reason, _):
+                print("REJECT opId=\(opId)  reason=\(reason)")
+            default:
+                print("received: \(message)")
+            }
         }
+    } catch {
+        print("disconnected (receive): \(error.localizedDescription)")
+        exit(0)
     }
 }
 
 // Re-submit the snapshot bytes every interval — seq advances, status fires.
 var counter = 0
-while true {
-    try await Task.sleep(for: .seconds(interval))
-    counter += 1
-    try await send(.op(
-        docId: docId,
-        opId: "demo-\(ProcessInfo.processInfo.processIdentifier)-\(counter)",
-        payload: OpPayload(type: "fullDoc", data: snapshot)))
+do {
+    while true {
+        try await Task.sleep(for: .seconds(interval))
+        counter += 1
+        try await send(.op(
+            docId: docId,
+            opId: "demo-\(ProcessInfo.processInfo.processIdentifier)-\(counter)",
+            payload: OpPayload(type: "fullDoc", data: snapshot)))
+    }
+} catch {
+    print("disconnected (send): \(error.localizedDescription)")
+    exit(0)
 }
 _ = printer  // runs until the process is killed (Ctrl-C)
 #endif
