@@ -4,11 +4,23 @@ import PackageDescription
 let package = Package(
     name: "infsketch-server",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
+    ],
+    dependencies: [
+        .package(url: "https://github.com/swhitty/FlyingFox.git", .upToNextMajor(from: "0.27.0")),
     ],
     targets: [
+        .target(
+            name: "InfSketchServerKit",
+            dependencies: [.product(name: "FlyingFox", package: "FlyingFox")]
+        ),
         .executableTarget(
-            name: "infsketch-server"
-        )
+            name: "infsketch-server",
+            dependencies: ["InfSketchServerKit"]
+        ),
+        .testTarget(
+            name: "InfSketchServerKitTests",
+            dependencies: ["InfSketchServerKit"]
+        ),
     ]
 )
