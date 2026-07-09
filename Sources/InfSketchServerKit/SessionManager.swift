@@ -18,7 +18,7 @@ public actor SessionManager {
     private var sessions: [String: DocumentSession] = [:]
     private var tokenDocs: [UUID: String] = [:]
     private var counts: [String: Int] = [:]
-    private var graceTasks: [String: Task<Void, Never>] = [:]
+    private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
 
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
@@ -27,7 +27,7 @@ public actor SessionManager {
     }
 
     public func subscribe(docId: String) async throws -> SubscribeResult {
-        graceTasks.removeValue(forKey: docId)?.cancel()
+        graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
             session = existing
@@ -38,9 +38,10 @@ public actor SessionManager {
         }
         let result = await session.subscribe()
         tokenDocs[result.token] = docId
-        counts[docId, default: 0] += 1
+        let newCount = counts[docId, default: 0] + 1
+        counts[docId] = newCount
         if case .subscribed(_, let seq, _) = result.snapshot {
-            emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: counts[docId]!)
+            emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: newCount)
         }
         return result
     }
@@ -89,16 +90,27 @@ public actor SessionManager {
     }
 
     private func scheduleGraceTeardown(docId: String) {
-        graceTasks[docId]?.cancel()
-        graceTasks[docId] = Task { [gracePeriod = config.gracePeriod] in
+        graceTasks[docId]?.task.cancel()
+        let graceId = UUID()
+        let task = Task { [gracePeriod = config.gracePeriod] in
             try? await Task.sleep(for: gracePeriod)
             guard !Task.isCancelled else { return }
-            await self.tearDownIfIdle(docId: docId)
+            await self.tearDownIfIdle(docId: docId, graceId: graceId)
         }
+        graceTasks[docId] = (graceId, task)
     }
 
-    private func tearDownIfIdle(docId: String) {
-        guard (counts[docId] ?? 0) == 0 else { return }
+    /// Tears down only if this invocation belongs to the CURRENTLY registered
+    /// grace task. A resubscribe removes the registration on the actor, so a
+    /// stale task that already passed its cancellation check fails this guard.
+    /// The guard and the teardown run in one actor turn (no suspension), so
+    /// no subscribe can interleave between check and mutation.
+    private func tearDownIfIdle(docId: String, graceId: UUID) {
+        guard graceTasks[docId]?.id == graceId else { return }
+        guard (counts[docId] ?? 0) == 0 else {
+            graceTasks.removeValue(forKey: docId)
+            return
+        }
         sessions.removeValue(forKey: docId)
         counts.removeValue(forKey: docId)
         graceTasks.removeValue(forKey: docId)
