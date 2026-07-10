@@ -194,7 +194,7 @@ private struct ServerMessageReader {
 }
 
 @Suite struct WSAdapterOutgoingTransferTests {
-    /// inlineLimit far below Fixtures.docBytes.count (105 bytes) forces chunking.
+    /// inlineLimit far below Fixtures.docBytes.count (136 bytes) forces chunking.
     private static let tinyConfig = SessionConfig(inlineLimit: 16, chunkSize: 8)
 
     @Test func bigSnapshotArrivesChunkedAndReassembles() async throws {
@@ -229,7 +229,7 @@ private struct ServerMessageReader {
     }
 
     @Test func smallSnapshotStaysInlineSingleFrame() async throws {
-        // Default config: 105-byte fixture is far below the 256 KiB inline limit.
+        // Default config: 136-byte fixture is far below the 256 KiB inline limit.
         let harness = try await Harness(manager: try makeManager())
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: 1, capabilities: []))

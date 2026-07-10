@@ -20,14 +20,14 @@ public struct TransferDescriptor: Codable, Equatable, Sendable {
         self.transferId = transferId
         self.totalBytes = totalBytes
         self.chunkSize = chunkSize
-        self.chunkCount = totalBytes == 0 ? 0 : (totalBytes + chunkSize - 1) / chunkSize
+        self.chunkCount = totalBytes == 0 ? 0 : (totalBytes - 1) / chunkSize + 1
     }
 
     /// A decoded descriptor is attacker-controlled input; the reassembler
     /// only opens transfers whose fields are self-consistent.
     var isSelfConsistent: Bool {
         guard totalBytes >= 0, chunkSize > 0 else { return false }
-        return chunkCount == (totalBytes == 0 ? 0 : (totalBytes + chunkSize - 1) / chunkSize)
+        return chunkCount == (totalBytes == 0 ? 0 : (totalBytes - 1) / chunkSize + 1)
     }
 
     /// Exact byte size chunk `index` must have.
@@ -186,7 +186,11 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
             guard pending == nil else { throw TransferWireError.transferAlreadyInFlight }
             guard descriptor.isSelfConsistent else { throw TransferWireError.invalidDescriptor }
             var buffer = Data()
-            buffer.reserveCapacity(descriptor.totalBytes)
+            // Pre-size is only an optimization hint; Data grows amortized
+            // beyond this clamp, so a self-consistent but absurd totalBytes
+            // (e.g. Int.max) can't trap the allocator. Actual memory use is
+            // bounded by the bytes genuinely received via consumeBinary.
+            buffer.reserveCapacity(min(descriptor.totalBytes, 16 * 1024 * 1024))
             pending = Pending(descriptor: descriptor, owner: message, buffer: buffer)
             return nil
         }

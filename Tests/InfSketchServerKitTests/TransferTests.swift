@@ -103,6 +103,16 @@ import Testing
         guard case .text(let endJSON) = frames[4] else { Issue.record("expected end"); return }
         #expect(try ServerMessage(jsonText: endJSON) == .transferEnd(transferId: d.transferId))
     }
+    @Test func exactMultiplePayloadExpandsWithNoRemainderChunk() throws {
+        let payload = Data((0..<24).map(UInt8.init))   // 24 bytes, chunkSize 8 → exactly 3 full chunks
+        var sender = TransferSender<ServerMessage>(inlineLimit: 16, chunkSize: 8)
+        let frames = try sender.frames(for: .subscribed(docId: "d", seq: 0, snapshot: .inline(payload)))
+        #expect(frames.count == 5)   // announce + 3 chunks + end
+        for frame in frames[1...3] {
+            guard case .binary(let chunkFrame) = frame else { Issue.record("expected binary"); return }
+            #expect(try ChunkFraming.decode(chunkFrame).payload.count == 8)
+        }
+    }
     @Test func transferIdsIncrementPerTransfer() throws {
         var sender = TransferSender<ClientMessage>(inlineLimit: 0, chunkSize: 8)
         func announcedId(_ frames: [WireFrame]) throws -> UInt32? {
@@ -287,5 +297,21 @@ import Testing
         } catch {
             // any DecodingError-ish error is correct (per-message severity)
         }
+    }
+    @Test func forgedIntMaxDescriptorIsRejectedNotTrapped() throws {
+        // chunkCount inconsistent with Int.max totalBytes — the ceil math must not overflow-trap.
+        let json = #"{"type":"subscribed","docId":"d","seq":0,"transfer":{"transferId":0,"totalBytes":9223372036854775807,"chunkSize":8,"chunkCount":1}}"#
+        var r = TransferReassembler<ServerMessage>()
+        #expect(throws: TransferWireError.invalidDescriptor) {
+            _ = try r.consume(.text(json))
+        }
+    }
+    @Test func selfConsistentHugeDescriptorOpensWithoutTrapping() throws {
+        // A consistent but absurd totalBytes must not trap on reserveCapacity;
+        // it simply opens a transfer that will never complete.
+        let d = TransferDescriptor(transferId: 0, totalBytes: Int.max - 7, chunkSize: 8)
+        var r = TransferReassembler<ServerMessage>()
+        let opened = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        #expect(opened == nil)
     }
 }
