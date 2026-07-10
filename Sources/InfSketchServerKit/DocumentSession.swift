@@ -3,9 +3,22 @@ import Foundation
 public struct SessionConfig: Sendable {
     public var gracePeriod: Duration
     public var outboundBufferLimit: Int
-    public init(gracePeriod: Duration = .seconds(60), outboundBufferLimit: Int = 256) {
+    /// Bulk payloads at or below this raw byte count travel inline (v0 shape);
+    /// larger ones become chunked binary transfers.
+    public var inlineLimit: Int
+    /// Payload bytes per binary chunk message. Header + payload stays under
+    /// URLSessionWebSocketTask's 1 MiB default receive cap.
+    public var chunkSize: Int
+    public init(
+        gracePeriod: Duration = .seconds(60),
+        outboundBufferLimit: Int = 256,
+        inlineLimit: Int = 256 * 1024,
+        chunkSize: Int = 512 * 1024
+    ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
+        self.inlineLimit = inlineLimit
+        self.chunkSize = chunkSize
     }
 }
 
