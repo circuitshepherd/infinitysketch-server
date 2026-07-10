@@ -35,6 +35,7 @@ actor Connection {
     private let manager: SessionManager
     private let output: AsyncStream<WSMessage>.Continuation
     private var sender: TransferSender<ServerMessage>
+    private var reassembler = TransferReassembler<ClientMessage>()
     private var helloed = false
     private var closed = false
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
@@ -48,16 +49,34 @@ actor Connection {
 
     func handle(_ frame: WSMessage) async {
         guard !closed else { return }
-        if case .close = frame {
+        let wire: WireFrame
+        switch frame {
+        case .close:
             await close()
             return
+        case .text(let text):
+            wire = .text(text)
+        case .data(let data):
+            wire = .binary(data)
         }
-        guard case .text(let text) = frame else {
-            return emit(.error(reason: "expectedTextFrame"))
+        let message: ClientMessage?
+        do {
+            message = try reassembler.consume(wire)
+        } catch is TransferWireError {
+            // Transfer state is positional — once violated the stream can't
+            // be trusted. Connection-fatal per the chunked-transfer spec.
+            emit(.error(reason: "transferViolation"))
+            await close()
+            return
+        } catch {
+            emit(.error(reason: "malformedMessage"))
+            return
         }
-        guard let message = try? ClientMessage(jsonText: text) else {
-            return emit(.error(reason: "malformedMessage"))
-        }
+        guard let message else { return }   // chunk consumed / transfer opened / aborted
+        await dispatch(message)
+    }
+
+    private func dispatch(_ message: ClientMessage) async {
         switch message {
         case .hello(let version, _):
             guard version == WireProtocol.version else {
@@ -111,12 +130,8 @@ actor Connection {
             }
 
         case .transferEnd, .transferAbort:
-            // Binary chunked-transfer reassembly (WSMessage.binary chunk
-            // frames, TransferDescriptor tracking) lands in a later task.
-            // Until this adapter ever opens a transfer, receiving either
-            // control message is a TransferWireError.controlWithoutTransfer
-            // violation, which is connection-fatal per Transfer.swift.
-            emit(.error(reason: "controlWithoutTransfer"))
+            // Unreachable: the reassembler consumes these or throws.
+            emit(.error(reason: "transferViolation"))
             await close()
         }
     }

@@ -23,6 +23,21 @@ private struct Harness {
     func sendRaw(_ text: String) {
         input.yield(.text(text))
     }
+
+    /// Sends a client message through sender-side chunk expansion (like the demo client will).
+    func sendChunked(_ message: ClientMessage, inlineLimit: Int, chunkSize: Int) throws {
+        var sender = TransferSender<ClientMessage>(inlineLimit: inlineLimit, chunkSize: chunkSize)
+        for frame in try sender.frames(for: message) {
+            switch frame {
+            case .text(let text): input.yield(.text(text))
+            case .binary(let data): input.yield(.data(data))
+            }
+        }
+    }
+
+    func sendBinary(_ data: Data) {
+        input.yield(.data(data))
+    }
 }
 
 private func makeManager() throws -> SessionManager {
@@ -239,5 +254,80 @@ private struct ServerMessageReader {
         #expect(reject == nil)
         #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "big-1",
                                                   payload: OpPayload(type: "fullDoc", data: bigBytes)))
+    }
+}
+
+@Suite struct WSAdapterIncomingTransferTests {
+    private func subscribedHarness() async throws -> (Harness, ServerMessageReader, SessionManager) {
+        let manager = try makeManager()
+        let harness = try await Harness(manager: manager)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()   // helloAck
+        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        _ = try await reader.next()   // subscribed
+        return (harness, reader, manager)
+    }
+
+    @Test func chunkedOpIsReassembledAppliedAndEchoed() async throws {
+        var (harness, reader, manager) = try await subscribedHarness()
+        let bigBytes = Data((0..<100).map { UInt8($0 % 256) })
+        try harness.sendChunked(
+            .op(docId: "d", opId: "big-1", payload: OpPayload(type: "fullDoc", data: bigBytes)),
+            inlineLimit: 16, chunkSize: 8)
+        // Echo event proves the session saw fully reassembled inline bytes.
+        #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "big-1",
+                                                  payload: OpPayload(type: "fullDoc", data: bigBytes)))
+        #expect(await manager.liveInfo()["d"]?.seq == 1)
+    }
+
+    @Test func abortMidTransferVoidsOpAndConnectionSurvives() async throws {
+        var (harness, reader, manager) = try await subscribedHarness()
+        let d = TransferDescriptor(transferId: 0, totalBytes: 100, chunkSize: 8)
+        try harness.send(.op(docId: "d", opId: "doomed",
+                             payload: OpPayload(type: "fullDoc", bulk: .transfer(d))))
+        harness.sendBinary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8)))
+        try harness.send(.transferAbort(transferId: 0, reason: "cancelled"))
+        // The voided op consumed no seq; a follow-up inline op works and is seq 1.
+        try harness.send(.op(docId: "d", opId: "after",
+                             payload: OpPayload(type: "fullDoc", data: Data([1]))))
+        #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "after",
+                                                  payload: OpPayload(type: "fullDoc", data: Data([1]))))
+        #expect(await manager.liveInfo()["d"]?.seq == 1)
+    }
+
+    @Test func unknownBinaryKindIsFatal() async throws {
+        var (harness, reader, _) = try await subscribedHarness()
+        harness.sendBinary(Data([0x7F]) + Data(count: 8))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)   // connection closed
+    }
+
+    @Test func chunkGapIsFatal() async throws {
+        var (harness, reader, _) = try await subscribedHarness()
+        let d = TransferDescriptor(transferId: 0, totalBytes: 24, chunkSize: 8)
+        try harness.send(.op(docId: "d", opId: "gap",
+                             payload: OpPayload(type: "fullDoc", bulk: .transfer(d))))
+        harness.sendBinary(ChunkFraming.encode(transferId: 0, index: 1, payload: Data(count: 8)))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
+    }
+
+    @Test func transferEndWithNoPendingIsFatal() async throws {
+        var (harness, reader, _) = try await subscribedHarness()
+        try harness.send(.transferEnd(transferId: 0))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
+    }
+
+    @Test func malformedJSONStillPerMessage() async throws {
+        var (harness, reader, _) = try await subscribedHarness()
+        harness.sendRaw("{nope")
+        #expect(try await reader.next() == .error(reason: "malformedMessage"))
+        // Connection survives: a normal op still works.
+        try harness.send(.op(docId: "d", opId: "ok",
+                             payload: OpPayload(type: "fullDoc", data: Data([1]))))
+        #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "ok",
+                                                  payload: OpPayload(type: "fullDoc", data: Data([1]))))
     }
 }
