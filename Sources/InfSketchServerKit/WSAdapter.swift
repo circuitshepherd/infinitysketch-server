@@ -5,9 +5,11 @@ import FlyingFox
 /// FlyingFox calls makeMessages once per connection.
 public struct WSAdapter: WSMessageHandler, Sendable {
     private let manager: SessionManager
+    private let config: SessionConfig
 
-    public init(manager: SessionManager) {
+    public init(manager: SessionManager, config: SessionConfig = SessionConfig()) {
         self.manager = manager
+        self.config = config
     }
 
     public func makeMessages(for client: AsyncStream<WSMessage>) async throws -> AsyncStream<WSMessage> {
@@ -17,7 +19,7 @@ public struct WSAdapter: WSMessageHandler, Sendable {
         // never engages for a slow *socket*. A stalled client therefore buffers
         // events in memory until keepalive/reaping (future plan) drops it.
         let (output, outputCont) = AsyncStream<WSMessage>.makeStream()
-        let connection = Connection(manager: manager, output: outputCont)
+        let connection = Connection(manager: manager, output: outputCont, config: config)
         Task {
             for await frame in client {
                 await connection.handle(frame)
@@ -32,52 +34,76 @@ public struct WSAdapter: WSMessageHandler, Sendable {
 actor Connection {
     private let manager: SessionManager
     private let output: AsyncStream<WSMessage>.Continuation
+    private var sender: TransferSender<ServerMessage>
+    private var reassembler = TransferReassembler<ClientMessage>()
     private var helloed = false
     private var closed = false
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
 
-    init(manager: SessionManager, output: AsyncStream<WSMessage>.Continuation) {
+    init(manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig) {
         self.manager = manager
         self.output = output
+        self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
     }
 
     func handle(_ frame: WSMessage) async {
         guard !closed else { return }
-        if case .close = frame {
+        let wire: WireFrame
+        switch frame {
+        case .close:
             await close()
             return
+        case .text(let text):
+            wire = .text(text)
+        case .data(let data):
+            wire = .binary(data)
         }
-        guard case .text(let text) = frame else {
-            return send(.error(reason: "expectedTextFrame"))
+        let message: ClientMessage?
+        // TODO(hardening): frames reach the reassembler before the hello gate —
+        // when auth lands, gate or bound pre-hello transfer bytes.
+        do {
+            message = try reassembler.consume(wire)
+        } catch let error as TransferWireError {
+            // Transfer state is positional — once violated the stream can't
+            // be trusted. Connection-fatal per the chunked-transfer spec.
+            FileHandle.standardError.write(Data("transfer violation on connection: \(error)\n".utf8))
+            emit(.error(reason: "transferViolation"))
+            await close()
+            return
+        } catch {
+            emit(.error(reason: "malformedMessage"))
+            return
         }
-        guard let message = try? ClientMessage(jsonText: text) else {
-            return send(.error(reason: "malformedMessage"))
-        }
+        guard let message else { return }   // chunk consumed / transfer opened / aborted
+        await dispatch(message)
+    }
+
+    private func dispatch(_ message: ClientMessage) async {
         switch message {
         case .hello(let version, _):
             guard version == WireProtocol.version else {
-                send(.error(reason: "unsupportedVersion"))
+                emit(.error(reason: "unsupportedVersion"))
                 await close()
                 return
             }
             helloed = true
-            send(.helloAck(protocolVersion: WireProtocol.version))
+            emit(.helloAck(protocolVersion: WireProtocol.version))
 
         case _ where !helloed:
-            send(.error(reason: "helloRequired"))
+            emit(.error(reason: "helloRequired"))
 
         case .subscribe(let docId, _):
             // v0: fromSeq ignored — always a full snapshot.
             guard docSubscriptions[docId] == nil else {
-                return send(.error(reason: "alreadySubscribed"))
+                return emit(.error(reason: "alreadySubscribed"))
             }
             do {
                 let result = try await manager.subscribe(docId: docId)
-                send(result.snapshot)
+                emit(result.snapshot)
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {
-                send(.error(reason: "unknownDoc"))
+                emit(.error(reason: "unknownDoc"))
             }
 
         case .unsubscribe(let docId):
@@ -88,10 +114,10 @@ actor Connection {
 
         case .op(let docId, let opId, let payload):
             guard docSubscriptions[docId] != nil else {
-                return send(.error(reason: "notSubscribed"))
+                return emit(.error(reason: "notSubscribed"))
             }
             if let reject = await manager.submit(docId: docId, opId: opId, payload: payload) {
-                send(reject)
+                emit(reject)
             }
 
         case .subscribeStatus:
@@ -105,6 +131,11 @@ actor Connection {
                 sub.pump.cancel()
                 await manager.unsubscribeStatus(sub.token)
             }
+
+        case .transferEnd, .transferAbort:
+            // Unreachable: the reassembler consumes these or throws.
+            emit(.error(reason: "transferViolation"))
+            await close()
         }
     }
 
@@ -141,16 +172,20 @@ actor Connection {
         await manager.unsubscribeStatus(token)
     }
 
-    /// Forwards session events out as JSON text frames. When the stream
+    /// Forwards session events out through emit(_:). When the stream
     /// finishes server-side (e.g. buffer-overflow disconnect), releases the
     /// subscription so SessionManager's count stays accurate.
     private func pump(
         _ events: AsyncStream<ServerMessage>, docId: String?, token: UUID
     ) -> Task<Void, Never> {
-        Task { [output] in
+        Task {
+            // This unstructured Task inherits Connection's actor isolation,
+            // so emit is a same-actor synchronous call — no await. If a
+            // future Swift changed that inheritance, this would fail to
+            // compile (cross-actor isolated calls require await) instead of
+            // silently losing the serialized-output guarantee.
             for await event in events {
-                guard let json = try? event.jsonText() else { continue }
-                output.yield(.text(json))
+                self.emit(event)
             }
             guard !Task.isCancelled else { return }
             if let docId {
@@ -161,8 +196,18 @@ actor Connection {
         }
     }
 
-    private func send(_ message: ServerMessage) {
-        guard let json = try? message.jsonText() else { return }
-        output.yield(.text(json))
+    /// Single serialized exit point for every outgoing message. Expands
+    /// oversized bulk payloads into descriptor + chunks + end; actor
+    /// isolation (and no suspension inside) keeps each expansion's frames
+    /// contiguous on the socket — the one-in-flight-per-direction rule
+    /// holds by construction.
+    private func emit(_ message: ServerMessage) {
+        guard let frames = try? sender.frames(for: message) else { return }
+        for frame in frames {
+            switch frame {
+            case .text(let json): output.yield(.text(json))
+            case .binary(let data): output.yield(.data(data))
+            }
+        }
     }
 }

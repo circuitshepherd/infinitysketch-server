@@ -16,7 +16,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let manager = try makeManager()
         #expect(await manager.liveInfo().isEmpty)
         let r = try await manager.subscribe(docId: "d")
-        #expect(r.snapshot == .subscribed(docId: "d", seq: 0, snapshot: Fixtures.docBytes))
+        #expect(r.snapshot == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
         let info = await manager.liveInfo()
         #expect(info["d"] == LiveDocInfo(seq: 0, subscriberCount: 1))
     }

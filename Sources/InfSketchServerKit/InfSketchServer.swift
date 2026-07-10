@@ -14,12 +14,14 @@ public final class InfSketchServer: Sendable {
     public let manager: SessionManager
     private let store: DirectoryDocumentStore
     private let http: HTTPServer
+    private let config: SessionConfig
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
         let store = DirectoryDocumentStore(directory: docsDirectory)
         self.store = store
         self.manager = SessionManager(store: store, config: config)
         self.http = HTTPServer(port: port)
+        self.config = config
     }
 
     /// Configures routes and serves until stopped.
@@ -90,7 +92,7 @@ public final class InfSketchServer: Sendable {
                 body: png)
         }
 
-        await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager)))
+        await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))
 
         await http.appendRoute("GET /") { _ in
             HTTPResponse(

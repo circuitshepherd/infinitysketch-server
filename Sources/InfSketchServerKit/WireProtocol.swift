@@ -4,12 +4,54 @@ public enum WireProtocol {
     public static let version = 1
 }
 
-public struct OpPayload: Codable, Equatable, Sendable {
+/// A bulk byte field on a wire message: inline for small payloads (v0 shape),
+/// or a descriptor announcing a chunked binary transfer for large ones.
+/// Session-layer code only ever sees `.inline` — the WS adapter reassembles
+/// transfers before messages reach SessionManager.
+public enum BulkPayload: Equatable, Sendable {
+    case inline(Data)
+    case transfer(TransferDescriptor)
+
+    public var inlineData: Data? {
+        if case .inline(let data) = self { return data }
+        return nil
+    }
+}
+
+public struct OpPayload: Equatable, Sendable {
     public var type: String
-    public var data: Data
+    public var bulk: BulkPayload
+
     public init(type: String, data: Data) {
         self.type = type
-        self.data = data
+        self.bulk = .inline(data)
+    }
+    public init(type: String, bulk: BulkPayload) {
+        self.type = type
+        self.bulk = bulk
+    }
+}
+
+extension OpPayload: Codable {
+    private enum CodingKeys: String, CodingKey { case type, data, transfer }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+            bulk = .transfer(descriptor)
+        } else {
+            bulk = .inline(try c.decode(Data.self, forKey: .data))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        switch bulk {
+        case .inline(let data): try c.encode(data, forKey: .data)
+        case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+        }
     }
 }
 
@@ -33,11 +75,13 @@ public enum ClientMessage: Equatable, Sendable {
     case op(docId: String, opId: String, payload: OpPayload)
     case subscribeStatus
     case unsubscribeStatus
+    case transferEnd(transferId: UInt32)
+    case transferAbort(transferId: UInt32, reason: String)
 }
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, opId, payload
+        case type, protocolVersion, capabilities, docId, fromSeq, opId, payload, transferId, reason
     }
 
     public init(from decoder: any Decoder) throws {
@@ -62,6 +106,12 @@ extension ClientMessage: Codable {
             self = .subscribeStatus
         case "unsubscribeStatus":
             self = .unsubscribeStatus
+        case "transferEnd":
+            self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
+        case "transferAbort":
+            self = .transferAbort(
+                transferId: try c.decode(UInt32.self, forKey: .transferId),
+                reason: try c.decode(String.self, forKey: .reason))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown client message type: \(other)")
@@ -91,23 +141,32 @@ extension ClientMessage: Codable {
             try c.encode("subscribeStatus", forKey: .type)
         case .unsubscribeStatus:
             try c.encode("unsubscribeStatus", forKey: .type)
+        case .transferEnd(let transferId):
+            try c.encode("transferEnd", forKey: .type)
+            try c.encode(transferId, forKey: .transferId)
+        case .transferAbort(let transferId, let reason):
+            try c.encode("transferAbort", forKey: .type)
+            try c.encode(transferId, forKey: .transferId)
+            try c.encode(reason, forKey: .reason)
         }
     }
 }
 
 public enum ServerMessage: Equatable, Sendable {
     case helloAck(protocolVersion: Int)
-    case subscribed(docId: String, seq: Int, snapshot: Data)
+    case subscribed(docId: String, seq: Int, snapshot: BulkPayload)
     case event(docId: String, seq: Int, kind: String, opId: String, payload: OpPayload)
     case reject(docId: String, opId: String, reason: String, seq: Int)
     case resyncRequired(docId: String, seq: Int)
     case statusEvent(payload: StatusPayload)
     case error(reason: String)
+    case transferEnd(transferId: UInt32)
+    case transferAbort(transferId: UInt32, reason: String)
 }
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId
     }
 
     public init(from decoder: any Decoder) throws {
@@ -116,10 +175,16 @@ extension ServerMessage: Codable {
         case "helloAck":
             self = .helloAck(protocolVersion: try c.decode(Int.self, forKey: .protocolVersion))
         case "subscribed":
+            let snapshot: BulkPayload
+            if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+                snapshot = .transfer(descriptor)
+            } else {
+                snapshot = .inline(try c.decode(Data.self, forKey: .snapshot))
+            }
             self = .subscribed(
                 docId: try c.decode(String.self, forKey: .docId),
                 seq: try c.decode(Int.self, forKey: .seq),
-                snapshot: try c.decode(Data.self, forKey: .snapshot))
+                snapshot: snapshot)
         case "event":
             self = .event(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -141,6 +206,12 @@ extension ServerMessage: Codable {
             self = .statusEvent(payload: try c.decode(StatusPayload.self, forKey: .payload))
         case "error":
             self = .error(reason: try c.decode(String.self, forKey: .reason))
+        case "transferEnd":
+            self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
+        case "transferAbort":
+            self = .transferAbort(
+                transferId: try c.decode(UInt32.self, forKey: .transferId),
+                reason: try c.decode(String.self, forKey: .reason))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown server message type: \(other)")
@@ -157,7 +228,10 @@ extension ServerMessage: Codable {
             try c.encode("subscribed", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(seq, forKey: .seq)
-            try c.encode(snapshot, forKey: .snapshot)
+            switch snapshot {
+            case .inline(let data): try c.encode(data, forKey: .snapshot)
+            case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+            }
         case .event(let docId, let seq, let kind, let opId, let payload):
             try c.encode("event", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -181,6 +255,13 @@ extension ServerMessage: Codable {
         case .error(let reason):
             try c.encode("error", forKey: .type)
             try c.encode(reason, forKey: .reason)
+        case .transferEnd(let transferId):
+            try c.encode("transferEnd", forKey: .type)
+            try c.encode(transferId, forKey: .transferId)
+        case .transferAbort(let transferId, let reason):
+            try c.encode("transferAbort", forKey: .type)
+            try c.encode(transferId, forKey: .transferId)
+            try c.encode(reason, forKey: .reason)
         }
     }
 }
@@ -200,5 +281,86 @@ public extension ServerMessage {
     }
     func jsonText() throws -> String {
         String(decoding: try JSONEncoder().encode(self), as: UTF8.self)
+    }
+}
+
+extension ClientMessage: TransferCarrying {
+    public var bulkBytes: Data? {
+        if case .op(_, _, let payload) = self { return payload.bulk.inlineData }
+        return nil
+    }
+    public func replacingBulk(with descriptor: TransferDescriptor) -> ClientMessage {
+        guard case .op(let docId, let opId, let payload) = self else { return self }
+        return .op(docId: docId, opId: opId,
+                   payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+    }
+    public var openingDescriptor: TransferDescriptor? {
+        if case .op(_, _, let payload) = self, case .transfer(let d) = payload.bulk { return d }
+        return nil
+    }
+    public func resolvingBulk(with bytes: Data) -> ClientMessage {
+        guard case .op(let docId, let opId, let payload) = self else { return self }
+        return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes))
+    }
+    public var transferControl: TransferControl? {
+        switch self {
+        case .transferEnd(let id): return .end(id)
+        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
+        default: return nil
+        }
+    }
+    public static func makeTransferEnd(transferId: UInt32) -> ClientMessage {
+        .transferEnd(transferId: transferId)
+    }
+}
+
+extension ServerMessage: TransferCarrying {
+    public var bulkBytes: Data? {
+        switch self {
+        case .subscribed(_, _, let snapshot): return snapshot.inlineData
+        case .event(_, _, _, _, let payload): return payload.bulk.inlineData
+        default: return nil
+        }
+    }
+    public func replacingBulk(with descriptor: TransferDescriptor) -> ServerMessage {
+        switch self {
+        case .subscribed(let docId, let seq, _):
+            return .subscribed(docId: docId, seq: seq, snapshot: .transfer(descriptor))
+        case .event(let docId, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
+                          payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+        default:
+            return self
+        }
+    }
+    public var openingDescriptor: TransferDescriptor? {
+        switch self {
+        case .subscribed(_, _, .transfer(let d)): return d
+        case .event(_, _, _, _, let payload):
+            if case .transfer(let d) = payload.bulk { return d }
+            return nil
+        default: return nil
+        }
+    }
+    public func resolvingBulk(with bytes: Data) -> ServerMessage {
+        switch self {
+        case .subscribed(let docId, let seq, _):
+            return .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes))
+        case .event(let docId, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
+                          payload: OpPayload(type: payload.type, data: bytes))
+        default:
+            return self
+        }
+    }
+    public var transferControl: TransferControl? {
+        switch self {
+        case .transferEnd(let id): return .end(id)
+        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
+        default: return nil
+        }
+    }
+    public static func makeTransferEnd(transferId: UInt32) -> ServerMessage {
+        .transferEnd(transferId: transferId)
     }
 }

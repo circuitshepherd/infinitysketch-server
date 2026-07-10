@@ -35,15 +35,31 @@ guard let url = URL(string: urlText) else {
 let task = URLSession.shared.webSocketTask(with: url)
 task.resume()
 
+// Chunked-transfer plumbing: bulk payloads travel as binary chunk messages,
+// so no single WS message ever approaches URLSession's 1 MiB default cap.
+var sender = TransferSender<ClientMessage>(inlineLimit: 256 * 1024, chunkSize: 512 * 1024)
+var reassembler = TransferReassembler<ServerMessage>()
+
+@MainActor
 func send(_ message: ClientMessage) async throws {
-    try await task.send(.string(try message.jsonText()))
+    for frame in try sender.frames(for: message) {
+        switch frame {
+        case .text(let text): try await task.send(.string(text))
+        case .binary(let data): try await task.send(.data(data))
+        }
+    }
 }
 
+@MainActor
 func receive() async throws -> ServerMessage {
     while true {
-        if case .string(let text) = try await task.receive() {
-            return try ServerMessage(jsonText: text)
+        let wire: WireFrame
+        switch try await task.receive() {
+        case .string(let text): wire = .text(text)
+        case .data(let data): wire = .binary(data)
+        @unknown default: continue
         }
+        if let message = try reassembler.consume(wire) { return message }
     }
 }
 
@@ -55,7 +71,7 @@ guard case .helloAck = try await receive() else {
 print("connected to \(urlText)")
 
 try await send(.subscribe(docId: docId, fromSeq: nil))
-guard case .subscribed(_, let seq, let snapshot) = try await receive() else {
+guard case .subscribed(_, let seq, .inline(let snapshot)) = try await receive() else {
     print("subscribe failed (does doc '\(docId)' exist?)")
     exit(1)
 }

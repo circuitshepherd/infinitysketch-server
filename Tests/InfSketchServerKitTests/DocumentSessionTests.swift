@@ -16,7 +16,7 @@ private func makeSession(bufferLimit: Int = 256) throws -> (DocumentSession, Dir
     @Test func subscribeReturnsSeqStampedSnapshot() async throws {
         let (session, _) = try makeSession()
         let result = await session.subscribe()
-        #expect(result.snapshot == .subscribed(docId: "d", seq: 0, snapshot: Fixtures.docBytes))
+        #expect(result.snapshot == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
         #expect(await session.subscriberCount == 1)
     }
 
