@@ -1,0 +1,7 @@
+stages: [test]
+
+linux-test:
+  stage: test
+  image: swift:6.1
+  script:
+    - swift test

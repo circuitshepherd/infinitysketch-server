@@ -1,0 +1,17 @@
+# Validates the experimental Windows support (FlyingFox + this codebase).
+# Runs on the GitHub mirror; inert on GitLab. swift test is advisory at
+# first — the build succeeding is the v0 gate.
+name: windows
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: compnerd/gha-setup-swift@v3
+        with:
+          branch: swift-6.1-release
+          tag: 6.1-RELEASE
+      - run: swift build
+      - run: swift test
+        continue-on-error: true
