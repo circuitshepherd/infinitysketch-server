@@ -82,3 +82,37 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         _ = r2
     }
 }
+
+@Suite struct CreateIfMissingSessionTests {
+    private func makeStoreAndManager() throws -> (DirectoryDocumentStore, SessionManager) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cim-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        return (store, SessionManager(store: store, config: SessionConfig()))
+    }
+
+    @Test func createIfMissingOpensEmptySessionWithoutTouchingDisk() async throws {
+        let (store, manager) = try makeStoreAndManager()
+        let result = try await manager.subscribe(docId: "fresh", createIfMissing: true)
+        #expect(result.snapshot == .subscribed(docId: "fresh", seq: 0, snapshot: .inline(Data())))
+        // Nothing persisted yet:
+        #expect(throws: DocumentStoreError.self) { _ = try store.load(docId: "fresh") }
+    }
+
+    @Test func firstOpPersistsTheCreatedDoc() async throws {
+        let (store, manager) = try makeStoreAndManager()
+        _ = try await manager.subscribe(docId: "fresh", createIfMissing: true)
+        let reject = await manager.submit(docId: "fresh", opId: "o1",
+                                          payload: OpPayload(type: "fullDoc", data: Data([1, 2])))
+        #expect(reject == nil)
+        #expect(try store.load(docId: "fresh") == Data([1, 2]))
+    }
+
+    @Test func withoutFlagUnknownDocStillThrows() async throws {
+        let (_, manager) = try makeStoreAndManager()
+        await #expect(throws: (any Error).self) {
+            _ = try await manager.subscribe(docId: "ghost")
+        }
+    }
+}

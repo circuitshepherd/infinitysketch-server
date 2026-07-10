@@ -94,13 +94,13 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, _):
+        case .subscribe(let docId, _, let createIfMissing):
             // v0: fromSeq ignored — always a full snapshot.
             guard docSubscriptions[docId] == nil else {
                 return emit(.error(reason: "alreadySubscribed"))
             }
             do {
-                let result = try await manager.subscribe(docId: docId)
+                let result = try await manager.subscribe(docId: docId, createIfMissing: createIfMissing)
                 emit(result.snapshot)
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {

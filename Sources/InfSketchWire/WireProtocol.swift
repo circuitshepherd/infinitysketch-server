@@ -70,7 +70,7 @@ public struct StatusPayload: Codable, Equatable, Sendable {
 
 public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String])
-    case subscribe(docId: String, fromSeq: Int?)
+    case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
     case unsubscribe(docId: String)
     case op(docId: String, opId: String, payload: OpPayload)
     case subscribeStatus
@@ -81,7 +81,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, opId, payload, transferId, reason
+        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason
     }
 
     public init(from decoder: any Decoder) throws {
@@ -94,7 +94,8 @@ extension ClientMessage: Codable {
         case "subscribe":
             self = .subscribe(
                 docId: try c.decode(String.self, forKey: .docId),
-                fromSeq: try c.decodeIfPresent(Int.self, forKey: .fromSeq))
+                fromSeq: try c.decodeIfPresent(Int.self, forKey: .fromSeq),
+                createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false)
         case "unsubscribe":
             self = .unsubscribe(docId: try c.decode(String.self, forKey: .docId))
         case "op":
@@ -125,10 +126,11 @@ extension ClientMessage: Codable {
             try c.encode("hello", forKey: .type)
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(caps, forKey: .capabilities)
-        case .subscribe(let docId, let fromSeq):
+        case .subscribe(let docId, let fromSeq, let createIfMissing):
             try c.encode("subscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encodeIfPresent(fromSeq, forKey: .fromSeq)
+            if createIfMissing { try c.encode(true, forKey: .createIfMissing) }
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)

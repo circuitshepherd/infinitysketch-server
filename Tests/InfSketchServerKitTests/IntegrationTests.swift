@@ -93,7 +93,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         try await send(.hello(protocolVersion: 1, capabilities: []))
         #expect(try await receive() == .helloAck(protocolVersion: 1))
 
-        try await send(.subscribe(docId: "sample", fromSeq: nil))
+        try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Fixtures.docBytes)
@@ -140,7 +140,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
 
         try await send(.hello(protocolVersion: 1, capabilities: []))
         #expect(try await receive() == .helloAck(protocolVersion: 1))
-        try await send(.subscribe(docId: "sample", fromSeq: nil))
+        try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         // Push a ~100 KB op up (chunked), get the echo back (chunked): both

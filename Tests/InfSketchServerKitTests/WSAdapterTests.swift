@@ -80,7 +80,7 @@ private struct ServerMessageReader {
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         #expect(try await reader.next() == .helloAck(protocolVersion: 1))
 
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Data([7]))
@@ -92,7 +92,7 @@ private struct ServerMessageReader {
     @Test func messagesBeforeHelloAreRejected() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         #expect(try await reader.next() == .error(reason: "helloRequired"))
     }
 
@@ -128,7 +128,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         _ = try await reader.next()
         #expect(await manager.liveInfo()["d"]?.subscriberCount == 1)
 
@@ -148,7 +148,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         _ = try await reader.next()
 
         harness.input.yield(.close(.normalClosure))
@@ -176,7 +176,7 @@ private struct ServerMessageReader {
         // handled strictly in order, so the status subscription is registered
         // before this subscribe emits sessionOpened. (A direct manager call
         // here would race the async subscribeStatus handling.)
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         // The output interleaves the .subscribed reply with pumped statusEvents;
         // the first statusEvent must be sessionOpened (emitted before
         // subscriberCount, and the pump preserves stream order).
@@ -203,7 +203,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = try await reader.next()   // helloAck
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         // The reader reassembles descriptor + chunks + end back into one message.
         #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
     }
@@ -213,7 +213,7 @@ private struct ServerMessageReader {
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = await it.next()   // helloAck text frame
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
 
         guard case .text(let announce) = await it.next(),
               case .subscribed(_, 0, .transfer(let d)) = try ServerMessage(jsonText: announce)
@@ -235,7 +235,7 @@ private struct ServerMessageReader {
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = await it.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         guard case .text(let json) = await it.next() else { Issue.record("expected single text frame"); return }
         #expect(try ServerMessage(jsonText: json) == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
     }
@@ -246,7 +246,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         _ = try await reader.next()   // subscribed
         // Submit a big op directly through the manager (incoming chunks land in Task 6).
         let bigBytes = Data((0..<200).map { UInt8($0 % 256) })
@@ -265,7 +265,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: []))
         _ = try await reader.next()   // helloAck
-        try harness.send(.subscribe(docId: "d", fromSeq: nil))
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
         _ = try await reader.next()   // subscribed
         return (harness, reader, manager)
     }
@@ -330,5 +330,28 @@ private struct ServerMessageReader {
                              payload: OpPayload(type: "fullDoc", data: Data([1]))))
         #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "ok",
                                                   payload: OpPayload(type: "fullDoc", data: Data([1]))))
+    }
+}
+
+@Suite struct WSAdapterCreateIfMissingTests {
+    @Test func flaggedSubscribeToUnknownDocSucceedsAndOpEchoes() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "brandnew", fromSeq: nil, createIfMissing: true))
+        #expect(try await reader.next() == .subscribed(docId: "brandnew", seq: 0, snapshot: .inline(Data())))
+        let payload = OpPayload(type: "fullDoc", data: Data([9]))
+        try harness.send(.op(docId: "brandnew", opId: "o1", payload: payload))
+        #expect(try await reader.next() == .event(docId: "brandnew", seq: 1, kind: "op", opId: "o1", payload: payload))
+    }
+
+    @Test func unflaggedSubscribeToUnknownDocStillErrors() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "ghost", fromSeq: nil, createIfMissing: false))
+        #expect(try await reader.next() == .error(reason: "unknownDoc"))
     }
 }

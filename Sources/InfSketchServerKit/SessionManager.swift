@@ -27,13 +27,20 @@ public actor SessionManager {
         self.config = config
     }
 
-    public func subscribe(docId: String) async throws -> SubscribeResult {
+    public func subscribe(docId: String, createIfMissing: Bool = false) async throws -> SubscribeResult {
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
             session = existing
         } else {
-            session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+            do {
+                session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+            } catch DocumentStoreError.notFound where createIfMissing {
+                // Mirror clients push docs the server has never seen: open an
+                // in-memory empty session; the first op persists real bytes.
+                session = DocumentSession(docId: docId, store: store,
+                                          bufferLimit: config.outboundBufferLimit, bytes: Data())
+            }
             sessions[docId] = session
             emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
         }

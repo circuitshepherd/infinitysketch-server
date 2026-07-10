@@ -7,8 +7,8 @@ import InfSketchWire
     @Test func clientMessagesRoundTrip() throws {
         let messages: [ClientMessage] = [
             .hello(protocolVersion: 1, capabilities: ["render"]),
-            .subscribe(docId: "a", fromSeq: 7),
-            .subscribe(docId: "a", fromSeq: nil),
+            .subscribe(docId: "a", fromSeq: 7, createIfMissing: false),
+            .subscribe(docId: "a", fromSeq: nil, createIfMissing: false),
             .unsubscribe(docId: "a"),
             .op(docId: "a", opId: "c1-1", payload: OpPayload(type: "fullDoc", data: Data([1, 2, 3]))),
             .subscribeStatus,
@@ -38,7 +38,7 @@ import InfSketchWire
     }
 
     @Test func typeFieldIsFlatDiscriminator() throws {
-        let json = try ClientMessage.subscribe(docId: "doc1", fromSeq: nil).jsonText()
+        let json = try ClientMessage.subscribe(docId: "doc1", fromSeq: nil, createIfMissing: false).jsonText()
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         #expect(obj["type"] as? String == "subscribe")
         #expect(obj["docId"] as? String == "doc1")
@@ -93,5 +93,20 @@ import InfSketchWire
                                       payload: OpPayload(type: "fullDoc", data: Data([1, 2, 3]))).jsonText()
         #expect(op.contains(#""data":"AQID""#))
         #expect(!op.contains("transfer"))
+    }
+}
+
+@Suite struct CreateIfMissingWireTests {
+    @Test func subscribeWithFlagRoundTrips() throws {
+        let m = ClientMessage.subscribe(docId: "d", fromSeq: nil, createIfMissing: true)
+        #expect(try ClientMessage(jsonText: m.jsonText()) == m)
+        #expect(try m.jsonText().contains("createIfMissing"))
+    }
+    @Test func subscribeWithoutFlagStaysV0Compatible() throws {
+        let m = ClientMessage.subscribe(docId: "d", fromSeq: 3, createIfMissing: false)
+        #expect(!(try m.jsonText().contains("createIfMissing")))
+        // Old-client JSON without the key decodes as false.
+        let old = #"{"type":"subscribe","docId":"d","fromSeq":3}"#
+        #expect(try ClientMessage(jsonText: old) == m)
     }
 }
