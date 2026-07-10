@@ -50,7 +50,7 @@ private func nextServerMessage(
         #expect(try await nextServerMessage(&it) == .helloAck(protocolVersion: 1))
 
         try harness.send(.subscribe(docId: "d", fromSeq: nil))
-        #expect(try await nextServerMessage(&it) == .subscribed(docId: "d", seq: 0, snapshot: Fixtures.docBytes))
+        #expect(try await nextServerMessage(&it) == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Data([7]))
         try harness.send(.op(docId: "d", opId: "o1", payload: payload))

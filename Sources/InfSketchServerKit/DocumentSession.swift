@@ -44,7 +44,7 @@ actor DocumentSession {
             bufferingPolicy: .bufferingOldest(bufferLimit))
         subscribers[token] = continuation
         return SubscribeResult(
-            snapshot: .subscribed(docId: docId, seq: seq, snapshot: bytes),
+            snapshot: .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes)),
             events: stream,
             token: token)
     }
@@ -59,13 +59,17 @@ actor DocumentSession {
         guard payload.type == "fullDoc" else {
             return .reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq)
         }
+        // The adapter reassembles transfers before ops reach the session.
+        guard case .inline(let newBytes) = payload.bulk else {
+            return .reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq)
+        }
         do {
-            try store.save(docId: docId, bytes: payload.data)
+            try store.save(docId: docId, bytes: newBytes)
         } catch {
             FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
             return .reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq)
         }
-        bytes = payload.data
+        bytes = newBytes
         seq += 1
         broadcast(.event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload))
         return nil

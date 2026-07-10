@@ -55,7 +55,7 @@ guard case .helloAck = try await receive() else {
 print("connected to \(urlText)")
 
 try await send(.subscribe(docId: docId, fromSeq: nil))
-guard case .subscribed(_, let seq, let snapshot) = try await receive() else {
+guard case .subscribed(_, let seq, .inline(let snapshot)) = try await receive() else {
     print("subscribe failed (does doc '\(docId)' exist?)")
     exit(1)
 }

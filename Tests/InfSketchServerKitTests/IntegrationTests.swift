@@ -93,7 +93,7 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
         #expect(try await receive() == .helloAck(protocolVersion: 1))
 
         try await send(.subscribe(docId: "sample", fromSeq: nil))
-        #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: Fixtures.docBytes))
+        #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Fixtures.docBytes)
         try await send(.op(docId: "sample", opId: "it-1", payload: payload))

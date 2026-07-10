@@ -105,6 +105,15 @@ actor Connection {
                 sub.pump.cancel()
                 await manager.unsubscribeStatus(sub.token)
             }
+
+        case .transferEnd, .transferAbort:
+            // Binary chunked-transfer reassembly (WSMessage.binary chunk
+            // frames, TransferDescriptor tracking) lands in a later task.
+            // Until this adapter ever opens a transfer, receiving either
+            // control message is a TransferWireError.controlWithoutTransfer
+            // violation, which is connection-fatal per Transfer.swift.
+            send(.error(reason: "controlWithoutTransfer"))
+            await close()
         }
     }
 
