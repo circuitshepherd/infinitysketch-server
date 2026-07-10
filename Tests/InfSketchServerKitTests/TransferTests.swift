@@ -119,3 +119,158 @@ import Testing
         #expect(try announcedId(second) == 1)
     }
 }
+
+@Suite struct TransferReassemblerTests {
+    /// Sender output fed straight into a reassembler must reproduce the message.
+    @Test func roundTripThroughSenderServerDirection() throws {
+        let payload = Data((0..<100).map(UInt8.init))
+        var sender = TransferSender<ServerMessage>(inlineLimit: 16, chunkSize: 8)
+        var reassembler = TransferReassembler<ServerMessage>()
+        var results: [ServerMessage] = []
+        for frame in try sender.frames(for: .subscribed(docId: "d", seq: 3, snapshot: .inline(payload))) {
+            if let message = try reassembler.consume(frame) { results.append(message) }
+        }
+        #expect(results == [.subscribed(docId: "d", seq: 3, snapshot: .inline(payload))])
+    }
+    @Test func roundTripThroughSenderClientDirection() throws {
+        let payload = Data(repeating: 7, count: 33)
+        var sender = TransferSender<ClientMessage>(inlineLimit: 8, chunkSize: 16)
+        var reassembler = TransferReassembler<ClientMessage>()
+        var results: [ClientMessage] = []
+        let op = ClientMessage.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: payload))
+        for frame in try sender.frames(for: op) {
+            if let message = try reassembler.consume(frame) { results.append(message) }
+        }
+        #expect(results == [op])
+    }
+    @Test func ordinaryMessagePassesThrough() throws {
+        var reassembler = TransferReassembler<ClientMessage>()
+        let message = try reassembler.consume(.text(try ClientMessage.subscribeStatus.jsonText()))
+        #expect(message == .subscribeStatus)
+    }
+    @Test func interleavedTextPassesThroughMidTransfer() throws {
+        let payload = Data(repeating: 1, count: 20)
+        var sender = TransferSender<ServerMessage>(inlineLimit: 4, chunkSize: 8)
+        var reassembler = TransferReassembler<ServerMessage>()
+        let frames = try sender.frames(for: .subscribed(docId: "d", seq: 0, snapshot: .inline(payload)))
+        _ = try reassembler.consume(frames[0])   // announce
+        _ = try reassembler.consume(frames[1])   // chunk 0
+        // A status event interleaves mid-transfer and must emerge immediately.
+        let status = ServerMessage.statusEvent(payload: StatusPayload(
+            docId: "x", kind: "docUpdated", seq: 1, subscriberCount: 1))
+        #expect(try reassembler.consume(.text(try status.jsonText())) == status)
+        _ = try reassembler.consume(frames[2])   // chunk 1
+        _ = try reassembler.consume(frames[3])   // chunk 2
+        let done = try reassembler.consume(frames[4])   // end
+        #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(payload)))
+    }
+    @Test func abortDiscardsPendingTransfer() throws {
+        var reassembler = TransferReassembler<ServerMessage>()
+        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
+        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        let aborted = try reassembler.consume(.text(try ServerMessage.transferAbort(transferId: 0, reason: "storeFailure").jsonText()))
+        #expect(aborted == nil)   // owner voided
+        // A fresh transfer with the same shape must now be accepted.
+        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        _ = try reassembler.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
+        let done = try reassembler.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
+        #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 8))))
+    }
+    @Test func zeroByteTransferCompletes() throws {
+        var reassembler = TransferReassembler<ServerMessage>()
+        let d = TransferDescriptor(transferId: 0, totalBytes: 0, chunkSize: 8)
+        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        let done = try reassembler.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
+        #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data())))
+    }
+
+    // MARK: fatal violations
+
+    private func opened(_ d: TransferDescriptor) throws -> TransferReassembler<ServerMessage> {
+        var r = TransferReassembler<ServerMessage>()
+        _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        return r
+    }
+
+    @Test func chunkWithoutTransferIsFatal() throws {
+        var r = TransferReassembler<ServerMessage>()
+        #expect(throws: TransferWireError.chunkWithoutTransfer) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data([1]))))
+        }
+    }
+    @Test func secondAnnounceWhileInFlightIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
+        var r = try opened(d)
+        let second = ServerMessage.subscribed(docId: "e", seq: 0,
+            snapshot: .transfer(TransferDescriptor(transferId: 1, totalBytes: 8, chunkSize: 8)))
+        #expect(throws: TransferWireError.transferAlreadyInFlight) {
+            _ = try r.consume(.text(try second.jsonText()))
+        }
+    }
+    @Test func nonContiguousChunkIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 20, chunkSize: 8)
+        var r = try opened(d)
+        #expect(throws: TransferWireError.nonContiguousChunk(expected: 0, got: 1)) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 1, payload: Data(count: 8))))
+        }
+    }
+    @Test func wrongChunkSizeIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 20, chunkSize: 8)
+        var r = try opened(d)
+        #expect(throws: TransferWireError.wrongChunkSize(expected: 8, got: 3)) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 3))))
+        }
+    }
+    @Test func chunkAfterCompleteIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
+        var r = try opened(d)
+        _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
+        #expect(throws: TransferWireError.unexpectedChunk) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 1, payload: Data(count: 8))))
+        }
+    }
+    @Test func endBeforeCompleteIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 20, chunkSize: 8)
+        var r = try opened(d)
+        #expect(throws: TransferWireError.endBeforeComplete) {
+            _ = try r.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
+        }
+    }
+    @Test func wrongTransferIdOnChunkAndEndIsFatal() throws {
+        let d = TransferDescriptor(transferId: 5, totalBytes: 8, chunkSize: 8)
+        var r = try opened(d)
+        #expect(throws: TransferWireError.wrongTransferId(expected: 5, got: 6)) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 6, index: 0, payload: Data(count: 8))))
+        }
+        var r2 = try opened(d)
+        _ = try r2.consume(.binary(ChunkFraming.encode(transferId: 5, index: 0, payload: Data(count: 8))))
+        #expect(throws: TransferWireError.wrongTransferId(expected: 5, got: 9)) {
+            _ = try r2.consume(.text(try ServerMessage.transferEnd(transferId: 9).jsonText()))
+        }
+    }
+    @Test func controlWithoutTransferIsFatal() throws {
+        var r = TransferReassembler<ServerMessage>()
+        #expect(throws: TransferWireError.controlWithoutTransfer) {
+            _ = try r.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
+        }
+    }
+    @Test func forgedInconsistentDescriptorIsFatal() throws {
+        // chunkCount lies about totalBytes/chunkSize — hand-built JSON, not the safe init.
+        let json = #"{"type":"subscribed","docId":"d","seq":0,"transfer":{"transferId":0,"totalBytes":100,"chunkSize":8,"chunkCount":1}}"#
+        var r = TransferReassembler<ServerMessage>()
+        #expect(throws: TransferWireError.invalidDescriptor) {
+            _ = try r.consume(.text(json))
+        }
+    }
+    @Test func malformedJSONThrowsDecodingErrorNotTransferError() throws {
+        var r = TransferReassembler<ServerMessage>()
+        do {
+            _ = try r.consume(.text("{nope"))
+            Issue.record("expected throw")
+        } catch is TransferWireError {
+            Issue.record("malformed JSON must not be a TransferWireError")
+        } catch {
+            // any DecodingError-ish error is correct (per-message severity)
+        }
+    }
+}

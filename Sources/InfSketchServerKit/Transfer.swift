@@ -138,3 +138,79 @@ public struct TransferSender<Message: TransferCarrying>: Sendable {
         return frames
     }
 }
+
+/// Receiver-side state machine. Feed every incoming frame; complete semantic
+/// messages come out (bulk resolved to inline bytes). Throws TransferWireError
+/// for connection-fatal violations; rethrows DecodingError for malformed JSON
+/// (per-message severity — the connection survives).
+public struct TransferReassembler<Message: TransferCarrying>: Sendable {
+    private struct Pending {
+        let descriptor: TransferDescriptor
+        let owner: Message
+        var buffer: Data
+        var nextIndex: UInt32 = 0
+        var isComplete: Bool { Int(nextIndex) == descriptor.chunkCount }
+    }
+    private var pending: Pending?
+
+    public init() {}
+
+    public mutating func consume(_ frame: WireFrame) throws -> Message? {
+        switch frame {
+        case .text(let text): return try consumeText(text)
+        case .binary(let data): return try consumeBinary(data)
+        }
+    }
+
+    private mutating func consumeText(_ text: String) throws -> Message? {
+        let message = try Message(jsonText: text)
+        if let control = message.transferControl {
+            guard let current = pending else { throw TransferWireError.controlWithoutTransfer }
+            switch control {
+            case .end(let id):
+                guard id == current.descriptor.transferId else {
+                    throw TransferWireError.wrongTransferId(expected: current.descriptor.transferId, got: id)
+                }
+                guard current.isComplete else { throw TransferWireError.endBeforeComplete }
+                pending = nil
+                return current.owner.resolvingBulk(with: current.buffer)
+            case .abort(let id, _):
+                guard id == current.descriptor.transferId else {
+                    throw TransferWireError.wrongTransferId(expected: current.descriptor.transferId, got: id)
+                }
+                pending = nil   // owner voided
+                return nil
+            }
+        }
+        if let descriptor = message.openingDescriptor {
+            guard pending == nil else { throw TransferWireError.transferAlreadyInFlight }
+            guard descriptor.isSelfConsistent else { throw TransferWireError.invalidDescriptor }
+            var buffer = Data()
+            buffer.reserveCapacity(descriptor.totalBytes)
+            pending = Pending(descriptor: descriptor, owner: message, buffer: buffer)
+            return nil
+        }
+        return message   // ordinary / interleaved message passes straight through
+    }
+
+    private mutating func consumeBinary(_ data: Data) throws -> Message? {
+        let chunk = try ChunkFraming.decode(data)
+        guard var current = pending else { throw TransferWireError.chunkWithoutTransfer }
+        guard chunk.transferId == current.descriptor.transferId else {
+            throw TransferWireError.wrongTransferId(
+                expected: current.descriptor.transferId, got: chunk.transferId)
+        }
+        guard !current.isComplete else { throw TransferWireError.unexpectedChunk }
+        guard chunk.index == current.nextIndex else {
+            throw TransferWireError.nonContiguousChunk(expected: current.nextIndex, got: chunk.index)
+        }
+        let expected = current.descriptor.expectedChunkSize(at: Int(chunk.index))
+        guard chunk.payload.count == expected else {
+            throw TransferWireError.wrongChunkSize(expected: expected, got: chunk.payload.count)
+        }
+        current.buffer.append(chunk.payload)
+        current.nextIndex += 1
+        pending = current
+        return nil
+    }
+}
