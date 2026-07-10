@@ -195,22 +195,26 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
 
     private mutating func consumeBinary(_ data: Data) throws -> Message? {
         let chunk = try ChunkFraming.decode(data)
-        guard var current = pending else { throw TransferWireError.chunkWithoutTransfer }
-        guard chunk.transferId == current.descriptor.transferId else {
-            throw TransferWireError.wrongTransferId(
-                expected: current.descriptor.transferId, got: chunk.transferId)
+        // Read only the cheap value fields through the optional — never bind a
+        // second copy of `pending` (which owns the accumulated `Data` buffer).
+        // Holding a second copy across the mutation below defeats Data's
+        // uniqueness check and forces a full-buffer memcpy on every chunk.
+        guard let descriptor = pending?.descriptor, let nextIndex = pending?.nextIndex else {
+            throw TransferWireError.chunkWithoutTransfer
         }
-        guard !current.isComplete else { throw TransferWireError.unexpectedChunk }
-        guard chunk.index == current.nextIndex else {
-            throw TransferWireError.nonContiguousChunk(expected: current.nextIndex, got: chunk.index)
+        guard chunk.transferId == descriptor.transferId else {
+            throw TransferWireError.wrongTransferId(expected: descriptor.transferId, got: chunk.transferId)
         }
-        let expected = current.descriptor.expectedChunkSize(at: Int(chunk.index))
+        guard Int(nextIndex) < descriptor.chunkCount else { throw TransferWireError.unexpectedChunk }
+        guard chunk.index == nextIndex else {
+            throw TransferWireError.nonContiguousChunk(expected: nextIndex, got: chunk.index)
+        }
+        let expected = descriptor.expectedChunkSize(at: Int(chunk.index))
         guard chunk.payload.count == expected else {
             throw TransferWireError.wrongChunkSize(expected: expected, got: chunk.payload.count)
         }
-        current.buffer.append(chunk.payload)
-        current.nextIndex += 1
-        pending = current
+        pending!.buffer.append(chunk.payload)   // in-place: single live reference, no CoW copy
+        pending!.nextIndex += 1
         return nil
     }
 }

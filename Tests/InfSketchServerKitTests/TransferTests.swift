@@ -262,6 +262,21 @@ import Testing
             _ = try r.consume(.text(json))
         }
     }
+    @Test func duplicateChunkIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 20, chunkSize: 8)
+        var r = try opened(d)
+        _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
+        #expect(throws: TransferWireError.nonContiguousChunk(expected: 1, got: 0)) {
+            _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
+        }
+    }
+    @Test func abortWithWrongIdIsFatal() throws {
+        let d = TransferDescriptor(transferId: 5, totalBytes: 8, chunkSize: 8)
+        var r = try opened(d)
+        #expect(throws: TransferWireError.wrongTransferId(expected: 5, got: 9)) {
+            _ = try r.consume(.text(try ServerMessage.transferAbort(transferId: 9, reason: "oops").jsonText()))
+        }
+    }
     @Test func malformedJSONThrowsDecodingErrorNotTransferError() throws {
         var r = TransferReassembler<ServerMessage>()
         do {
