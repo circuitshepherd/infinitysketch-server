@@ -62,3 +62,60 @@ import Testing
         }
     }
 }
+
+@Suite struct TransferSenderTests {
+    @Test func smallPayloadStaysSingleTextFrame() throws {
+        var sender = TransferSender<ServerMessage>(inlineLimit: 16, chunkSize: 8)
+        let frames = try sender.frames(for: .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 16))))
+        #expect(frames.count == 1)
+        guard case .text(let json) = frames[0] else { Issue.record("expected text"); return }
+        #expect(try ServerMessage(jsonText: json)
+            == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 16))))
+    }
+    @Test func bulklessMessageStaysSingleTextFrame() throws {
+        var sender = TransferSender<ServerMessage>(inlineLimit: 0, chunkSize: 8)
+        let frames = try sender.frames(for: .helloAck(protocolVersion: 1))
+        #expect(frames.count == 1)
+    }
+    @Test func largePayloadExpandsToDescriptorChunksEnd() throws {
+        let payload = Data((0..<20).map(UInt8.init))   // 20 bytes, chunkSize 8 → 3 chunks (8, 8, 4)
+        var sender = TransferSender<ServerMessage>(inlineLimit: 16, chunkSize: 8)
+        let frames = try sender.frames(for: .subscribed(docId: "d", seq: 5, snapshot: .inline(payload)))
+        #expect(frames.count == 5)   // announce + 3 chunks + end
+
+        guard case .text(let announceJSON) = frames[0],
+              case .subscribed(_, 5, .transfer(let d)) = try ServerMessage(jsonText: announceJSON)
+        else { Issue.record("expected descriptor announce"); return }
+        #expect(d.totalBytes == 20)
+        #expect(d.chunkSize == 8)
+        #expect(d.chunkCount == 3)
+
+        var reassembled = Data()
+        for (offset, frame) in frames[1...3].enumerated() {
+            guard case .binary(let chunkFrame) = frame else { Issue.record("expected binary"); return }
+            let chunk = try ChunkFraming.decode(chunkFrame)
+            #expect(chunk.transferId == d.transferId)
+            #expect(chunk.index == UInt32(offset))
+            reassembled.append(chunk.payload)
+        }
+        #expect(reassembled == payload)
+
+        guard case .text(let endJSON) = frames[4] else { Issue.record("expected end"); return }
+        #expect(try ServerMessage(jsonText: endJSON) == .transferEnd(transferId: d.transferId))
+    }
+    @Test func transferIdsIncrementPerTransfer() throws {
+        var sender = TransferSender<ClientMessage>(inlineLimit: 0, chunkSize: 8)
+        func announcedId(_ frames: [WireFrame]) throws -> UInt32? {
+            guard case .text(let json) = frames.first,
+                  case .op(_, _, let payload) = try ClientMessage(jsonText: json),
+                  case .transfer(let d) = payload.bulk else { return nil }
+            return d.transferId
+        }
+        let first = try sender.frames(for: .op(
+            docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: Data([1]))))
+        let second = try sender.frames(for: .op(
+            docId: "d", opId: "o2", payload: OpPayload(type: "fullDoc", data: Data([2]))))
+        #expect(try announcedId(first) == 0)
+        #expect(try announcedId(second) == 1)
+    }
+}

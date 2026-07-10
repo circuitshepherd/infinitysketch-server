@@ -283,3 +283,84 @@ public extension ServerMessage {
         String(decoding: try JSONEncoder().encode(self), as: UTF8.self)
     }
 }
+
+extension ClientMessage: TransferCarrying {
+    public var bulkBytes: Data? {
+        if case .op(_, _, let payload) = self { return payload.bulk.inlineData }
+        return nil
+    }
+    public func replacingBulk(with descriptor: TransferDescriptor) -> ClientMessage {
+        guard case .op(let docId, let opId, let payload) = self else { return self }
+        return .op(docId: docId, opId: opId,
+                   payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+    }
+    public var openingDescriptor: TransferDescriptor? {
+        if case .op(_, _, let payload) = self, case .transfer(let d) = payload.bulk { return d }
+        return nil
+    }
+    public func resolvingBulk(with bytes: Data) -> ClientMessage {
+        guard case .op(let docId, let opId, let payload) = self else { return self }
+        return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes))
+    }
+    public var transferControl: TransferControl? {
+        switch self {
+        case .transferEnd(let id): return .end(id)
+        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
+        default: return nil
+        }
+    }
+    public static func makeTransferEnd(transferId: UInt32) -> ClientMessage {
+        .transferEnd(transferId: transferId)
+    }
+}
+
+extension ServerMessage: TransferCarrying {
+    public var bulkBytes: Data? {
+        switch self {
+        case .subscribed(_, _, let snapshot): return snapshot.inlineData
+        case .event(_, _, _, _, let payload): return payload.bulk.inlineData
+        default: return nil
+        }
+    }
+    public func replacingBulk(with descriptor: TransferDescriptor) -> ServerMessage {
+        switch self {
+        case .subscribed(let docId, let seq, _):
+            return .subscribed(docId: docId, seq: seq, snapshot: .transfer(descriptor))
+        case .event(let docId, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
+                          payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+        default:
+            return self
+        }
+    }
+    public var openingDescriptor: TransferDescriptor? {
+        switch self {
+        case .subscribed(_, _, .transfer(let d)): return d
+        case .event(_, _, _, _, let payload):
+            if case .transfer(let d) = payload.bulk { return d }
+            return nil
+        default: return nil
+        }
+    }
+    public func resolvingBulk(with bytes: Data) -> ServerMessage {
+        switch self {
+        case .subscribed(let docId, let seq, _):
+            return .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes))
+        case .event(let docId, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
+                          payload: OpPayload(type: payload.type, data: bytes))
+        default:
+            return self
+        }
+    }
+    public var transferControl: TransferControl? {
+        switch self {
+        case .transferEnd(let id): return .end(id)
+        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
+        default: return nil
+        }
+    }
+    public static func makeTransferEnd(transferId: UInt32) -> ServerMessage {
+        .transferEnd(transferId: transferId)
+    }
+}

@@ -82,3 +82,59 @@ public enum ChunkFraming {
         return (transferId, index, frame.dropFirst(headerSize))
     }
 }
+
+/// end/abort control extracted from a wire message.
+public enum TransferControl: Equatable, Sendable {
+    case end(UInt32)
+    case abort(UInt32, reason: String)
+}
+
+/// A wire message that can carry one bulk byte field. Adopted by both
+/// ClientMessage and ServerMessage so the sender/reassembler work for
+/// either direction of the socket.
+public protocol TransferCarrying: Sendable {
+    /// Inline bulk bytes the sender may externalize into a chunked transfer;
+    /// nil when the message has no bulk field (or it is already a descriptor).
+    var bulkBytes: Data? { get }
+    func replacingBulk(with descriptor: TransferDescriptor) -> Self
+    /// Descriptor when this received message announces a transfer.
+    var openingDescriptor: TransferDescriptor? { get }
+    func resolvingBulk(with bytes: Data) -> Self
+    var transferControl: TransferControl? { get }
+    static func makeTransferEnd(transferId: UInt32) -> Self
+    init(jsonText: String) throws
+    func jsonText() throws -> String
+}
+
+/// Sender-side expansion: one semantic message → one or more wire frames.
+/// Owned by a single serialized writer (an actor); not thread-safe on its own.
+public struct TransferSender<Message: TransferCarrying>: Sendable {
+    public let inlineLimit: Int
+    public let chunkSize: Int
+    private var nextTransferId: UInt32 = 0
+
+    public init(inlineLimit: Int, chunkSize: Int) {
+        self.inlineLimit = inlineLimit
+        self.chunkSize = chunkSize
+    }
+
+    public mutating func frames(for message: Message) throws -> [WireFrame] {
+        guard let bytes = message.bulkBytes, bytes.count > inlineLimit else {
+            return [.text(try message.jsonText())]
+        }
+        let descriptor = TransferDescriptor(
+            transferId: nextTransferId, totalBytes: bytes.count, chunkSize: chunkSize)
+        nextTransferId &+= 1
+        var frames: [WireFrame] = []
+        frames.reserveCapacity(descriptor.chunkCount + 2)
+        frames.append(.text(try message.replacingBulk(with: descriptor).jsonText()))
+        for index in 0..<descriptor.chunkCount {
+            let start = bytes.startIndex + index * chunkSize
+            let end = Swift.min(start + chunkSize, bytes.endIndex)
+            frames.append(.binary(ChunkFraming.encode(
+                transferId: descriptor.transferId, index: UInt32(index), payload: bytes[start..<end])))
+        }
+        frames.append(.text(try Message.makeTransferEnd(transferId: descriptor.transferId).jsonText()))
+        return frames
+    }
+}
