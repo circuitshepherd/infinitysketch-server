@@ -1,4 +1,5 @@
 import Foundation
+import InfSketchWire
 
 public struct SessionConfig: Sendable {
     public var gracePeriod: Duration

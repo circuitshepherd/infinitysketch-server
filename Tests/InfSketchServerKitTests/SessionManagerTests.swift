@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import InfSketchServerKit
+import InfSketchWire
 
 private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> SessionManager {
     let dir = FileManager.default.temporaryDirectory

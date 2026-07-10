@@ -2,6 +2,7 @@
 // its bytes as fullDoc ops, so the web overview visibly ticks (seq, subscribers).
 import Foundation
 import InfSketchServerKit
+import InfSketchWire
 
 #if !canImport(Darwin)
 print("infsketch-demo currently requires macOS (URLSessionWebSocketTask).")

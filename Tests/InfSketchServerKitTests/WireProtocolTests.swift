@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import InfSketchServerKit
+import InfSketchWire
 
 @Suite struct WireProtocolTests {
     @Test func clientMessagesRoundTrip() throws {

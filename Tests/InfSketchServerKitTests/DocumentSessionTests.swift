@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import InfSketchServerKit
+import InfSketchWire
 
 private func makeSession(bufferLimit: Int = 256) throws -> (DocumentSession, DirectoryDocumentStore) {
     let dir = FileManager.default.temporaryDirectory

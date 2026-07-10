@@ -4,6 +4,7 @@ import Testing
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import InfSketchWire
 
 private func startServer(config: SessionConfig = SessionConfig()) async throws -> (InfSketchServer, UInt16, Task<Void, any Error>) {
     let dir = FileManager.default.temporaryDirectory

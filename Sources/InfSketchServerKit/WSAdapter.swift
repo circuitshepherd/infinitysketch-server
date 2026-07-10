@@ -1,5 +1,6 @@
 import Foundation
 import FlyingFox
+import InfSketchWire
 
 /// Bridges one WebSocket connection to the SessionManager.
 /// FlyingFox calls makeMessages once per connection.

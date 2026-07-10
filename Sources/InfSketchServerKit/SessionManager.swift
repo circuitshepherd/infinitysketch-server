@@ -1,4 +1,5 @@
 import Foundation
+import InfSketchWire
 
 public struct LiveDocInfo: Sendable, Equatable, Codable {
     public var seq: Int

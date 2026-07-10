@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import InfSketchServerKit
 import FlyingFox
+import InfSketchWire
 
 /// Drives WSAdapter.makeMessages directly with hand-fed frames — no sockets.
 private struct Harness {
