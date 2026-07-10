@@ -5,14 +5,14 @@ import Testing
 import FoundationNetworking
 #endif
 
-private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, any Error>) {
+private func startServer(config: SessionConfig = SessionConfig()) async throws -> (InfSketchServer, UInt16, Task<Void, any Error>) {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("integration-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let store = DirectoryDocumentStore(directory: dir)
     try store.save(docId: "sample", bytes: Fixtures.docBytes)
 
-    let server = InfSketchServer(port: 0, docsDirectory: dir)
+    let server = InfSketchServer(port: 0, docsDirectory: dir, config: config)
     let task = Task { try await server.run() }
     try await server.waitUntilListening()
     let port = try #require(await server.listeningPort)
@@ -98,6 +98,55 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
         let payload = OpPayload(type: "fullDoc", data: Fixtures.docBytes)
         try await send(.op(docId: "sample", opId: "it-1", payload: payload))
         #expect(try await receive() == .event(docId: "sample", seq: 1, kind: "op", opId: "it-1", payload: payload))
+
+        ws.cancel(with: .normalClosure, reason: nil)
+        await server.stop()
+    }
+
+    @Test func chunkedTransferEndToEnd() async throws {
+        // Tiny inline limit forces chunking for a ~100 KB doc; chunk fits
+        // far under URLSession's default 1 MiB message cap.
+        let (server, port, task) = try await startServer(
+            config: SessionConfig(inlineLimit: 1024, chunkSize: 4096))
+        defer { task.cancel() }
+
+        let bigBytes = Data((0..<100_000).map { UInt8($0 % 256) })
+
+        let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        ws.resume()
+
+        var sender = TransferSender<ClientMessage>(inlineLimit: 1024, chunkSize: 4096)
+        var reassembler = TransferReassembler<ServerMessage>()
+        func send(_ m: ClientMessage) async throws {
+            for frame in try sender.frames(for: m) {
+                switch frame {
+                case .text(let text): try await ws.send(.string(text))
+                case .binary(let data): try await ws.send(.data(data))
+                }
+            }
+        }
+        func receive() async throws -> ServerMessage {
+            while true {
+                let wire: WireFrame
+                switch try await ws.receive() {
+                case .string(let text): wire = .text(text)
+                case .data(let data): wire = .binary(data)
+                @unknown default: continue
+                }
+                if let m = try reassembler.consume(wire) { return m }
+            }
+        }
+
+        try await send(.hello(protocolVersion: 1, capabilities: []))
+        #expect(try await receive() == .helloAck(protocolVersion: 1))
+        try await send(.subscribe(docId: "sample", fromSeq: nil))
+        #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
+
+        // Push a ~100 KB op up (chunked), get the echo back (chunked): both
+        // directions cross real sockets with messages ≤ 4 KB + header.
+        let payload = OpPayload(type: "fullDoc", data: bigBytes)
+        try await send(.op(docId: "sample", opId: "chunky-1", payload: payload))
+        #expect(try await receive() == .event(docId: "sample", seq: 1, kind: "op", opId: "chunky-1", payload: payload))
 
         ws.cancel(with: .normalClosure, reason: nil)
         await server.stop()

@@ -6,6 +6,9 @@ intended to run on macOS, Linux, and Windows.
 > **Status: v0 walking skeleton.** The server hosts WebSocket document sessions
 > (JSON wire protocol, seq-ordered broadcast), a directory-backed document store,
 > a REST listing API with thumbnails, and a live web overview page at `/`.
+> Documents of any size sync over the single WebSocket channel: bulk payloads
+> above an inline threshold travel as chunked binary messages (see the
+> 2026-07-10 WS chunked transfer design in the InfinitySketch app repo).
 > Protocol design: the transport spec in the InfinitySketch app repo
 > (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
 > Not yet here: MCP endpoint, resume/backlog replay, render delegation, auth
