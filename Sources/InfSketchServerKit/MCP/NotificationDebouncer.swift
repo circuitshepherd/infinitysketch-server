@@ -1,5 +1,12 @@
 import Foundation
 
+/// Debounces MCP `notifications/resources/updated` per (session, doc) pair.
+///
+/// Pure state machine — the caller owns clocks and timers; this type just
+/// decides. A `.notify` command means: send the notification to each listed
+/// session NOW and start a per-(session, doc) cooldown timer of `minInterval`;
+/// when that timer fires, call `cooldownEnded`, which returns `.notify` iff an
+/// update arrived during the cooldown (trailing edge).
 struct NotificationDebouncer {
     static let minInterval: Duration = .milliseconds(500)
 
@@ -8,82 +15,82 @@ struct NotificationDebouncer {
         case none
     }
 
-    private struct State: Equatable {
-        var cooling: Bool = false
-        var dirty: Bool = false
-    }
+    /// docId → sessions subscribed to that doc. Keys with no sessions are removed.
+    private(set) var subscriptions: [String: Set<String>] = [:]
 
-    // subscriptions: maps docId -> Set<session>
-    private var subscriptions: [String: Set<String>] = [:]
-
-    // cooldownState: maps (session, docId) -> State
-    private var cooldownState: [String: [String: State]] = [:]
+    /// session → (docId → dirty). An entry exists iff that (session, doc) pair
+    /// is currently cooling; `true` means an update arrived during the cooldown,
+    /// so a trailing notify is owed at `cooldownEnded`. Entries are deleted —
+    /// never reset — when the pair stops cooling or unsubscribes, so storage
+    /// stays bounded by the live cooldowns.
+    private(set) var cooldownState: [String: [String: Bool]] = [:]
 
     mutating func subscribe(session: String, docId: String) {
-        if subscriptions[docId] == nil {
-            subscriptions[docId] = []
-        }
-        subscriptions[docId]?.insert(session)
+        subscriptions[docId, default: []].insert(session)
     }
 
     mutating func unsubscribe(session: String, docId: String) {
         subscriptions[docId]?.remove(session)
+        if subscriptions[docId]?.isEmpty == true {
+            subscriptions[docId] = nil
+        }
+        clearCooldown(session: session, docId: docId)
     }
 
     mutating func unsubscribeAll(session: String) {
-        for docId in subscriptions.keys {
+        for docId in Array(subscriptions.keys) {
             subscriptions[docId]?.remove(session)
+            if subscriptions[docId]?.isEmpty == true {
+                subscriptions[docId] = nil
+            }
         }
+        cooldownState[session] = nil
     }
 
     mutating func docUpdated(docId: String) -> Command {
-        let subscribedSessions = subscriptions[docId] ?? []
-        guard !subscribedSessions.isEmpty else {
+        guard let sessions = subscriptions[docId], !sessions.isEmpty else {
             return .none
         }
 
         var sessionsToNotify: [String] = []
-
-        for session in subscribedSessions {
-            let state = cooldownState[session]?[docId] ?? State()
-
-            if state.cooling {
-                // Mark as dirty but don't notify
-                if cooldownState[session] == nil {
-                    cooldownState[session] = [:]
-                }
-                cooldownState[session]?[docId] = State(cooling: true, dirty: true)
+        for session in sessions {
+            if cooldownState[session]?[docId] != nil {
+                // Cooling: mark dirty so the trailing edge notifies.
+                cooldownState[session]?[docId] = true
             } else {
-                // Not cooling, so notify and start cooling
+                // Not cooling: notify now and start a cooldown.
+                cooldownState[session, default: [:]][docId] = false
                 sessionsToNotify.append(session)
-                if cooldownState[session] == nil {
-                    cooldownState[session] = [:]
-                }
-                cooldownState[session]?[docId] = State(cooling: true, dirty: false)
             }
         }
 
-        if sessionsToNotify.isEmpty {
-            return .none
-        }
-
-        let sortedSessions = sessionsToNotify.sorted()
-        return .notify(sessions: sortedSessions)
+        return sessionsToNotify.isEmpty ? .none : .notify(sessions: sessionsToNotify.sorted())
     }
 
     mutating func cooldownEnded(session: String, docId: String) -> Command {
-        guard let state = cooldownState[session]?[docId] else {
+        guard let dirty = cooldownState[session]?[docId] else {
+            return .none
+        }
+        guard subscriptions[docId]?.contains(session) == true else {
+            // The pair unsubscribed mid-cooldown; forget the stale entry.
+            clearCooldown(session: session, docId: docId)
             return .none
         }
 
-        if state.dirty {
-            // Trailing notify: clear dirty, mark cooling again, return notify
-            cooldownState[session]?[docId] = State(cooling: true, dirty: false)
+        if dirty {
+            // Trailing notify: clear dirty and restart the cooldown.
+            cooldownState[session]?[docId] = false
             return .notify(sessions: [session])
-        } else {
-            // Quiet cooldown: just clear cooling state
-            cooldownState[session]?[docId] = State(cooling: false, dirty: false)
-            return .none
+        }
+        // Quiet cooldown: the pair is no longer cooling.
+        clearCooldown(session: session, docId: docId)
+        return .none
+    }
+
+    private mutating func clearCooldown(session: String, docId: String) {
+        cooldownState[session]?[docId] = nil
+        if cooldownState[session]?.isEmpty == true {
+            cooldownState[session] = nil
         }
     }
 }
