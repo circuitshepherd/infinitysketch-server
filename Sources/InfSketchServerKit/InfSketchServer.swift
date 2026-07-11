@@ -15,7 +15,7 @@ public final class InfSketchServer: Sendable {
     private let store: DirectoryDocumentStore
     private let http: HTTPServer
     private let config: SessionConfig
-    private let mcpAdapter: MCPAdapter
+    let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
         let store = DirectoryDocumentStore(directory: docsDirectory)
@@ -24,7 +24,10 @@ public final class InfSketchServer: Sendable {
         self.manager = manager
         self.http = HTTPServer(port: port)
         self.config = config
-        self.mcpAdapter = MCPAdapter(manager: manager)
+        self.mcpAdapter = MCPAdapter(
+            manager: manager,
+            idleTimeout: config.mcpSessionIdleTimeout,
+            cleanupInterval: config.mcpSessionCleanupInterval)
     }
 
     /// Configures routes and serves until stopped.

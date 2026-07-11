@@ -34,6 +34,15 @@ public actor MCPAdapter {
     private struct Session {
         let server: MCP.Server
         let transport: StatefulHTTPServerTransport
+        /// Monotonic last-request time, for idle reaping. The SDK's own
+        /// client NEVER sends `DELETE /mcp` (verified in 0.12.1 — its
+        /// `disconnect()` only invalidates the local URLSession), so idle
+        /// reaping is the ORDINARY teardown path for MCP sessions, not a
+        /// safety net. Without it every connect/disconnect cycle leaks a
+        /// `Server` + receive-loop Task + transport, and each write to a doc
+        /// the dead session subscribed grows the transport's unbounded
+        /// storedEvents/SSE buffers forever.
+        var lastAccessedAt: ContinuousClock.Instant
     }
 
     private struct CooldownKey: Hashable {
@@ -42,6 +51,8 @@ public actor MCPAdapter {
     }
 
     private let manager: SessionManager
+    private let idleTimeout: Duration
+    private let cleanupInterval: Duration
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -50,35 +61,61 @@ public actor MCPAdapter {
     /// but `endSession` cancels them proactively anyway to avoid needless work.
     private var cooldownTasks: [CooldownKey: Task<Void, Never>] = [:]
     private var pumpTask: Task<Void, Never>?
+    private var cleanupTask: Task<Void, Never>?
     private var statusToken: UUID?
+    /// Set (permanently) by `shutdown()`. Checked by the pump after it
+    /// acquires its status subscription, closing the narrow race where
+    /// `shutdown()` runs while the pump is still suspended in
+    /// `subscribeStatus()` — without this the subscription (and the pump's
+    /// for-await) would survive shutdown.
+    private var isShutdown = false
 
-    public init(manager: SessionManager) {
+    /// Test hook: the ids of the currently registered MCP sessions.
+    var activeSessionIDs: [String] { Array(sessions.keys) }
+
+    /// Test hook: the debouncer's live docId → sessions map (value copy).
+    var debouncerSubscriptions: [String: Set<String>] { debouncer.subscriptions }
+
+    public init(
+        manager: SessionManager,
+        idleTimeout: Duration = .seconds(3600),
+        cleanupInterval: Duration = .seconds(60)
+    ) {
         self.manager = manager
+        self.idleTimeout = idleTimeout
+        self.cleanupInterval = cleanupInterval
     }
 
-    /// Starts the notification pump on first use. (An actor can't spawn a
-    /// `Task` capturing `self` from inside its own `init` — Swift 6 treats
-    /// that as escaping a not-yet-fully-initialized `self` — so this is
-    /// called lazily, from `handle(_:)`, instead. This is still eager
-    /// enough for correctness: no session can `resources/subscribe` before
-    /// at least one HTTP request has gone through `handle(_:)`, so the pump
-    /// is always running by the time there's anyone to notify.)
-    private func ensurePumpStarted() {
-        guard pumpTask == nil else { return }
+    /// Starts the notification pump and the idle-session cleanup loop on
+    /// first use. (An actor can't spawn a `Task` capturing `self` from
+    /// inside its own `init` — Swift 6 treats that as escaping a
+    /// not-yet-fully-initialized `self` — so this is called lazily, from
+    /// `handle(_:)`, instead. This is still eager enough for correctness:
+    /// no session can exist before at least one HTTP request has gone
+    /// through `handle(_:)`, so both loops are always running by the time
+    /// there's anyone to notify or reap.)
+    private func ensureBackgroundTasksStarted() {
+        guard pumpTask == nil, !isShutdown else { return }
         pumpTask = Task { [weak self] in
             await self?.runNotificationPump()
         }
+        cleanupTask = Task { [weak self] in
+            await self?.runCleanupLoop()
+        }
     }
 
-    /// Tears down the notification pump, every live session's `Server`
-    /// receive loop, and every outstanding cooldown timer. The adapter's
-    /// session registry gave the spike's previously-unowned receive-loop
-    /// Task a natural owner (see task-1-report.md, Concern 3) — this is
-    /// where that owner discharges its duty. Called from
-    /// `InfSketchServer.stop()`.
+    /// Tears down the notification pump, the idle-cleanup loop, every live
+    /// session's `Server` receive loop, and every outstanding cooldown
+    /// timer. The adapter's session registry gave the spike's
+    /// previously-unowned receive-loop Task a natural owner (see
+    /// task-1-report.md, Concern 3) — this is where that owner discharges
+    /// its duty. Called from `InfSketchServer.stop()`.
     public func shutdown() async {
+        isShutdown = true
         pumpTask?.cancel()
         pumpTask = nil
+        cleanupTask?.cancel()
+        cleanupTask = nil
         if let statusToken {
             await manager.unsubscribeStatus(statusToken)
         }
@@ -118,6 +155,10 @@ public actor MCPAdapter {
             guard let self else { throw MCPError.internalError("MCPAdapter deallocated") }
             return try await self.handleSubscribe(uri: params.uri)
         }
+        await server.withMethodHandler(ResourceUnsubscribe.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("MCPAdapter deallocated") }
+            return try await self.handleUnsubscribe(uri: params.uri)
+        }
 
         return server
     }
@@ -129,17 +170,19 @@ public actor MCPAdapter {
     /// ([SPIKE-PIN-1]): a request carrying a known `Mcp-Session-Id` forwards
     /// to that session's transport (and, on a successful DELETE, ends the
     /// session); an unrecognized session id 404s; anything else must be a
-    /// bare `initialize` POST, which creates a fresh session — torn down
-    /// immediately if the transport itself rejects it as not actually an
-    /// initialize request.
+    /// bare `initialize` POST (pre-checked, like the reference, BEFORE any
+    /// session is allocated), which creates a fresh session — rolled back
+    /// if the transport's validation pipeline still rejects it.
     public func handle(_ request: MCP.HTTPRequest) async -> MCP.HTTPResponse {
-        ensurePumpStarted()
+        ensureBackgroundTasksStarted()
         let headerSessionID = request.header(HTTPHeaderName.sessionID)
 
         if let headerSessionID {
-            guard let session = sessions[headerSessionID] else {
+            guard var session = sessions[headerSessionID] else {
                 return .error(statusCode: 404, .invalidRequest("Not Found: Session not found or expired"))
             }
+            session.lastAccessedAt = .now
+            sessions[headerSessionID] = session
             let response = await session.transport.handleRequest(request)
             if request.method.uppercased() == "DELETE" && response.statusCode == 200 {
                 await endSession(headerSessionID)
@@ -147,7 +190,14 @@ public actor MCPAdapter {
             return response
         }
 
-        guard request.method.uppercased() == "POST" else {
+        // No session header: only a bare `initialize` POST may proceed.
+        // Pre-check the body BEFORE allocating anything (the SDK reference
+        // does the same via JSONRPCMessageKind.isInitializeRequest — that
+        // type is package-scoped, so this is a minimal local equivalent),
+        // so junk POSTs can't churn Server actors + receive-loop Tasks.
+        guard request.method.uppercased() == "POST",
+              Self.isInitializeRequest(request.body)
+        else {
             return .error(
                 statusCode: 400,
                 .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header"))
@@ -158,16 +208,28 @@ public actor MCPAdapter {
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: newSessionID))
         let server = await makeServer()
         try? await server.start(transport: transport)
-        sessions[newSessionID] = Session(server: server, transport: transport)
+        sessions[newSessionID] = Session(server: server, transport: transport, lastAccessedAt: .now)
 
         let response = await transport.handleRequest(request)
         if case .error = response {
-            // Not actually an initialize request (or it failed validation):
-            // the transport rejected it, so the session never really lived.
+            // The transport's validation pipeline rejected the initialize
+            // (bad Accept header etc.): the session never really lived.
             sessions.removeValue(forKey: newSessionID)
             await server.stop()
         }
         return response
+    }
+
+    /// True iff `body` is a JSON-RPC `initialize` *request* (has an id).
+    /// Linux-safe local stand-in for the SDK's package-scoped
+    /// `JSONRPCMessageKind.isInitializeRequest`.
+    private static func isInitializeRequest(_ body: Data?) -> Bool {
+        guard let body,
+              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              json["method"] as? String == "initialize",
+              let id = json["id"], !(id is NSNull)
+        else { return false }
+        return true
     }
 
     /// Ends a session: stops its `Server`'s receive loop, disconnects the
@@ -266,6 +328,42 @@ public actor MCPAdapter {
         return Empty()
     }
 
+    /// The mirror of `handleSubscribe`. With idle reaping being the only
+    /// other client-reachable stop (the SDK client never sends DELETE),
+    /// this is how a client stops `resources/updated` for one doc without
+    /// ending its whole session. No known-doc validation — unsubscribing a
+    /// doc you never subscribed (or that no longer exists) is a benign no-op.
+    private func handleUnsubscribe(uri: String) async throws -> ResourceUnsubscribe.Result {
+        guard case .docSummary(let docId) = ResourceURI(uri) else {
+            throw MCPError.invalidParams("Can only unsubscribe from a document resource, got: \(uri)")
+        }
+        guard let sessionID = Server.currentHandlerContext?.httpContext?.header(HTTPHeaderName.sessionID) else {
+            throw MCPError.internalError("Missing session id on unsubscribe request")
+        }
+        debouncer.unsubscribe(session: sessionID, docId: docId)
+        cooldownTasks.removeValue(forKey: CooldownKey(session: sessionID, docId: docId))?.cancel()
+        return Empty()
+    }
+
+    // MARK: - Idle-session reaping
+
+    /// Periodic sweep reaping sessions idle past `idleTimeout`, adapted
+    /// from the SDK reference's `HTTPApp.sessionCleanupLoop`. This is the
+    /// ORDINARY teardown path (see `Session.lastAccessedAt`): the SDK
+    /// client never sends DELETE, so without this every connect/disconnect
+    /// cycle would leak the session permanently.
+    private func runCleanupLoop() async {
+        while !Task.isCancelled && !isShutdown {
+            try? await Task.sleep(for: cleanupInterval)
+            if Task.isCancelled || isShutdown { break }
+            let now = ContinuousClock.now
+            let expired = sessions.filter { now - $0.value.lastAccessedAt > idleTimeout }.map(\.key)
+            for sessionID in expired {
+                await endSession(sessionID)
+            }
+        }
+    }
+
     // MARK: - Notification pump
 
     /// One Task, for the adapter's whole lifetime, consuming
@@ -275,6 +373,15 @@ public actor MCPAdapter {
     private func runNotificationPump() async {
         let (events, token) = await manager.subscribeStatus()
         statusToken = token
+        // shutdown() may have run while we were suspended in
+        // subscribeStatus() above (before statusToken was assigned) — its
+        // `if let statusToken` then saw nil and could not unsubscribe. Do
+        // it ourselves so the subscription never outlives shutdown.
+        if isShutdown {
+            statusToken = nil
+            await manager.unsubscribeStatus(token)
+            return
+        }
         for await message in events {
             guard case .statusEvent(let payload) = message, payload.kind == "docUpdated" else { continue }
             await apply(debouncer.docUpdated(docId: payload.docId), docId: payload.docId)

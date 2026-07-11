@@ -10,16 +10,26 @@ public struct SessionConfig: Sendable {
     /// Payload bytes per binary chunk message. Header + payload stays under
     /// URLSessionWebSocketTask's 1 MiB default receive cap.
     public var chunkSize: Int
+    /// MCP sessions idle longer than this are reaped (the SDK's own client
+    /// never sends `DELETE /mcp`, so idle reaping is the ORDINARY teardown
+    /// path for MCP sessions, not a safety net — see MCPAdapter).
+    public var mcpSessionIdleTimeout: Duration
+    /// How often the MCP adapter sweeps for idle sessions.
+    public var mcpSessionCleanupInterval: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
         inlineLimit: Int = 256 * 1024,
-        chunkSize: Int = 512 * 1024
+        chunkSize: Int = 512 * 1024,
+        mcpSessionIdleTimeout: Duration = .seconds(3600),
+        mcpSessionCleanupInterval: Duration = .seconds(60)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
         self.inlineLimit = inlineLimit
         self.chunkSize = chunkSize
+        self.mcpSessionIdleTimeout = mcpSessionIdleTimeout
+        self.mcpSessionCleanupInterval = mcpSessionCleanupInterval
     }
 }
 
