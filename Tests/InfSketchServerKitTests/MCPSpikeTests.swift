@@ -1,10 +1,13 @@
+// macOS-only: the SDK's HTTPClientTransport does not support SSE on Linux
+// (documented in its source), so its Client cannot complete initialize against
+// StatefulHTTPServerTransport there; the server-side mount itself is
+// Linux-proven — see task-1-report.md (gate resolution: Josef, 2026-07-11).
+#if !os(Linux)
+
 import Foundation
 import Testing
 @testable import InfSketchServerKit
 import MCP
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 /// Spike (Task 1, mcp_endpoint branch): proves the official MCP swift-sdk
 /// composes with our FlyingFox server. Starts a real `InfSketchServer` on a
@@ -49,3 +52,5 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
         await server.stop()
     }
 }
+
+#endif  // !os(Linux)
