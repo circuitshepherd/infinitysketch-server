@@ -53,7 +53,7 @@ public final class InfSketchServer: Sendable {
         let store = self.store
         let manager = self.manager
 
-        await http.appendRoute("GET /api/docs") { _ in
+        await http.appendRoute("GET,HEAD /api/docs") { request in
             let live = await manager.liveInfo()
             let summaries = (try store.list())
                 .sorted { $0.docId < $1.docId }
@@ -68,32 +68,34 @@ public final class InfSketchServer: Sendable {
                 }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            return HTTPResponse(
+            return self.headAware(request, HTTPResponse(
                 statusCode: .ok,
                 headers: [.contentType: "application/json"],
-                body: try encoder.encode(summaries))
+                body: try encoder.encode(summaries)))
         }
 
-        await http.appendRoute("GET /api/docs/*") { request in
+        await http.appendRoute("GET,HEAD /api/docs/*") { request in
             // Path shape: /api/docs/<id>/frame
             let parts = request.path.split(separator: "/").map(String.init)
             guard parts.count == 4, parts[0] == "api", parts[1] == "docs", parts[3] == "frame" else {
                 return HTTPResponse(statusCode: .notFound)
             }
 
-            // Live frame from the session cache, when present. The path segment
-            // arrives percent-encoded (the pages build URLs with
-            // encodeURIComponent); session docIds are the decoded names.
-            let decodedId = parts[2].removingPercentEncoding ?? parts[2]
-            if let frame = await manager.latestFrame(docId: decodedId) {
-                return HTTPResponse(
+            // FlyingFox hands the route an already-decoded path segment (it
+            // decodes the request target once before routing); decoding it
+            // again here would double-decode names containing a literal
+            // "%" (e.g. "50%off" round-trips through the wire as
+            // "50%25off" and arrives at `parts[2]` as "50%off" already).
+            if let frame = await manager.latestFrame(docId: parts[2]) {
+                return self.headAware(request, HTTPResponse(
                     statusCode: .ok,
                     headers: [
                         .contentType: "image/png",
+                        .cacheControl: "no-store",
                         HTTPHeader("X-Frame-Stale"): "false",
                         HTTPHeader("X-Frame-Seq"): "\(frame.seq)",
                     ],
-                    body: frame.png)
+                    body: frame.png))
             }
 
             guard let bytes = try? store.load(docId: parts[2]),
@@ -101,35 +103,42 @@ public final class InfSketchServer: Sendable {
             else {
                 return HTTPResponse(statusCode: .notFound)
             }
-            return HTTPResponse(
+            return self.headAware(request, HTTPResponse(
                 statusCode: .ok,
                 headers: [
                     .contentType: "image/png",
+                    .cacheControl: "no-store",
                     HTTPHeader("X-Frame-Stale"): "true",
                 ],
-                body: png)
+                body: png))
         }
 
-        await http.appendRoute("GET /doc/*") { request in
+        await http.appendRoute("GET,HEAD /doc/*") { request in
             let parts = request.path.split(separator: "/").map(String.init)
-            guard parts.count == 2, parts[0] == "doc",
-                  let docId = parts[1].removingPercentEncoding
-            else {
+            guard parts.count == 2, parts[0] == "doc" else {
                 return HTTPResponse(statusCode: .notFound)
             }
-            return HTTPResponse(
+            // See the /api/docs/* handler above: parts[1] is already decoded.
+            let docId = parts[1]
+            return self.headAware(request, HTTPResponse(
                 statusCode: .ok,
                 headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.docHTML(docId: docId).utf8))
+                body: Data(WebUI.docHTML(docId: docId).utf8)))
         }
 
         await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))
 
-        await http.appendRoute("GET /") { _ in
-            HTTPResponse(
+        await http.appendRoute("GET,HEAD /") { request in
+            self.headAware(request, HTTPResponse(
                 statusCode: .ok,
                 headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.indexHTML.utf8))
+                body: Data(WebUI.indexHTML.utf8)))
         }
+    }
+
+    // HTTP: HEAD gets identical headers, no body.
+    private func headAware(_ request: HTTPRequest, _ response: HTTPResponse) -> HTTPResponse {
+        guard request.method == .HEAD else { return response }
+        return HTTPResponse(statusCode: response.statusCode, headers: response.headers, body: Data())
     }
 }
