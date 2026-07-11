@@ -138,6 +138,22 @@ private struct SummaryEnvelope: Decodable {
     var summary: DocJSON.DocSummary
 }
 
+/// Concatenates every `.text` content item's string. This adapter's tool
+/// results are always a single text item, but staying robust to more is free.
+private func toolResultText(_ content: [Tool.Content]) -> String {
+    content.compactMap { item -> String? in
+        if case .text(let text, _, _) = item { return text }
+        return nil
+    }.joined()
+}
+
+/// Tool results that report success are shaped "<verb> <id> at seq <n>" —
+/// this pulls the id back out for tests that need to act on it afterward
+/// (e.g. edit/remove a just-added text).
+private func addedId(from resultText: String) -> String {
+    String(resultText.split(separator: " ").dropFirst().first ?? "")
+}
+
 /// `.serialized`: the SDK client's standalone GET SSE stream is unreliable
 /// under parallel in-process load — its internal session-id signal race,
 /// "POST stream closed without data → cancel GET" reconnection heuristic,
@@ -408,6 +424,252 @@ private struct SummaryEnvelope: Decodable {
         #expect(response.statusCode == 406)
         #expect(await server.mcpAdapter.activeSessionIDs.isEmpty)
 
+        await server.stop()
+    }
+
+    // MARK: - Tools (Task 7)
+
+    @Test func listToolsContainsAllFourWriteTools() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        let names = Set(tools.map(\.name))
+        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc"])
+        // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
+        let editText = try #require(tools.first { $0.name == "edit_text" })
+        #expect(editText.description?.contains("resets") == true)
+
+        await server.stop()
+    }
+
+    @Test func addTextSucceedsAndSummaryReflectsIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "hello agent", "x": 10, "y": 20, "pinned": false])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("added "))
+        #expect(text.contains("seq 1"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == 1)
+        #expect(envelope.summary.texts.count == 1)
+        #expect(envelope.summary.texts.first?.text == "hello agent")
+        #expect(envelope.summary.texts.first?.x == 10)
+        #expect(envelope.summary.texts.first?.y == 20)
+        #expect(envelope.summary.texts.first?.pinned == false)
+
+        await server.stop()
+    }
+
+    /// The mandatory rider (Task 3 review, N2): a numeric-looking JSON STRING
+    /// must be rejected as a tool error, never coerced (`Double("40000")`
+    /// would succeed and, for a truly non-finite string, would arm DocJSON's
+    /// x/y finite-value precondition remotely).
+    @Test func addTextRejectsNonNumericCoordinateWithoutCoercion() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "hi", "x": .string("40000"), "y": 20])
+        #expect(isError == true)
+        #expect(!toolResultText(content).isEmpty)
+
+        // No crash, and the doc is untouched (no session was ever opened).
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+        #expect(envelope.summary.texts.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func addTextUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "ghost", "text": "hi", "x": 1, "y": 2])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func editTextUnknownIdReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": "ghost-id", "text": "new"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "textNotFound")
+
+        await server.stop()
+    }
+
+    @Test func editTextUpdatesTextAndPosition() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (addContent, addIsError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "before", "x": 1, "y": 2])
+        #expect(addIsError != true)
+        let id = addedId(from: toolResultText(addContent))
+
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(id), "text": "after", "x": 5, "y": 6])
+        #expect(editIsError != true)
+        #expect(toolResultText(editContent).contains("seq 2"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.summary.texts.count == 1)
+        #expect(envelope.summary.texts.first?.text == "after")
+        #expect(envelope.summary.texts.first?.x == 5)
+        #expect(envelope.summary.texts.first?.y == 6)
+
+        await server.stop()
+    }
+
+    @Test func removeTextRemovesEntryById() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (addContent, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "gone soon", "x": 1, "y": 2])
+        let id = addedId(from: toolResultText(addContent))
+
+        let (removeContent, removeIsError) = try await client.callTool(
+            name: "remove_text", arguments: ["docId": "d", "textId": .string(id)])
+        #expect(removeIsError != true)
+        #expect(toolResultText(removeContent).contains("seq 2"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.summary.texts.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Covers the `createIfMissing: true` path `create_doc` would have used
+    /// (deferred per the Task 2 gate resolution — see the plan doc).
+    @Test func replaceDocForFreshIdStoresFile() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let freshBytes = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8)
+        let (content, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "fresh", "bytes": .string(freshBytes.base64EncodedString())])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("seq 1"))
+
+        let entries = try await server.manager.listDocuments()
+        #expect(entries.contains { $0.id == "fresh" })
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/fresh/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == freshBytes)
+
+        await server.stop()
+    }
+
+    @Test func replaceDocRoundTripsRawBytes() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let originalRaw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        #expect(Data(base64Encoded: try #require(originalRaw[0].blob)) == Fixtures.docBytes)
+
+        let replacement = Data(#"{"aaa001_thumbnailData":"","marker":"replaced"}"#.utf8)
+        let (_, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "d", "bytes": .string(replacement.base64EncodedString())])
+        #expect(isError != true)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == replacement)
+
+        await server.stop()
+    }
+
+    @Test func twoConcurrentSessionsSubscriberSeesAddTextFromAnotherSession() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let subscriberClient = try await connectedClient(port: port)
+        let writerClient = try await connectedClient(port: port)
+
+        let sink = NotificationSink()
+        await subscriberClient.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+        try await subscriberClient.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // `primePushChannel`'s own throwaway writes leave "d"'s live bytes as
+        // garbage (not valid JSON) — restore real document content before
+        // exercising add_text below, and drain/reset the sink so this
+        // reseed's own notification doesn't count toward the assertions.
+        _ = await server.manager.submit(
+            docId: "d", opId: "reseed", payload: OpPayload(type: "fullDoc", data: Fixtures.docBytes))
+        try await quiesce(sink)
+        await sink.reset()
+
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 2)
+
+        let (content, isError) = try await writerClient.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "from another session", "x": 3, "y": 4])
+        #expect(isError != true)
+        #expect(toolResultText(content).hasPrefix("added "))
+
+        let arrived = await waitFor(sink, atLeast: 1)
+        #expect(arrived)
+        #expect(await sink.uris.first == "infsketch://doc/d")
+
+        // Both sessions keep working after the cross-session push.
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 2)
+        let (resources, _) = try await subscriberClient.listResources()
+        #expect(resources.contains { $0.uri == "infsketch://doc/d" })
+        let summaryContents = try await writerClient.readResource(uri: "infsketch://doc/d")
+        #expect(summaryContents.count == 1)
+
+        await subscriberClient.disconnect()
+        await writerClient.disconnect()
         await server.stop()
     }
 }

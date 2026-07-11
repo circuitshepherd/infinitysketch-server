@@ -140,7 +140,9 @@ public actor MCPAdapter {
         let server = MCP.Server(
             name: "infsketch",
             version: ServerInfo.version,
-            capabilities: .init(resources: .init(subscribe: true, listChanged: nil))
+            capabilities: .init(
+                resources: .init(subscribe: true, listChanged: nil),
+                tools: .init(listChanged: nil))
         )
 
         await server.withMethodHandler(ListResources.self) { [weak self] _ in
@@ -158,6 +160,14 @@ public actor MCPAdapter {
         await server.withMethodHandler(ResourceUnsubscribe.self) { [weak self] params in
             guard let self else { throw MCPError.internalError("MCPAdapter deallocated") }
             return try await self.handleUnsubscribe(uri: params.uri)
+        }
+        await server.withMethodHandler(ListTools.self) { [weak self] _ in
+            guard let self else { throw MCPError.internalError("MCPAdapter deallocated") }
+            return try await self.handleListTools()
+        }
+        await server.withMethodHandler(CallTool.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("MCPAdapter deallocated") }
+            return try await self.handleCallTool(name: params.name, arguments: params.arguments)
         }
 
         return server
@@ -343,6 +353,311 @@ public actor MCPAdapter {
         debouncer.unsubscribe(session: sessionID, docId: docId)
         cooldownTasks.removeValue(forKey: CooldownKey(session: sessionID, docId: docId))?.cancel()
         return Empty()
+    }
+
+    // MARK: - Tool handlers (Task 7)
+    //
+    // Every tool composes full document bytes and writes through
+    // `SessionManager.submitOpeningSession` (opId prefixed "mcp-") — the exact
+    // same seq-assignment/store-write/broadcast path any other writer uses,
+    // so agent edits surface through the app's remote-change banner and the
+    // web frames like any foreign write. Per the spec's error-handling
+    // section, tool failures are MCP TOOL-RESULT errors (`isError: true`
+    // carrying the server reason as the text content) — never thrown
+    // `MCPError`s — so a client/agent can see and react to the reason
+    // ("unknownDoc", "textNotFound", "invalidDocumentJSON", or a submit
+    // rejection reason). The only thrown case left in `handleCallTool` is an
+    // unrecognized tool NAME, which is a protocol-level misuse, not a
+    // reachable domain failure.
+    //
+    // MANDATORY (Task 3 review, finding N2): argument extraction below reads
+    // `Value.int`/`.double` only, via `Double(_:)`'s STRICT initializer —
+    // never `Double(someString)`. A client sending x/y as a JSON string is
+    // rejected as `invalidArgument: x`, not parsed — `Double("40000")` would
+    // silently succeed and, for `Double("NaN")`, would arm `DocJSON.addText`/
+    // `.editText`'s finite-value preconditions remotely. The SDK's own
+    // `Value` decoder already rejects non-finite/overflow numeric literals at
+    // the JSON layer (verified in Task 3's review), so any `Double`/`Int`
+    // case reaching here is guaranteed finite.
+
+    private static let tools: [Tool] = [
+        Tool(
+            name: "add_text",
+            description: """
+                Appends a minimal-attribute placed-text entry to a document: a new id, \
+                plain unformatted text (the app backfills body-style font/colour on load), \
+                the document's current colour scheme, and an identity transform/opacity. \
+                (x, y) is the text box's top-left corner, in canvas coordinates.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "text": .object(["type": "string", "description": "The text to place."]),
+                    "x": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
+                    "y": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                    "pinned": .object([
+                        "type": "boolean",
+                        "description": "Excludes the text from selection transforms. Defaults to false.",
+                    ]),
+                ]),
+                "required": .array(["docId", "text", "x", "y"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "edit_text",
+            description: """
+                Mutates an existing placed text by id: replace its string and/or move it. \
+                WARNING: replacing the text resets that entry's rich formatting to plain \
+                defaults — the attributed run's bold/italic/font/colour attributes are \
+                UIKit-archived data no server-side code can synthesize, so a new text run \
+                always replaces the old ones wholesale. Position-only edits (x and/or y with \
+                no text) do not touch formatting.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "textId": .object(["type": "string", "description": "The id of the text entry to edit."]),
+                    "text": .object([
+                        "type": "string",
+                        "description": "Replacement text. Resets formatting to plain defaults — see the tool description.",
+                    ]),
+                    "x": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
+                    "y": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                ]),
+                "required": .array(["docId", "textId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "remove_text",
+            description: "Removes a placed text entry from a document by id.",
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "textId": .object(["type": "string", "description": "The id of the text entry to remove."]),
+                ]),
+                "required": .array(["docId", "textId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "replace_doc",
+            description: """
+                Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
+                exist. The bytes are opaque to the server — the agent owns their validity, \
+                the same trust any other writer on the network has.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to write."]),
+                    "bytes": .object(["type": "string", "description": "Base64-encoded .infsketch document bytes."]),
+                ]),
+                "required": .array(["docId", "bytes"].map(Value.string)),
+            ])
+        ),
+    ]
+
+    private func handleListTools() async throws -> ListTools.Result {
+        ListTools.Result(tools: Self.tools)
+    }
+
+    private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
+        switch name {
+        case "add_text": return await callAddText(arguments)
+        case "edit_text": return await callEditText(arguments)
+        case "remove_text": return await callRemoveText(arguments)
+        case "replace_doc": return await callReplaceDoc(arguments)
+        default:
+            throw MCPError.invalidParams("Unknown tool: \(name)")
+        }
+    }
+
+    private func callAddText(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let text = try Self.stringArg(arguments, "text")
+            let x = try Self.doubleArg(arguments, "x")
+            let y = try Self.doubleArg(arguments, "y")
+            let pinned = try Self.boolArg(arguments, "pinned", default: false)
+
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let newId = UUID()
+            let out: Data
+            do {
+                out = try DocJSON.addText(to: bytes, id: newId, text: text, x: x, y: y, pinned: pinned)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+                "added \(newId.uuidString) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callEditText(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let textId = try Self.stringArg(arguments, "textId")
+            let newText = try Self.optionalStringArg(arguments, "text")
+            let x = try Self.optionalDoubleArg(arguments, "x")
+            let y = try Self.optionalDoubleArg(arguments, "y")
+
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.editText(in: bytes, textId: textId, newText: newText, x: x, y: y)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+                "edited \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callRemoveText(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let textId = try Self.stringArg(arguments, "textId")
+
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.removeText(from: bytes, textId: textId)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+                "removed \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Unlike the other three tools, this never reads/parses the current
+    /// bytes first — the replacement is opaque by design (spec: "the agent
+    /// owns their validity"), and `createIfMissing: true` is what a
+    /// `create_doc` tool would have used (deferred; see the plan doc).
+    private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let bytes = try Self.base64DataArg(arguments, "bytes")
+            return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
+                "replaced \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Shared submit tail for all four tools: opens a session on demand,
+    /// writes the composed full-document bytes, and shapes the MCP result —
+    /// success names the assigned seq (read back via `liveInfo`, since
+    /// `submit`'s nil return carries no seq of its own), `.reject` becomes a
+    /// tool error carrying the server's reason verbatim.
+    private func submitAndRespond(
+        docId: String, createIfMissing: Bool, fullDoc bytes: Data, successText: (Int) -> String
+    ) async -> CallTool.Result {
+        let opId = "mcp-\(UUID().uuidString)"
+        let payload = OpPayload(type: "fullDoc", data: bytes)
+        let result = await manager.submitOpeningSession(
+            docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload)
+        switch result {
+        case nil:
+            let seq = await manager.liveInfo()[docId]?.seq ?? -1
+            return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
+        case .reject(_, _, let reason, _):
+            return Self.errorResult(reason)
+        default:
+            return Self.errorResult("unexpectedServerResponse")
+        }
+    }
+
+    private static func reason(for error: DocJSON.DocJSONError) -> String {
+        switch error {
+        case .invalidDocumentJSON: return "invalidDocumentJSON"
+        case .textNotFound: return "textNotFound"
+        }
+    }
+
+    private static func errorResult(_ reason: String) -> CallTool.Result {
+        CallTool.Result(content: [.text(text: reason, annotations: nil, _meta: nil)], isError: true)
+    }
+
+    // MARK: - Tool argument extraction
+    //
+    // Every accessor reads a `Value` case directly (or, for numbers, via
+    // `Double(_:)`'s default STRICT mode, which only converts `.double`/
+    // `.int` — see the MANDATORY note above the tools section). None of
+    // these ever call a `String`-parsing initializer on an argument.
+
+    private enum ArgumentError: Error {
+        case missing(String)
+        case invalidType(String)
+
+        var reason: String {
+            switch self {
+            case .missing(let key): return "missingArgument: \(key)"
+            case .invalidType(let key): return "invalidArgument: \(key)"
+            }
+        }
+    }
+
+    private static func stringArg(_ arguments: [String: Value]?, _ key: String) throws -> String {
+        guard let value = arguments?[key] else { throw ArgumentError.missing(key) }
+        guard case .string(let s) = value else { throw ArgumentError.invalidType(key) }
+        return s
+    }
+
+    private static func optionalStringArg(_ arguments: [String: Value]?, _ key: String) throws -> String? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
+        guard case .string(let s) = value else { throw ArgumentError.invalidType(key) }
+        return s
+    }
+
+    private static func doubleArg(_ arguments: [String: Value]?, _ key: String) throws -> Double {
+        guard let value = arguments?[key] else { throw ArgumentError.missing(key) }
+        guard let d = Double(value) else { throw ArgumentError.invalidType(key) }
+        return d
+    }
+
+    private static func optionalDoubleArg(_ arguments: [String: Value]?, _ key: String) throws -> Double? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
+        guard let d = Double(value) else { throw ArgumentError.invalidType(key) }
+        return d
+    }
+
+    private static func boolArg(_ arguments: [String: Value]?, _ key: String, default def: Bool) throws -> Bool {
+        guard let value = arguments?[key], !value.isNull else { return def }
+        guard let b = Bool(value) else { throw ArgumentError.invalidType(key) }
+        return b
+    }
+
+    private static func base64DataArg(_ arguments: [String: Value]?, _ key: String) throws -> Data {
+        let string = try stringArg(arguments, key)
+        guard let data = Data(base64Encoded: string) else { throw ArgumentError.invalidType(key) }
+        return data
     }
 
     // MARK: - Idle-session reaping

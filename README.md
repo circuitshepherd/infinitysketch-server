@@ -11,7 +11,10 @@ intended to run on macOS, Linux, and Windows.
 > 2026-07-10 WS chunked transfer design in the InfinitySketch app repo).
 > Protocol design: the transport spec in the InfinitySketch app repo
 > (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
-> Not yet here: MCP endpoint, resume/backlog replay, render delegation, auth
+> Agents connect via MCP at `/mcp` (HTTP + SSE, official swift-sdk): document
+> resources incl. live frames, text-annotation and document tools — see the
+> 2026-07-11 MCP design in the app repo.
+> Not yet here: resume/backlog replay, render delegation, auth
 > (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy),
 > slow-socket backpressure (a stalled client buffers server-side until keepalive lands).
 
