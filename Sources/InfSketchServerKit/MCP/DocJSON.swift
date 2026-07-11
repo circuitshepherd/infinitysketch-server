@@ -51,12 +51,16 @@ public enum DocJSON {
 
     /// Extracts a read-only summary: every placed text (id/text/origin/pinned),
     /// the document's dark/light colour scheme, and its content size when present.
-    /// Malformed text entries (missing id, non-string first text run, or a
-    /// malformed rect) are skipped rather than thrown — a summary is best-effort.
+    /// Malformed text entries (a non-dictionary array element, missing id, no
+    /// string text runs, or a malformed rect) are skipped rather than thrown —
+    /// a summary is best-effort. A text's string is the concatenation of ALL its
+    /// runs (AttributedString's Codable form is one (string, attributes) pair
+    /// per attribute run), never just the first.
     public static func summary(from bytes: Data) throws -> DocSummary {
         let doc = try parseDocument(bytes)
-        let entries = (doc["placedTextsData"] as? [[String: Any]]) ?? []
-        let texts = entries.compactMap { textSummary(from: $0) }
+        let texts = rawTextElements(of: doc).compactMap { element in
+            (element as? [String: Any]).flatMap(textSummary(from:))
+        }
         return DocSummary(
             texts: texts,
             darkColorScheme: (doc["darkColorScheme"] as? Bool) ?? false,
@@ -68,7 +72,9 @@ public enum DocJSON {
 
     /// Appends the canonical minimal text entry (Global Constraints) to
     /// `placedTextsData`, inheriting the document's `darkColorScheme` (default
-    /// false) into the entry's `colorSchemeIsDark`.
+    /// false) into the entry's `colorSchemeIsDark`. Every pre-existing array
+    /// element — including ones this module doesn't understand — is preserved
+    /// untouched in place.
     public static func addText(
         to bytes: Data,
         id: UUID,
@@ -77,10 +83,15 @@ public enum DocJSON {
         y: Double,
         pinned: Bool
     ) throws -> Data {
+        // Programmer-error contract, not a document property: JSON (the only
+        // transport MCP tool arguments arrive over) cannot encode NaN/Infinity,
+        // so a non-finite coordinate can only come from a direct API misuse.
+        precondition(x.isFinite && y.isFinite,
+                     "DocJSON.addText: coordinates must be finite — JSON cannot encode NaN/Infinity")
         var doc = try parseDocument(bytes)
         let darkColorScheme = (doc["darkColorScheme"] as? Bool) ?? false
-        var entries = (doc["placedTextsData"] as? [[String: Any]]) ?? []
-        entries.append(makeEntry(
+        var elements = rawTextElements(of: doc)
+        elements.append(makeEntry(
             id: id.uuidString,
             text: text,
             x: x,
@@ -88,7 +99,7 @@ public enum DocJSON {
             pinned: pinned,
             colorSchemeIsDark: darkColorScheme
         ))
-        doc["placedTextsData"] = entries
+        doc["placedTextsData"] = elements
         return try serialize(doc)
     }
 
@@ -96,8 +107,9 @@ public enum DocJSON {
     /// the run array wholesale with `[newText, {}]` — a documented formatting
     /// reset, mirroring what a fresh `addText` would produce for that string.
     /// `x`/`y` (when non-nil) update only that axis of `rect`'s origin; the
-    /// untouched axis, size, and every other key are passed through unchanged
-    /// (not re-rounded — the original `Any`/`NSNumber` values are preserved).
+    /// untouched axis, size, sibling entries (including unrecognized array
+    /// elements), and every other key are passed through unchanged (not
+    /// re-rounded — the original `Any`/`NSNumber` values are preserved).
     public static func editText(
         in bytes: Data,
         textId: String,
@@ -105,13 +117,16 @@ public enum DocJSON {
         x: Double?,
         y: Double?
     ) throws -> Data {
+        // See addText: non-finite coordinates are a programmer error by contract.
+        precondition((x?.isFinite ?? true) && (y?.isFinite ?? true),
+                     "DocJSON.editText: coordinates must be finite — JSON cannot encode NaN/Infinity")
         var doc = try parseDocument(bytes)
-        var entries = (doc["placedTextsData"] as? [[String: Any]]) ?? []
-        guard let index = entries.firstIndex(where: { ($0["id"] as? String) == textId }) else {
+        var elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              var entry = elements[index] as? [String: Any]
+        else {
             throw DocJSONError.textNotFound
         }
-
-        var entry = entries[index]
 
         if let newText {
             entry["text"] = makeTextRuns(newText)
@@ -121,20 +136,22 @@ public enum DocJSON {
             entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
         }
 
-        entries[index] = entry
-        doc["placedTextsData"] = entries
+        elements[index] = entry
+        doc["placedTextsData"] = elements
         return try serialize(doc)
     }
 
-    /// Removes a text entry by id. Throws `.textNotFound` if no entry matches.
+    /// Removes a text entry by id, leaving every other array element (including
+    /// unrecognized ones) untouched in place. Throws `.textNotFound` if no
+    /// entry matches.
     public static func removeText(from bytes: Data, textId: String) throws -> Data {
         var doc = try parseDocument(bytes)
-        var entries = (doc["placedTextsData"] as? [[String: Any]]) ?? []
-        guard let index = entries.firstIndex(where: { ($0["id"] as? String) == textId }) else {
+        var elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements) else {
             throw DocJSONError.textNotFound
         }
-        entries.remove(at: index)
-        doc["placedTextsData"] = entries
+        elements.remove(at: index)
+        doc["placedTextsData"] = elements
         return try serialize(doc)
     }
 
@@ -150,15 +167,42 @@ public enum DocJSON {
     }
 
     private static func serialize(_ doc: [String: Any]) throws -> Data {
-        guard JSONSerialization.isValidJSONObject(doc) else {
-            throw DocJSONError.invalidDocumentJSON
-        }
+        // Everything in `doc` either came out of JSONSerialization's parser
+        // (always re-serializable) or was constructed here from finite,
+        // JSON-representable values (the public entry points precondition-check
+        // their coordinates). A failure here is therefore a bug in this file,
+        // not a property of the caller's document — surface it as a programmer
+        // error rather than mislabeling it `invalidDocumentJSON`.
+        precondition(JSONSerialization.isValidJSONObject(doc),
+                     "DocJSON.serialize: non-JSON-representable value written into the document — bug in DocJSON")
         return try JSONSerialization.data(withJSONObject: doc)
+    }
+
+    /// The raw `placedTextsData` array with each element left as `Any`. The
+    /// app's format guarantees dictionaries, but a foreign or hand-edited
+    /// document may contain stray non-dictionary elements — reads skip them,
+    /// mutations preserve them untouched in place. NEVER cast the whole array
+    /// to `[[String: Any]]`: that cast is all-or-nothing, so one bad element
+    /// would empty the reads and make `addText` write back an array containing
+    /// only the new entry (destroying every existing text).
+    private static func rawTextElements(of doc: [String: Any]) -> [Any] {
+        (doc["placedTextsData"] as? [Any]) ?? []
+    }
+
+    /// Index of the dictionary element whose `id` matches, ignoring
+    /// non-dictionary elements.
+    private static func entryIndex(withId textId: String, in elements: [Any]) -> Int? {
+        elements.firstIndex { (($0 as? [String: Any])?["id"] as? String) == textId }
     }
 
     private static func textSummary(from entry: [String: Any]) -> TextSummary? {
         guard let id = entry["id"] as? String else { return nil }
-        guard let runs = entry["text"] as? [Any], let text = runs.first as? String else { return nil }
+        // AttributedString's Codable form alternates (run string, attributes
+        // dict) pairs — concatenate every string element so multi-run text
+        // ("Hello world" with one bolded word) isn't truncated to its first run.
+        guard let runs = entry["text"] as? [Any] else { return nil }
+        let strings = runs.compactMap { $0 as? String }
+        guard !strings.isEmpty else { return nil }
         guard let rect = entry["rect"] as? [Any],
               let origin = rect.first as? [Any],
               origin.count >= 2,
@@ -166,7 +210,7 @@ public enum DocJSON {
               let y = doubleValue(origin[1])
         else { return nil }
         let pinned = (entry["pinned"] as? Bool) ?? false
-        return TextSummary(id: id, text: text, x: x, y: y, pinned: pinned)
+        return TextSummary(id: id, text: strings.joined(), x: x, y: y, pinned: pinned)
     }
 
     private static func contentSize(from doc: [String: Any]) -> [Double]? {
@@ -178,6 +222,12 @@ public enum DocJSON {
         return [width, height]
     }
 
+    /// Numbers out of `JSONSerialization` are platform-boxed: Darwin always
+    /// yields `NSNumber` (which the first branch bridges via `as? Double`),
+    /// while swift-corelibs-foundation (Linux) can yield native `Int`/`Double`/
+    /// `NSNumber` depending on the literal — the `Int` branch is live there for
+    /// integral literals like `40000`, and the `NSNumber` branch backstops
+    /// boxed values whose direct `as? Double` bridge fails. Keep all three.
     private static func doubleValue(_ any: Any) -> Double? {
         if let d = any as? Double { return d }
         if let n = any as? NSNumber { return n.doubleValue }
