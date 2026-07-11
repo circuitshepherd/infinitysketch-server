@@ -116,3 +116,58 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         }
     }
 }
+
+@Suite struct MCPWritePathTests {
+    private func makeStoreAndManager() throws -> (DirectoryDocumentStore, SessionManager) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mcp-write-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "d", bytes: Fixtures.docBytes)
+        return (store, SessionManager(store: store, config: SessionConfig(gracePeriod: .milliseconds(50))))
+    }
+
+    @Test func submitToClosedDocOpensSessionAndPersists() async throws {
+        let (store, manager) = try makeStoreAndManager()
+        let result = await manager.submitOpeningSession(
+            docId: "d", createIfMissing: false, opId: "mcp-1",
+            payload: OpPayload(type: "fullDoc", data: Data([9])))
+        #expect(result == nil)   // accepted (echo-is-ack applies to subscribers; MCP gets nil = success)
+        #expect(try store.load(docId: "d") == Data([9]))
+        // No subscribers: session must reap itself after grace.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await manager.liveInfo()["d"] == nil)
+    }
+
+    @Test func submitCreateIfMissingCreatesDoc() async throws {
+        let (store, manager) = try makeStoreAndManager()
+        let result = await manager.submitOpeningSession(
+            docId: "fresh", createIfMissing: true, opId: "mcp-2",
+            payload: OpPayload(type: "fullDoc", data: Data([1])))
+        #expect(result == nil)
+        #expect(try store.load(docId: "fresh") == Data([1]))
+    }
+
+    @Test func submitUnknownDocWithoutFlagRejects() async throws {
+        let (_, manager) = try makeStoreAndManager()
+        let result = await manager.submitOpeningSession(
+            docId: "ghost", createIfMissing: false, opId: "mcp-3",
+            payload: OpPayload(type: "fullDoc", data: Data([1])))
+        guard case .reject(_, _, let reason, _) = result else { Issue.record("expected reject"); return }
+        #expect(reason == "unknownDoc")
+    }
+
+    @Test func currentBytesPrefersLiveSession() async throws {
+        let (_, manager) = try makeStoreAndManager()
+        let sub = try await manager.subscribe(docId: "d")
+        _ = await manager.submit(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: Data([7, 7])))
+        #expect(await manager.currentBytes(docId: "d") == Data([7, 7]))
+        await manager.unsubscribe(docId: "d", token: sub.token)
+    }
+
+    @Test func currentBytesFallsBackToStore() async throws {
+        let (_, manager) = try makeStoreAndManager()
+        #expect(await manager.currentBytes(docId: "d") == Fixtures.docBytes)
+        #expect(await manager.currentBytes(docId: "ghost") == nil)
+    }
+}

@@ -119,6 +119,43 @@ public actor SessionManager {
         return result
     }
 
+    /// Write path for callers with no subscription of their own (MCP tools):
+    /// opens (or, with `createIfMissing`, creates) a session on demand if the
+    /// doc has no live session, then delegates to `submit` so the write goes
+    /// through the exact same seq-assignment/store-write/broadcast path as an
+    /// app push. A freshly opened session has no subscribers, so grace
+    /// teardown is scheduled immediately — otherwise it would leak forever.
+    /// A session that was already live (has real subscribers/watchers) is
+    /// left completely alone; only the absent-session branch runs.
+    public func submitOpeningSession(
+        docId: String, createIfMissing: Bool, opId: String, payload: OpPayload
+    ) async -> ServerMessage? {
+        if sessions[docId] == nil {
+            let session: DocumentSession
+            do {
+                session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+            } catch DocumentStoreError.notFound where createIfMissing {
+                session = DocumentSession(docId: docId, store: store,
+                                          bufferLimit: config.outboundBufferLimit, bytes: Data())
+            } catch {
+                return .reject(docId: docId, opId: opId, reason: "unknownDoc", seq: 0)
+            }
+            sessions[docId] = session
+            emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            scheduleGraceTeardown(docId: docId)
+        }
+        return await submit(docId: docId, opId: opId, payload: payload)
+    }
+
+    /// Live session bytes when a session is open, else the store's on-disk
+    /// copy. `nil` only when neither exists (unknown doc).
+    public func currentBytes(docId: String) async -> Data? {
+        if let live = await sessions[docId]?.currentBytes {
+            return live
+        }
+        return try? store.load(docId: docId)
+    }
+
     public func subscribeStatus() -> (events: AsyncStream<ServerMessage>, token: UUID) {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(

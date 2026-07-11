@@ -71,6 +71,12 @@ actor DocumentSession {
 
     var subscriberCount: Int { subscribers.count }
 
+    /// The document's current in-memory bytes — always in sync with the
+    /// store's on-disk copy, since `submit` writes through before updating
+    /// this. Read-only accessor for callers (e.g. MCP tools) that just need
+    /// the live content without subscribing.
+    var currentBytes: Data { bytes }
+
     func subscribe() -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
