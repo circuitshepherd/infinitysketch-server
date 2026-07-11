@@ -14,7 +14,7 @@ intended to run on macOS, Linux, and Windows.
 > Agents connect via MCP at `/mcp` (HTTP + SSE, official swift-sdk): document
 > resources incl. live frames, text-annotation and document tools — see the
 > 2026-07-11 MCP design in the app repo.
-> Not yet here: resume/backlog replay, render delegation, auth
+> Not yet here: resume/backlog replay, auth
 > (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy),
 > slow-socket backpressure (a stalled client buffers server-side until keepalive lands).
 
