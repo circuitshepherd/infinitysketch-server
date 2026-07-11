@@ -19,6 +19,8 @@ public actor SessionManager {
     private var sessions: [String: DocumentSession] = [:]
     private var tokenDocs: [UUID: String] = [:]
     private var counts: [String: Int] = [:]
+    private var tokenWatchDocs: [UUID: String] = [:]
+    private var watcherCounts: [String: Int] = [:]
     private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
 
@@ -61,9 +63,49 @@ public actor SessionManager {
         counts[docId] = max(0, (counts[docId] ?? 1) - 1)
         let remaining = counts[docId] ?? 0
         emitStatus(docId: docId, kind: "subscriberCount", seq: await session.seq, count: remaining)
-        if remaining == 0 {
+        if remaining == 0 && (watcherCounts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
         }
+    }
+
+    /// Register a viewer. Opens the session from the store if needed (no
+    /// createIfMissing analog — you can't watch a doc that doesn't exist).
+    public func watch(docId: String) async throws -> WatchResult {
+        graceTasks.removeValue(forKey: docId)?.task.cancel()
+        let session: DocumentSession
+        if let existing = sessions[docId] {
+            session = existing
+        } else {
+            session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+            sessions[docId] = session
+            emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+        }
+        let result = await session.watch()
+        tokenWatchDocs[result.token] = docId
+        watcherCounts[docId, default: 0] += 1
+        return result
+    }
+
+    public func unwatch(docId: String, token: UUID) async {
+        guard tokenWatchDocs.removeValue(forKey: token) == docId,
+              let session = sessions[docId] else { return }
+        await session.unwatch(token)
+        watcherCounts[docId] = max(0, (watcherCounts[docId] ?? 1) - 1)
+        if (watcherCounts[docId] ?? 0) == 0 && (counts[docId] ?? 0) == 0 {
+            scheduleGraceTeardown(docId: docId)
+        }
+    }
+
+    /// Returns false when the doc has no live session (frame dropped).
+    public func submitFrame(docId: String, bytes: Data) async -> Bool {
+        guard let session = sessions[docId] else { return false }
+        await session.submitFrame(bytes: bytes)
+        return true
+    }
+
+    public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date)? {
+        guard let session = sessions[docId] else { return nil }
+        return await session.latestFrame
     }
 
     public func submit(docId: String, opId: String, payload: OpPayload) async -> ServerMessage? {
@@ -115,12 +157,13 @@ public actor SessionManager {
     /// no subscribe can interleave between check and mutation.
     private func tearDownIfIdle(docId: String, graceId: UUID) {
         guard graceTasks[docId]?.id == graceId else { return }
-        guard (counts[docId] ?? 0) == 0 else {
+        guard (counts[docId] ?? 0) == 0, (watcherCounts[docId] ?? 0) == 0 else {
             graceTasks.removeValue(forKey: docId)
             return
         }
         sessions.removeValue(forKey: docId)
         counts.removeValue(forKey: docId)
+        watcherCounts.removeValue(forKey: docId)
         graceTasks.removeValue(forKey: docId)
         emitStatus(docId: docId, kind: "sessionClosed", seq: nil, count: 0)
     }

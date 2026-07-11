@@ -355,3 +355,74 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .error(reason: "unknownDoc"))
     }
 }
+
+@Suite struct WSAdapterWatchAndFrameTests {
+    /// Two connections against one manager: an app (subscriber) and a browser (watcher).
+    @Test func watchFrameCycle() async throws {
+        let manager = try makeManager()
+        let app = try await Harness(manager: manager)
+        var appReader = ServerMessageReader(app.output)
+        try app.send(.hello(protocolVersion: 1, capabilities: ["render"]))
+        _ = try await appReader.next()
+        try app.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        _ = try await appReader.next()   // subscribed
+
+        let browser = try await Harness(manager: manager)
+        var browserReader = ServerMessageReader(browser.output)
+        try browser.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await browserReader.next()
+        try browser.send(.watchDoc(docId: "d"))
+
+        // The app learns it is watched.
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 1))
+
+        // The app pushes a frame; the browser gets the nudge.
+        try app.send(.frame(docId: "d", payload: .inline(Data([7, 7]))))
+        #expect(try await browserReader.next() == .frameAvailable(docId: "d", seq: 0))
+
+        // Unwatch: the app learns the viewer left.
+        try browser.send(.unwatchDoc(docId: "d"))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
+    }
+
+    @Test func frameWithoutSubscriptionErrors() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["render"]))
+        _ = try await reader.next()
+        try harness.send(.frame(docId: "d", payload: .inline(Data([1]))))
+        #expect(try await reader.next() == .error(reason: "notSubscribed"))
+    }
+
+    @Test func watchUnknownDocErrors() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()
+        try harness.send(.watchDoc(docId: "ghost"))
+        #expect(try await reader.next() == .error(reason: "unknownDoc"))
+    }
+
+    @Test func disconnectReleasesWatch() async throws {
+        let manager = try makeManager()
+        // An app subscriber observes watcher-count notifications.
+        let app = try await Harness(manager: manager)
+        var appReader = ServerMessageReader(app.output)
+        try app.send(.hello(protocolVersion: 1, capabilities: ["render"]))
+        _ = try await appReader.next()
+        try app.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        _ = try await appReader.next()   // subscribed
+
+        let browser = try await Harness(manager: manager)
+        var browserReader = ServerMessageReader(browser.output)
+        try browser.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await browserReader.next()
+        try browser.send(.watchDoc(docId: "d"))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 1))
+
+        // Browser vanishes without unwatchDoc: Connection.close() must release
+        // the watch, observable as the count dropping back to 0.
+        browser.input.finish()
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
+    }
+}

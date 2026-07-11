@@ -110,3 +110,37 @@ import InfSketchWire
         #expect(try ClientMessage(jsonText: old) == m)
     }
 }
+
+@Suite struct RenderDelegationWireTests {
+    @Test func watchMessagesRoundTrip() throws {
+        let w = ClientMessage.watchDoc(docId: "d")
+        #expect(try ClientMessage(jsonText: w.jsonText()) == w)
+        let u = ClientMessage.unwatchDoc(docId: "d")
+        #expect(try ClientMessage(jsonText: u.jsonText()) == u)
+    }
+    @Test func frameMessageRoundTripsInline() throws {
+        let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])))
+        #expect(try ClientMessage(jsonText: f.jsonText()) == f)
+    }
+    @Test func frameMessageRoundTripsAsDescriptor() throws {
+        let d = TransferDescriptor(transferId: 3, totalBytes: 100, chunkSize: 8)
+        let f = ClientMessage.frame(docId: "d", payload: .transfer(d))
+        #expect(try ClientMessage(jsonText: f.jsonText()) == f)
+    }
+    @Test func frameChunksThroughSenderAndReassembler() throws {
+        let png = Data((0..<100).map { UInt8($0 % 256) })
+        var sender = TransferSender<ClientMessage>(inlineLimit: 16, chunkSize: 8)
+        var reassembler = TransferReassembler<ClientMessage>()
+        var results: [ClientMessage] = []
+        for frame in try sender.frames(for: .frame(docId: "d", payload: .inline(png))) {
+            if let m = try reassembler.consume(frame) { results.append(m) }
+        }
+        #expect(results == [.frame(docId: "d", payload: .inline(png))])
+    }
+    @Test func serverFrameMessagesRoundTrip() throws {
+        let fa = ServerMessage.frameAvailable(docId: "d", seq: 7)
+        #expect(try ServerMessage(jsonText: fa.jsonText()) == fa)
+        let w = ServerMessage.watchers(docId: "d", count: 2)
+        #expect(try ServerMessage(jsonText: w.jsonText()) == w)
+    }
+}

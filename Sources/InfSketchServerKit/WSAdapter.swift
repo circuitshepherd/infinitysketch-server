@@ -40,6 +40,7 @@ actor Connection {
     private var helloed = false
     private var closed = false
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
+    private var watchSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
 
     init(manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig) {
@@ -137,6 +138,34 @@ actor Connection {
             // Unreachable: the reassembler consumes these or throws.
             emit(.error(reason: "transferViolation"))
             await close()
+
+        case .watchDoc(let docId):
+            guard watchSubscriptions[docId] == nil else {
+                return emit(.error(reason: "alreadyWatching"))
+            }
+            do {
+                let result = try await manager.watch(docId: docId)
+                watchSubscriptions[docId] = (result.token, pumpWatch(result.events, docId: docId, token: result.token))
+            } catch {
+                emit(.error(reason: "unknownDoc"))
+            }
+
+        case .unwatchDoc(let docId):
+            if let watch = watchSubscriptions.removeValue(forKey: docId) {
+                watch.pump.cancel()
+                await manager.unwatch(docId: docId, token: watch.token)
+            }
+
+        case .frame(let docId, let payload):
+            guard docSubscriptions[docId] != nil else {
+                return emit(.error(reason: "notSubscribed"))
+            }
+            guard case .inline(let bytes) = payload else {
+                return emit(.error(reason: "unresolvedTransfer"))
+            }
+            if await manager.submitFrame(docId: docId, bytes: bytes) == false {
+                emit(.error(reason: "unknownDoc"))
+            }
         }
     }
 
@@ -148,6 +177,11 @@ actor Connection {
             await manager.unsubscribe(docId: docId, token: sub.token)
         }
         docSubscriptions.removeAll()
+        for (docId, watch) in watchSubscriptions {
+            watch.pump.cancel()
+            await manager.unwatch(docId: docId, token: watch.token)
+        }
+        watchSubscriptions.removeAll()
         if let sub = statusSubscription {
             statusSubscription = nil
             sub.pump.cancel()
@@ -171,6 +205,27 @@ actor Connection {
             statusSubscription = nil
         }
         await manager.unsubscribeStatus(token)
+    }
+
+    private func releaseWatchSubscription(docId: String, token: UUID) async {
+        if let watch = watchSubscriptions[docId], watch.token == token {
+            watchSubscriptions.removeValue(forKey: docId)
+        }
+        await manager.unwatch(docId: docId, token: token)
+    }
+
+    /// Forwards frameAvailable nudges to the browser. On server-side stream
+    /// finish (watcher dropped), releases the registration.
+    private func pumpWatch(
+        _ events: AsyncStream<ServerMessage>, docId: String, token: UUID
+    ) -> Task<Void, Never> {
+        Task {
+            for await event in events {
+                self.emit(event)
+            }
+            guard !Task.isCancelled else { return }
+            await self.releaseWatchSubscription(docId: docId, token: token)
+        }
     }
 
     /// Forwards session events out through emit(_:). When the stream

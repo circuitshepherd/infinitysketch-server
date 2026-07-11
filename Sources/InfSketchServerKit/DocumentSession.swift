@@ -33,6 +33,13 @@ public struct SubscribeResult: Sendable {
     public let token: UUID
 }
 
+/// A watcher receives ONLY frameAvailable notifications — no snapshot, no op
+/// events. Browsers watch; apps subscribe.
+public struct WatchResult: Sendable {
+    public let events: AsyncStream<ServerMessage>
+    public let token: UUID
+}
+
 /// Per-document hub: current bytes, seq counter, subscriber fan-out.
 /// Grace-period teardown lives in SessionManager, not here.
 actor DocumentSession {
@@ -42,6 +49,10 @@ actor DocumentSession {
     private var bytes: Data
     private(set) var seq = 0
     private var subscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    private var watchers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    /// One-slot live-frame cache; dies with the session (the HTTP route then
+    /// falls back to the stored thumbnail, marked stale).
+    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date)?
 
     /// Designated: session over already-known bytes (createIfMissing path uses
     /// empty bytes; nothing is persisted until the first op's store.save).
@@ -65,6 +76,11 @@ actor DocumentSession {
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
             bufferingPolicy: .bufferingOldest(bufferLimit))
         subscribers[token] = continuation
+        // A reconnecting app must learn it is already watched: deliver the
+        // current watcher count as this subscription's first event.
+        if !watchers.isEmpty {
+            continuation.yield(.watchers(docId: docId, count: watchers.count))
+        }
         return SubscribeResult(
             snapshot: .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes)),
             events: stream,
@@ -73,6 +89,45 @@ actor DocumentSession {
 
     func unsubscribe(_ token: UUID) {
         subscribers.removeValue(forKey: token)?.finish()
+    }
+
+    var watcherCount: Int { watchers.count }
+
+    func watch() -> WatchResult {
+        let token = UUID()
+        let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
+            bufferingPolicy: .bufferingOldest(bufferLimit))
+        watchers[token] = continuation
+        notifyWatcherCount()
+        return WatchResult(events: stream, token: token)
+    }
+
+    func unwatch(_ token: UUID) {
+        guard watchers.removeValue(forKey: token) != nil else { return }
+        notifyWatcherCount()
+    }
+
+    /// Cache the frame and nudge every watcher. Ephemeral: no seq, no store,
+    /// no subscriber echo.
+    func submitFrame(bytes: Data) {
+        latestFrame = (png: bytes, seq: seq, receivedAt: Date())
+        let message = ServerMessage.frameAvailable(docId: docId, seq: seq)
+        for (token, continuation) in watchers {
+            switch continuation.yield(message) {
+            case .dropped, .terminated:
+                // Frame nudges are refetch hints — a stalled watcher is dropped;
+                // the page reconnects like the overview does.
+                watchers.removeValue(forKey: token)?.finish()
+                notifyWatcherCount()
+            default:
+                break
+            }
+        }
+    }
+
+    /// Tell subscribers (the app) the current viewer count.
+    private func notifyWatcherCount() {
+        broadcast(.watchers(docId: docId, count: watchers.count))
     }
 
     /// Returns nil when accepted (the broadcast echo is the submitter's ack),
