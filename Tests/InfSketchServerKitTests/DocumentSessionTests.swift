@@ -26,8 +26,8 @@ private func makeSession(bufferLimit: Int = 256) throws -> (DocumentSession, Dir
         let a = await session.subscribe()
         let b = await session.subscribe()
         let payload = OpPayload(type: "fullDoc", data: Data([42]))
-        let reject = await session.submit(opId: "op-1", payload: payload)
-        #expect(reject == nil)
+        let outcome = await session.submit(opId: "op-1", payload: payload)
+        #expect(outcome == .accepted(seq: 1))
 
         for stream in [a.events, b.events] {
             var it = stream.makeAsyncIterator()
@@ -49,7 +49,7 @@ private func makeSession(bufferLimit: Int = 256) throws -> (DocumentSession, Dir
         let (session, _) = try makeSession()
         let a = await session.subscribe()
         let reject = await session.submit(opId: "op-1", payload: OpPayload(type: "strokeDelta", data: Data()))
-        #expect(reject == .reject(docId: "d", opId: "op-1", reason: "unsupportedPayloadType", seq: 0))
+        #expect(reject == .rejected(.reject(docId: "d", opId: "op-1", reason: "unsupportedPayloadType", seq: 0)))
         #expect(await session.seq == 0)
         // Nothing must have been broadcast: next accepted op is the FIRST event on the stream.
         _ = await session.submit(opId: "op-2", payload: OpPayload(type: "fullDoc", data: Data([1])))

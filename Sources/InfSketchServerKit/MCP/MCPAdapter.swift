@@ -573,24 +573,27 @@ public actor MCPAdapter {
 
     /// Shared submit tail for all four tools: opens a session on demand,
     /// writes the composed full-document bytes, and shapes the MCP result —
-    /// success names the assigned seq (read back via `liveInfo`, since
-    /// `submit`'s nil return carries no seq of its own), `.reject` becomes a
-    /// tool error carrying the server's reason verbatim.
+    /// success names the assigned seq (carried back by the write itself in
+    /// `SubmitOutcome.accepted` — NEVER read back via a separate
+    /// `liveInfo()` hop, which a racing concurrent write to the same doc
+    /// could have bumped past this write's own seq before the read ran),
+    /// `.rejected` becomes a tool error carrying the server's reason
+    /// verbatim.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
-        let result = await manager.submitOpeningSession(
-            docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload)
-        switch result {
-        case nil:
-            let seq = await manager.liveInfo()[docId]?.seq ?? -1
+        switch await manager.submitOpeningSession(
+            docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload
+        ) {
+        case .accepted(let seq):
             return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
-        case .reject(_, _, let reason, _):
+        case .rejected(let message):
+            guard case .reject(_, _, let reason, _) = message else {
+                return Self.errorResult("unexpectedServerResponse")
+            }
             return Self.errorResult(reason)
-        default:
-            return Self.errorResult("unexpectedServerResponse")
         }
     }
 

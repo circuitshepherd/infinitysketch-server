@@ -32,7 +32,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
     @Test func submitWithoutSessionRejects() async throws {
         let manager = try makeManager()
         let r = await manager.submit(docId: "d", opId: "o", payload: OpPayload(type: "fullDoc", data: Data([1])))
-        #expect(r == .reject(docId: "d", opId: "o", reason: "notSubscribed", seq: 0))
+        #expect(r == .rejected(.reject(docId: "d", opId: "o", reason: "notSubscribed", seq: 0)))
     }
 
     @Test func sessionSurvivesWithinGracePeriodAndTearsDownAfter() async throws {
@@ -103,9 +103,9 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
     @Test func firstOpPersistsTheCreatedDoc() async throws {
         let (store, manager) = try makeStoreAndManager()
         _ = try await manager.subscribe(docId: "fresh", createIfMissing: true)
-        let reject = await manager.submit(docId: "fresh", opId: "o1",
-                                          payload: OpPayload(type: "fullDoc", data: Data([1, 2])))
-        #expect(reject == nil)
+        let outcome = await manager.submit(docId: "fresh", opId: "o1",
+                                           payload: OpPayload(type: "fullDoc", data: Data([1, 2])))
+        #expect(outcome == .accepted(seq: 1))
         #expect(try store.load(docId: "fresh") == Data([1, 2]))
     }
 
@@ -132,7 +132,9 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let result = await manager.submitOpeningSession(
             docId: "d", createIfMissing: false, opId: "mcp-1",
             payload: OpPayload(type: "fullDoc", data: Data([9])))
-        #expect(result == nil)   // accepted (echo-is-ack applies to subscribers; MCP gets nil = success)
+        // Accepted, carrying the write's own assigned seq (the broadcast
+        // echo remains the subscriber-facing ack; MCP acks use this value).
+        #expect(result == .accepted(seq: 1))
         #expect(try store.load(docId: "d") == Data([9]))
         // No subscribers: session must reap itself after grace.
         try await Task.sleep(for: .milliseconds(150))
@@ -144,7 +146,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let result = await manager.submitOpeningSession(
             docId: "fresh", createIfMissing: true, opId: "mcp-2",
             payload: OpPayload(type: "fullDoc", data: Data([1])))
-        #expect(result == nil)
+        #expect(result == .accepted(seq: 1))
         #expect(try store.load(docId: "fresh") == Data([1]))
     }
 
@@ -153,8 +155,26 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let result = await manager.submitOpeningSession(
             docId: "ghost", createIfMissing: false, opId: "mcp-3",
             payload: OpPayload(type: "fullDoc", data: Data([1])))
-        guard case .reject(_, _, let reason, _) = result else { Issue.record("expected reject"); return }
+        guard case .rejected(.reject(_, _, let reason, _)) = result else {
+            Issue.record("expected reject"); return
+        }
         #expect(reason == "unknownDoc")
+    }
+
+    /// The seq in an accepted outcome is the seq THAT write was assigned —
+    /// threaded back from `DocumentSession.submit` itself, never read back
+    /// after the fact (a read-back races concurrent writers; see
+    /// `SubmitOutcome` and the toolAckSeq… test in MCPAdapterTests).
+    @Test func acceptedSubmitCarriesItsOwnAssignedSeq() async throws {
+        let (_, manager) = try makeStoreAndManager()
+        let first = await manager.submitOpeningSession(
+            docId: "d", createIfMissing: false, opId: "mcp-s1",
+            payload: OpPayload(type: "fullDoc", data: Data([1])))
+        #expect(first == .accepted(seq: 1))
+        let second = await manager.submitOpeningSession(
+            docId: "d", createIfMissing: false, opId: "mcp-s2",
+            payload: OpPayload(type: "fullDoc", data: Data([2])))
+        #expect(second == .accepted(seq: 2))
     }
 
     @Test func currentBytesPrefersLiveSession() async throws {

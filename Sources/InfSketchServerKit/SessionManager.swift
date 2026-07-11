@@ -108,15 +108,18 @@ public actor SessionManager {
         return await session.latestFrame
     }
 
-    public func submit(docId: String, opId: String, payload: OpPayload) async -> ServerMessage? {
+    public func submit(docId: String, opId: String, payload: OpPayload) async -> SubmitOutcome {
         guard let session = sessions[docId] else {
-            return .reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0)
+            return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
-        let result = await session.submit(opId: opId, payload: payload)
-        if result == nil {
-            emitStatus(docId: docId, kind: "docUpdated", seq: await session.seq, count: counts[docId] ?? 0)
+        let outcome = await session.submit(opId: opId, payload: payload)
+        // The status event uses the seq the write itself returned — a
+        // separate `await session.seq` read here could observe a LATER
+        // racing write's seq (see SubmitOutcome).
+        if case .accepted(let seq) = outcome {
+            emitStatus(docId: docId, kind: "docUpdated", seq: seq, count: counts[docId] ?? 0)
         }
-        return result
+        return outcome
     }
 
     /// Write path for callers with no subscription of their own (MCP tools):
@@ -129,7 +132,7 @@ public actor SessionManager {
     /// left completely alone; only the absent-session branch runs.
     public func submitOpeningSession(
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload
-    ) async -> ServerMessage? {
+    ) async -> SubmitOutcome {
         if sessions[docId] == nil {
             let session: DocumentSession
             do {
@@ -138,7 +141,7 @@ public actor SessionManager {
                 session = DocumentSession(docId: docId, store: store,
                                           bufferLimit: config.outboundBufferLimit, bytes: Data())
             } catch {
-                return .reject(docId: docId, opId: opId, reason: "unknownDoc", seq: 0)
+                return .rejected(.reject(docId: docId, opId: opId, reason: "unknownDoc", seq: 0))
             }
             sessions[docId] = session
             emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)

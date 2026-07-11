@@ -235,10 +235,10 @@ private func addedId(from resultText: String) -> String {
         try await primePushChannel(server: server, sink: sink)
 
         // Channel proven live and quiet: one write → exactly its notification.
-        let reject = await server.manager.submit(
+        let outcome = await server.manager.submit(
             docId: "d", opId: "mcp-adapter-1",
             payload: OpPayload(type: "fullDoc", data: Fixtures.docBytes))
-        #expect(reject == nil)
+        #expect(outcome.rejectMessage == nil)
 
         let arrived = await waitFor(sink, atLeast: 1)
         #expect(arrived)
@@ -622,6 +622,72 @@ private func addedId(from resultText: String) -> String {
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == replacement)
+
+        await server.stop()
+    }
+
+    /// The seq in a tool ack must be the seq THIS call's own write was
+    /// assigned — not whatever the doc's seq happens to be a beat later
+    /// (Task 7 review, Important #1: the original implementation read the
+    /// seq back via a separate `liveInfo()` actor hop AFTER the write, so a
+    /// racing concurrent write landing in that gap made the ack report the
+    /// wrong seq). Race shape: several concurrent `add_text` calls to the
+    /// same doc. Ground truth comes from the broadcast events — each
+    /// accepted write's event carries its assigned seq, and the event that
+    /// FIRST contains a given text id is that text's own write (no other
+    /// writer can carry id U in its payload before U's own write landed, and
+    /// seqs are assigned in landing order).
+    @Test func toolAckSeqIsTheWritesOwnAssignedSeqUnderConcurrency() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // Direct manager subscription = the broadcast ground truth.
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+
+        let concurrency = 6
+        let results: [(id: String, reportedSeq: Int)] = try await withThrowingTaskGroup(
+            of: (String, Int).self
+        ) { group in
+            for i in 0..<concurrency {
+                group.addTask {
+                    let (content, isError) = try await client.callTool(
+                        name: "add_text",
+                        arguments: ["docId": "d", "text": "race \(i)", "x": 1, "y": 2])
+                    #expect(isError != true)
+                    let text = toolResultText(content)
+                    let reportedSeq = try #require(Int(text.split(separator: " ").last ?? ""))
+                    return (addedId(from: text), reportedSeq)
+                }
+            }
+            var collected: [(String, Int)] = []
+            for try await result in group { collected.append(result) }
+            return collected
+        }
+
+        // Drain the ops off the event stream and record, per text id, the
+        // seq of the event that first contains it (= its own write's seq).
+        var firstSeenSeq: [String: Int] = [:]
+        var opsSeen = 0
+        for await message in sub.events {
+            guard case .event(_, let seq, _, let opId, let payload) = message else { continue }
+            #expect(opId.hasPrefix("mcp-"))
+            opsSeen += 1
+            let bytes = try #require(payload.bulk.inlineData)
+            for text in try DocJSON.summary(from: bytes).texts
+            where firstSeenSeq[text.id] == nil {
+                firstSeenSeq[text.id] = seq
+            }
+            if opsSeen == concurrency { break }
+        }
+
+        for (id, reportedSeq) in results {
+            #expect(
+                firstSeenSeq[id] == reportedSeq,
+                "ack for \(id) reported seq \(reportedSeq) but its write was assigned seq \(String(describing: firstSeenSeq[id]))")
+        }
 
         await server.stop()
     }

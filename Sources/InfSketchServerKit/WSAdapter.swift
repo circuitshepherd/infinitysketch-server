@@ -118,7 +118,10 @@ actor Connection {
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
-            if let reject = await manager.submit(docId: docId, opId: opId, payload: payload) {
+            // WS submitters take their ack from the broadcast echo (which
+            // carries the assigned seq), so only a rejection needs
+            // forwarding here.
+            if let reject = await manager.submit(docId: docId, opId: opId, payload: payload).rejectMessage {
                 emit(reject)
             }
 
