@@ -137,6 +137,9 @@ actor Connection {
             // Unreachable: the reassembler consumes these or throws.
             emit(.error(reason: "transferViolation"))
             await close()
+
+        case .watchDoc, .unwatchDoc, .frame:
+            emit(.error(reason: "notImplemented"))   // Task 3 wires these
         }
     }
 
