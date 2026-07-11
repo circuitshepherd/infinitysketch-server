@@ -167,14 +167,21 @@ public enum DocJSON {
     }
 
     private static func serialize(_ doc: [String: Any]) throws -> Data {
-        // Everything in `doc` either came out of JSONSerialization's parser
-        // (always re-serializable) or was constructed here from finite,
-        // JSON-representable values (the public entry points precondition-check
-        // their coordinates). A failure here is therefore a bug in this file,
-        // not a property of the caller's document — surface it as a programmer
-        // error rather than mislabeling it `invalidDocumentJSON`.
-        precondition(JSONSerialization.isValidJSONObject(doc),
-                     "DocJSON.serialize: non-JSON-representable value written into the document — bug in DocJSON")
+        // Parsed-JSON content is NOT always re-serializable: Darwin's
+        // JSONSerialization parses the grammar-valid number `-1e999` as
+        // -infinity (negative overflow does not throw, unlike `+1e999`), so a
+        // document can make it INTO memory carrying a value that cannot be
+        // written back out. That is a property of the caller's document — the
+        // one honest label is `invalidDocumentJSON`. THROW, never trap: a
+        // precondition here was a remotely-reachable whole-process kill via
+        // crafted document bytes (replace_doc → add_text). The guard itself
+        // must stay, because on Darwin `JSONSerialization.data(withJSONObject:)`
+        // raises an ObjC exception (not a Swift error) for invalid objects.
+        // (Values this file writes itself are always representable — the
+        // public entry points precondition-check their coordinates.)
+        guard JSONSerialization.isValidJSONObject(doc) else {
+            throw DocJSONError.invalidDocumentJSON
+        }
         return try JSONSerialization.data(withJSONObject: doc)
     }
 

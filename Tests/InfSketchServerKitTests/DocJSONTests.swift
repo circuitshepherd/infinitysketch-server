@@ -191,4 +191,41 @@ import Testing
         #expect(s.texts[0].text == "Hello world")
     }
 
+    /// Darwin's `JSONSerialization` PARSES the grammar-valid number `-1e999`
+    /// as -infinity (negative overflow does not throw, unlike `+1e999`), so a
+    /// document can make it INTO memory carrying a value that cannot be
+    /// serialized back out. Mutations must surface that as
+    /// `invalidDocumentJSON` — never trap the server process (a precondition
+    /// here was remotely reachable via crafted document bytes).
+    @Test func nonReserializableNumberThrowsInvalidDocumentOnMutation() {
+        let fixture = Data(#"""
+        {
+          "darkColorScheme": false,
+          "zoomScale": -1e999,
+          "placedTextsData": [
+            {
+              "id": "AAAAAAAA-0000-0000-0000-000000000001",
+              "text": ["Hello", {}],
+              "rect": [[10, 20], [1, 1]],
+              "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+              "opacity": 1, "pinned": false, "wordWrapEnabled": false,
+              "colorSchemeIsDark": false
+            }
+          ],
+          "strokeAnchors": {}
+        }
+        """#.utf8)
+        #expect(throws: DocJSON.DocJSONError.invalidDocumentJSON) {
+            _ = try DocJSON.addText(to: fixture, id: UUID(), text: "New", x: 1, y: 2, pinned: false)
+        }
+        #expect(throws: DocJSON.DocJSONError.invalidDocumentJSON) {
+            _ = try DocJSON.editText(in: fixture,
+                                     textId: "AAAAAAAA-0000-0000-0000-000000000001",
+                                     newText: "X", x: nil, y: nil)
+        }
+        #expect(throws: DocJSON.DocJSONError.invalidDocumentJSON) {
+            _ = try DocJSON.removeText(from: fixture, textId: "AAAAAAAA-0000-0000-0000-000000000001")
+        }
+    }
+
 }
