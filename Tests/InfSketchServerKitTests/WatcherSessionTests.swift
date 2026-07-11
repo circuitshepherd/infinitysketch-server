@@ -1,0 +1,76 @@
+import Foundation
+import Testing
+@testable import InfSketchServerKit
+import InfSketchWire
+
+@Suite struct WatcherSessionTests {
+    private func makeManager(withDoc: Bool = true) throws -> (DirectoryDocumentStore, SessionManager) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        if withDoc { try store.save(docId: "d", bytes: Fixtures.docBytes) }
+        return (store, SessionManager(store: store, config: SessionConfig(gracePeriod: .milliseconds(50))))
+    }
+
+    @Test func watchUnknownDocThrows() async throws {
+        let (_, manager) = try makeManager(withDoc: false)
+        await #expect(throws: (any Error).self) { _ = try await manager.watch(docId: "ghost") }
+    }
+
+    @Test func watcherCountChangesNotifySubscribers() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        var it = sub.events.makeAsyncIterator()
+        let watch = try await manager.watch(docId: "d")
+        #expect(await it.next() == .watchers(docId: "d", count: 1))
+        await manager.unwatch(docId: "d", token: watch.token)
+        #expect(await it.next() == .watchers(docId: "d", count: 0))
+    }
+
+    @Test func lateSubscriberLearnsExistingWatchers() async throws {
+        let (_, manager) = try makeManager()
+        _ = try await manager.watch(docId: "d")
+        let sub = try await manager.subscribe(docId: "d")
+        var it = sub.events.makeAsyncIterator()
+        // First event on a fresh subscription to an already-watched doc:
+        #expect(await it.next() == .watchers(docId: "d", count: 1))
+    }
+
+    @Test func frameGoesToWatchersOnlyAndIsCached() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        let watch = try await manager.watch(docId: "d")
+        var subIt = sub.events.makeAsyncIterator()
+        _ = await subIt.next()   // watchers(count:1)
+        var watchIt = watch.events.makeAsyncIterator()
+
+        let accepted = await manager.submitFrame(docId: "d", bytes: Data([9, 9]))
+        #expect(accepted)
+        #expect(await watchIt.next() == .frameAvailable(docId: "d", seq: 0))
+        let cached = await manager.latestFrame(docId: "d")
+        #expect(cached?.png == Data([9, 9]))
+        #expect(cached?.seq == 0)
+        // Frames are ephemeral: the subscriber saw no event and seq did not move.
+        #expect(await manager.liveInfo()["d"]?.seq == 0)
+    }
+
+    @Test func submitFrameWithoutSessionReturnsFalse() async throws {
+        let (_, manager) = try makeManager()
+        #expect(await manager.submitFrame(docId: "d", bytes: Data([1])) == false)
+    }
+
+    @Test func watchersHoldTheSessionOpen() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        let watch = try await manager.watch(docId: "d")
+        await manager.unsubscribe(docId: "d", token: sub.token)
+        // Watcher still present: session must survive the (50 ms) grace period.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await manager.liveInfo()["d"] != nil)
+        await manager.unwatch(docId: "d", token: watch.token)
+        // Now both are zero: session tears down after grace.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await manager.liveInfo()["d"] == nil)
+    }
+}
