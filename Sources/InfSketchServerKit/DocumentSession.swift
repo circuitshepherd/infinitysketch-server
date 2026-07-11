@@ -1,4 +1,5 @@
 import Foundation
+import InfSketchWire
 
 public struct SessionConfig: Sendable {
     public var gracePeriod: Duration
@@ -42,11 +43,19 @@ actor DocumentSession {
     private(set) var seq = 0
     private var subscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
 
-    init(docId: String, store: any DocumentStore, bufferLimit: Int) throws {
+    /// Designated: session over already-known bytes (createIfMissing path uses
+    /// empty bytes; nothing is persisted until the first op's store.save).
+    init(docId: String, store: any DocumentStore, bufferLimit: Int, bytes: Data) {
         self.docId = docId
         self.store = store
         self.bufferLimit = bufferLimit
-        self.bytes = try store.load(docId: docId)
+        self.bytes = bytes
+    }
+
+    /// Loads the document from the store (the pre-existing path).
+    init(docId: String, store: any DocumentStore, bufferLimit: Int) throws {
+        self.init(docId: docId, store: store, bufferLimit: bufferLimit,
+                  bytes: try store.load(docId: docId))
     }
 
     var subscriberCount: Int { subscribers.count }

@@ -4,15 +4,24 @@ import PackageDescription
 let package = Package(
     name: "infsketch-server",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v18)
+    ],
+    products: [
+        // Wire-only library the InfinitySketch app links (no FlyingFox, no server code).
+        .library(name: "InfSketchWire", targets: ["InfSketchWire"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swhitty/FlyingFox.git", .upToNextMajor(from: "0.27.0")),
     ],
     targets: [
+        .target(name: "InfSketchWire"),
         .target(
             name: "InfSketchServerKit",
-            dependencies: [.product(name: "FlyingFox", package: "FlyingFox")]
+            dependencies: [
+                "InfSketchWire",
+                .product(name: "FlyingFox", package: "FlyingFox"),
+            ]
         ),
         .executableTarget(
             name: "infsketch-server",
@@ -20,11 +29,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "infsketch-demo",
-            dependencies: ["InfSketchServerKit"]
+            dependencies: ["InfSketchServerKit", "InfSketchWire"]
         ),
         .testTarget(
             name: "InfSketchServerKitTests",
-            dependencies: ["InfSketchServerKit"]
+            dependencies: ["InfSketchServerKit", "InfSketchWire"]
         ),
     ]
 )

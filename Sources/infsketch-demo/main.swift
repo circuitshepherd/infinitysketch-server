@@ -2,6 +2,7 @@
 // its bytes as fullDoc ops, so the web overview visibly ticks (seq, subscribers).
 import Foundation
 import InfSketchServerKit
+import InfSketchWire
 
 #if !canImport(Darwin)
 print("infsketch-demo currently requires macOS (URLSessionWebSocketTask).")
@@ -70,7 +71,7 @@ guard case .helloAck = try await receive() else {
 }
 print("connected to \(urlText)")
 
-try await send(.subscribe(docId: docId, fromSeq: nil))
+try await send(.subscribe(docId: docId, fromSeq: nil, createIfMissing: false))
 guard case .subscribed(_, let seq, .inline(let snapshot)) = try await receive() else {
     print("subscribe failed (does doc '\(docId)' exist?)")
     exit(1)
