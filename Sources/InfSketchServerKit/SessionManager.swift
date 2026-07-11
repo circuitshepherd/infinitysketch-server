@@ -139,6 +139,21 @@ public actor SessionManager {
         return info
     }
 
+    /// The WS twin of the REST listing: store contents + live session info.
+    public func listDocuments() async throws -> [DocListEntry] {
+        let live = await liveInfo()
+        return try store.list()
+            .sorted { $0.docId < $1.docId }
+            .map { info in
+                DocListEntry(
+                    id: info.docId,
+                    sizeBytes: info.sizeBytes,
+                    modifiedAt: info.modifiedAt,
+                    seq: live[info.docId]?.seq,
+                    subscriberCount: live[info.docId]?.subscriberCount)
+            }
+    }
+
     private func scheduleGraceTeardown(docId: String) {
         graceTasks[docId]?.task.cancel()
         let graceId = UUID()

@@ -68,6 +68,23 @@ public struct StatusPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// One row of the server's document listing (the WS twin of the REST
+/// /api/docs summary; DocSummary stays server-side for the HTTP route).
+public struct DocListEntry: Codable, Equatable, Sendable {
+    public var id: String
+    public var sizeBytes: Int
+    public var modifiedAt: Date
+    public var seq: Int?
+    public var subscriberCount: Int?
+    public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?) {
+        self.id = id
+        self.sizeBytes = sizeBytes
+        self.modifiedAt = modifiedAt
+        self.seq = seq
+        self.subscriberCount = subscriberCount
+    }
+}
+
 public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String])
     case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
@@ -75,6 +92,7 @@ public enum ClientMessage: Equatable, Sendable {
     case op(docId: String, opId: String, payload: OpPayload)
     case subscribeStatus
     case unsubscribeStatus
+    case listDocs
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
     case watchDoc(docId: String)
@@ -110,6 +128,8 @@ extension ClientMessage: Codable {
             self = .subscribeStatus
         case "unsubscribeStatus":
             self = .unsubscribeStatus
+        case "listDocs":
+            self = .listDocs
         case "transferEnd":
             self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
         case "transferAbort":
@@ -158,6 +178,8 @@ extension ClientMessage: Codable {
             try c.encode("subscribeStatus", forKey: .type)
         case .unsubscribeStatus:
             try c.encode("unsubscribeStatus", forKey: .type)
+        case .listDocs:
+            try c.encode("listDocs", forKey: .type)
         case .transferEnd(let transferId):
             try c.encode("transferEnd", forKey: .type)
             try c.encode(transferId, forKey: .transferId)
@@ -190,6 +212,7 @@ public enum ServerMessage: Equatable, Sendable {
     case resyncRequired(docId: String, seq: Int)
     case statusEvent(payload: StatusPayload)
     case error(reason: String)
+    case docList(docs: [DocListEntry])
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
     case frameAvailable(docId: String, seq: Int)
@@ -198,7 +221,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs
     }
 
     public init(from decoder: any Decoder) throws {
@@ -238,6 +261,8 @@ extension ServerMessage: Codable {
             self = .statusEvent(payload: try c.decode(StatusPayload.self, forKey: .payload))
         case "error":
             self = .error(reason: try c.decode(String.self, forKey: .reason))
+        case "docList":
+            self = .docList(docs: try c.decode([DocListEntry].self, forKey: .docs))
         case "transferEnd":
             self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
         case "transferAbort":
@@ -295,6 +320,9 @@ extension ServerMessage: Codable {
         case .error(let reason):
             try c.encode("error", forKey: .type)
             try c.encode(reason, forKey: .reason)
+        case .docList(let docs):
+            try c.encode("docList", forKey: .type)
+            try c.encode(docs, forKey: .docs)
         case .transferEnd(let transferId):
             try c.encode("transferEnd", forKey: .type)
             try c.encode(transferId, forKey: .transferId)

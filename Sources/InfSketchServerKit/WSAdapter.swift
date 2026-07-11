@@ -134,6 +134,13 @@ actor Connection {
                 await manager.unsubscribeStatus(sub.token)
             }
 
+        case .listDocs:
+            do {
+                emit(.docList(docs: try await manager.listDocuments()))
+            } catch {
+                emit(.error(reason: "listFailed"))
+            }
+
         case .transferEnd, .transferAbort:
             // Unreachable: the reassembler consumes these or throws.
             emit(.error(reason: "transferViolation"))
