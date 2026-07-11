@@ -128,6 +128,11 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))
 
+        // MCP spike (mcp_endpoint branch): mounts unconditionally, like /ws.
+        // See Sources/InfSketchServerKit/MCP/MCPMount.swift for the transport
+        // bridge and the SPIKE-PIN write-up.
+        await mountMCP(on: http, server: await makeSpikeMCPServer())
+
         await http.appendRoute("GET,HEAD /") { request in
             self.headAware(request, HTTPResponse(
                 statusCode: .ok,

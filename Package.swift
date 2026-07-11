@@ -13,6 +13,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swhitty/FlyingFox.git", .upToNextMajor(from: "0.27.0")),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
     ],
     targets: [
         .target(name: "InfSketchWire"),
@@ -21,6 +22,8 @@ let package = Package(
             dependencies: [
                 "InfSketchWire",
                 .product(name: "FlyingFox", package: "FlyingFox"),
+                .product(name: "FlyingSocks", package: "FlyingFox"),
+                .product(name: "MCP", package: "swift-sdk"),
             ]
         ),
         .executableTarget(
