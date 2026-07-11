@@ -77,8 +77,26 @@ public final class InfSketchServer: Sendable {
         await http.appendRoute("GET /api/docs/*") { request in
             // Path shape: /api/docs/<id>/frame
             let parts = request.path.split(separator: "/").map(String.init)
-            guard parts.count == 4, parts[0] == "api", parts[1] == "docs", parts[3] == "frame",
-                  let bytes = try? store.load(docId: parts[2]),
+            guard parts.count == 4, parts[0] == "api", parts[1] == "docs", parts[3] == "frame" else {
+                return HTTPResponse(statusCode: .notFound)
+            }
+
+            // Live frame from the session cache, when present. The path segment
+            // arrives percent-encoded (the pages build URLs with
+            // encodeURIComponent); session docIds are the decoded names.
+            let decodedId = parts[2].removingPercentEncoding ?? parts[2]
+            if let frame = await manager.latestFrame(docId: decodedId) {
+                return HTTPResponse(
+                    statusCode: .ok,
+                    headers: [
+                        .contentType: "image/png",
+                        HTTPHeader("X-Frame-Stale"): "false",
+                        HTTPHeader("X-Frame-Seq"): "\(frame.seq)",
+                    ],
+                    body: frame.png)
+            }
+
+            guard let bytes = try? store.load(docId: parts[2]),
                   let png = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
             else {
                 return HTTPResponse(statusCode: .notFound)
@@ -90,6 +108,19 @@ public final class InfSketchServer: Sendable {
                     HTTPHeader("X-Frame-Stale"): "true",
                 ],
                 body: png)
+        }
+
+        await http.appendRoute("GET /doc/*") { request in
+            let parts = request.path.split(separator: "/").map(String.init)
+            guard parts.count == 2, parts[0] == "doc",
+                  let docId = parts[1].removingPercentEncoding
+            else {
+                return HTTPResponse(statusCode: .notFound)
+            }
+            return HTTPResponse(
+                statusCode: .ok,
+                headers: [.contentType: "text/html; charset=utf-8"],
+                body: Data(WebUI.docHTML(docId: docId).utf8))
         }
 
         await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))

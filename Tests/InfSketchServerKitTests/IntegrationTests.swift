@@ -70,6 +70,32 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         await server.stop()
     }
 
+    @Test func docPageAndFrameHeaders() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+
+        // Doc page serves for a percent-encoded id.
+        let page = URL(string: "http://127.0.0.1:\(port)/doc/sample")!
+        let (pageData, pageResponse) = try await URLSession.shared.data(from: page)
+        #expect((pageResponse as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: pageData, as: UTF8.self).contains("watchDoc"))
+
+        // No live frame yet: fallback thumbnail, marked stale.
+        let frameURL = URL(string: "http://127.0.0.1:\(port)/api/docs/sample/frame")!
+        let (_, staleResponse) = try await URLSession.shared.data(from: frameURL)
+        #expect((staleResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Frame-Stale") == "true")
+
+        // Submit a frame through the manager; the route now serves it live.
+        _ = try await server.manager.subscribe(docId: "sample")
+        #expect(await server.manager.submitFrame(docId: "sample", bytes: Fixtures.thumbnailPNG))
+        let (liveData, liveResponse) = try await URLSession.shared.data(from: frameURL)
+        let http = try #require(liveResponse as? HTTPURLResponse)
+        #expect(http.value(forHTTPHeaderField: "X-Frame-Stale") == "false")
+        #expect(http.value(forHTTPHeaderField: "X-Frame-Seq") == "0")
+        #expect(liveData == Fixtures.thumbnailPNG)
+        await server.stop()
+    }
+
     #if canImport(Darwin)
     @Test func webSocketEndToEnd() async throws {
         let (server, port, task) = try await startServer()
