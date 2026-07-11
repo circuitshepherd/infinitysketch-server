@@ -144,3 +144,19 @@ import InfSketchWire
         #expect(try ServerMessage(jsonText: w.jsonText()) == w)
     }
 }
+
+@Suite struct DocListWireTests {
+    @Test func listDocsRoundTrips() throws {
+        #expect(try ClientMessage(jsonText: ClientMessage.listDocs.jsonText()) == .listDocs)
+    }
+    @Test func docListRoundTrips() throws {
+        let entry = DocListEntry(id: "a", sizeBytes: 10,
+                                 modifiedAt: Date(timeIntervalSince1970: 1_000_000),
+                                 seq: 3, subscriberCount: 1)
+        let bare = DocListEntry(id: "b", sizeBytes: 0,
+                                modifiedAt: Date(timeIntervalSince1970: 2_000_000),
+                                seq: nil, subscriberCount: nil)
+        let m = ServerMessage.docList(docs: [entry, bare])
+        #expect(try ServerMessage(jsonText: m.jsonText()) == m)
+    }
+}

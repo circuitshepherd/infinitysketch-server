@@ -426,3 +426,24 @@ private struct ServerMessageReader {
         #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
     }
 }
+
+@Suite struct WSAdapterListDocsTests {
+    @Test func listDocsReturnsStoreEntriesWithLiveInfo() async throws {
+        let manager = try makeManager()   // seeds doc "d"
+        let harness = try await Harness(manager: manager)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        _ = try await reader.next()   // subscribed → doc "d" is live
+
+        try harness.send(.listDocs)
+        guard case .docList(let docs) = try await reader.next() else {
+            Issue.record("expected docList"); return
+        }
+        let d = try #require(docs.first(where: { $0.id == "d" }))
+        #expect(d.sizeBytes == Fixtures.docBytes.count)
+        #expect(d.seq == 0)
+        #expect(d.subscriberCount == 1)
+    }
+}
