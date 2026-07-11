@@ -15,13 +15,16 @@ public final class InfSketchServer: Sendable {
     private let store: DirectoryDocumentStore
     private let http: HTTPServer
     private let config: SessionConfig
+    private let mcpAdapter: MCPAdapter
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
         let store = DirectoryDocumentStore(directory: docsDirectory)
         self.store = store
-        self.manager = SessionManager(store: store, config: config)
+        let manager = SessionManager(store: store, config: config)
+        self.manager = manager
         self.http = HTTPServer(port: port)
         self.config = config
+        self.mcpAdapter = MCPAdapter(manager: manager)
     }
 
     /// Configures routes and serves until stopped.
@@ -36,6 +39,7 @@ public final class InfSketchServer: Sendable {
 
     public func stop() async {
         await http.stop(timeout: 1)
+        await mcpAdapter.shutdown()
     }
 
     public var listeningPort: UInt16? {
@@ -128,10 +132,12 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))
 
-        // MCP spike (mcp_endpoint branch): mounts unconditionally, like /ws.
-        // See Sources/InfSketchServerKit/MCP/MCPMount.swift for the transport
-        // bridge and the SPIKE-PIN write-up.
-        await mountMCP(on: http, server: await makeSpikeMCPServer())
+        // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
+        // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the
+        // transport bridge and MCPAdapter.swift for the resource surface +
+        // per-session registry (task-1-report.md has the SPIKE-PIN write-up
+        // this was built from).
+        await mountMCP(on: http, adapter: mcpAdapter)
 
         await http.appendRoute("GET,HEAD /") { request in
             self.headAware(request, HTTPResponse(

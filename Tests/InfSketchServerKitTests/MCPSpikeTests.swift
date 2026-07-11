@@ -13,10 +13,19 @@ import MCP
 /// composes with our FlyingFox server. Starts a real `InfSketchServer` on a
 /// real socket, connects the SDK's own `Client` + `HTTPClientTransport` to
 /// `/mcp` over real HTTP (no in-process shortcut), and drives a full
-/// initialize -> tools/list round-trip. This test is the composition proof
-/// and stays in the suite forever — see docs/superpowers/sdd/task-1-report.md
-/// for the full spike write-up (the three SPIKE-PINs, SDK version, gate
-/// decision).
+/// initialize -> resources/list round-trip. This test is the composition
+/// proof and stays in the suite forever as the mount's regression net — see
+/// docs/superpowers/sdd/task-1-report.md for the full spike write-up (the
+/// three SPIKE-PINs, SDK version, gate decision).
+///
+/// Task 6 replaced the spike's hello-world `ping` tool server with the real
+/// `MCPAdapter` (resources, not tools — Task 7 adds tools). This test was
+/// updated accordingly: the initialize handshake and `serverInfo.name ==
+/// "infsketch"` assertions are unchanged, but the surviving minimal
+/// capability check is now `capabilities.resources?.subscribe == true` +
+/// `resources/list` containing `infsketch://docs`, in place of the old
+/// `capabilities.tools`/`ping` assertions (the adapter declares no tools
+/// capability yet). See task-6-report.md for the full reasoning.
 private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, any Error>) {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("mcp-spike-\(UUID().uuidString)", isDirectory: true)
@@ -30,7 +39,7 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
 }
 
 @Suite struct MCPSpikeTests {
-    @Test func initializeAndListToolsOverRealHTTP() async throws {
+    @Test func initializeAndListResourcesOverRealHTTP() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
 
@@ -43,10 +52,10 @@ private func startServer() async throws -> (InfSketchServer, UInt16, Task<Void, 
         let initResult = try await client.connect(transport: transport)
         #expect(initResult.serverInfo.name == "infsketch")
         #expect(initResult.serverInfo.version == ServerInfo.version)
-        #expect(initResult.capabilities.tools != nil)
+        #expect(initResult.capabilities.resources?.subscribe == true)
 
-        let (tools, _) = try await client.listTools()
-        #expect(tools.contains { $0.name == "ping" })
+        let (resources, _) = try await client.listResources()
+        #expect(resources.contains { $0.uri == "infsketch://docs" })
 
         await client.disconnect()
         await server.stop()

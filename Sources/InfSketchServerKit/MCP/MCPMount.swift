@@ -3,107 +3,51 @@ import FlyingFox
 import FlyingSocks
 import MCP
 
-// MARK: - SPIKE (mcp_endpoint branch)
+// MARK: - MCP mount (Task 6, mcp_endpoint branch)
 //
-// Proves the official MCP swift-sdk composes with our FlyingFox server, on
-// both macOS and Linux, before any real MCP endpoint work begins. See
-// docs/superpowers/... task-1-report.md for the full write-up (the three
-// SPIKE-PINs, SDK version, test results). Summary of the discovery below.
+// A thin, stateless FlyingFox <-> MCP.HTTPRequest/Response converter. All
+// MCP-domain state — the per-session registry, resource handlers, and
+// subscribe/notify bookkeeping — lives in `MCPAdapter` (see
+// `MCPAdapter.swift`); this file only knows how to translate one FlyingFox
+// request into `MCP.HTTPRequest`, hand it to `adapter.handle(_:)`, and
+// translate the `MCP.HTTPResponse` back. Task 1's spike (task-1-report.md)
+// proved this conversion; the three SPIKE-PINs it established:
 //
 // [SPIKE-PIN-1] `MCP.StatefulHTTPServerTransport` is framework-agnostic: it
 // does NOT own a socket listener. It exposes
 //     func handleRequest(_ request: MCP.HTTPRequest) async -> MCP.HTTPResponse
-// a plain request handler we call once per incoming FlyingFox request. So
-// mounting it is a matter of:
-//   1. Converting FlyingFox's `HTTPRequest` (method/headers/bodyData) into
-//      `MCP.HTTPRequest` (method: String, headers: [String: String], body: Data?).
-//   2. Calling `transport.handleRequest(_:)`.
-//   3. Converting the returned `MCP.HTTPResponse` back to a FlyingFox
-//      `HTTPResponse`. Every case except `.stream` maps to a plain
-//      `HTTPBodySequence(data:)` body. `.stream(let stream, _)` carries an SDK
-//      `AsyncThrowingStream<Data, Error>` (the SSE body for a POST response or
-//      the standalone GET stream) — bridged into a FlyingFox
-//      `HTTPBodySequence` via `SSEByteSequence`, a small
-//      `AsyncBufferedSequence<UInt8>` adapter (FlyingFox's body type wants a
-//      *buffered byte* sequence, not a bare `AsyncSequence<Data>`). Passing it
-//      through `HTTPBodySequence(from:suggestedBufferSize:)` (the no-`count`
-//      overload) makes FlyingFox treat the body as HTTP/1.1 chunked-transfer
-//      and add the `Transfer-Encoding: chunked` header itself — exactly the
-//      shape an indeterminate-length SSE stream needs. The connection (and
-//      the SSE stream) stays open for exactly as long as the underlying
-//      `AsyncThrowingStream` keeps yielding; FlyingFox's per-chunk write loop
-//      is what keeps it alive on the wire.
+// a plain request handler. Converting the returned `MCP.HTTPResponse` back
+// to a FlyingFox `HTTPResponse`: every case except `.stream` maps to a plain
+// `HTTPBodySequence(data:)` body. `.stream(let stream, _)` carries an SDK
+// `AsyncThrowingStream<Data, Error>` (the SSE body for a POST response or
+// the standalone GET stream) — bridged into a FlyingFox `HTTPBodySequence`
+// via `SSEByteSequence`, a small `AsyncBufferedSequence<UInt8>` adapter
+// (FlyingFox's body type wants a *buffered byte* sequence, not a bare
+// `AsyncSequence<Data>`). Passing it through
+// `HTTPBodySequence(from:suggestedBufferSize:)` (the no-`count` overload)
+// makes FlyingFox treat the body as HTTP/1.1 chunked-transfer and add the
+// `Transfer-Encoding: chunked` header itself — exactly the shape an
+// indeterminate-length SSE stream needs. The connection (and the SSE
+// stream) stays open for exactly as long as the underlying
+// `AsyncThrowingStream` keeps yielding; FlyingFox's per-chunk write loop is
+// what keeps it alive on the wire.
 //
-// [SPIKE-PIN-2] `resources/subscribe` / `resources/unsubscribe` are
-// `MCP.ResourceSubscribe` / `MCP.ResourceUnsubscribe` (both conform `Method`,
-// names "resources/subscribe" / "resources/unsubscribe", `Parameters { uri:
-// String }`). A handler registered via
-// `server.withMethodHandler(ResourceSubscribe.self) { params in ... }` reads
-// the current session's identity via the task-local
-// `Server.currentHandlerContext?.httpContext` (an `MCP.HTTPRequest?`) — e.g.
-// `Server.currentHandlerContext?.httpContext?.header(HTTPHeaderName.sessionID)`
-// for the `Mcp-Session-Id` header. This requires one `MCP.Server` +
-// `StatefulHTTPServerTransport` PER SESSION (see the SDK's own
-// `MCPConformance/Server/HTTPApp.swift` for the reference multi-session
-// pattern) — a single `Server` actor's `connection` is last-transport-wins,
-// so it cannot correctly serve two concurrent sessions itself.
+// Multi-session support (this task): `StatefulHTTPServerTransport` only
+// supports one `initialize` per instance, and one `MCP.Server` actor can
+// only usefully back one live transport — see `MCPAdapter.handle(_:)` for
+// the per-session `[sessionID: (Server, Transport)]` registry this mount
+// now delegates to (the same pattern as the SDK's own
+// `MCPConformance/Server/HTTPApp.swift` reference, adapted for FlyingFox).
 //
-// [SPIKE-PIN-3] Pushing `notifications/resources/updated` to one specific
-// session is `Server.notify<N: Notification>(_ notification: Message<N>)
-// async throws`, called on THAT session's own `Server` instance — e.g.
-// `try await session.server.notify(ResourceUpdatedNotification.message(.init(uri: uri)))`.
-// `StatefulHTTPServerTransport.send(_:)` classifies the outgoing JSON-RPC data
-// and, for a notification (no `id`), routes it to that transport's standalone
-// GET `/mcp` SSE stream. There is no "broadcast to session X" call on a
-// shared object — addressing a session is purely "which Server/Transport pair
-// do I call `.notify` on", which is why per-session Server instances (PIN-2)
-// are required for Tasks 6-7, not just convenient.
+// [SPIKE-PIN-2]/[SPIKE-PIN-3] (session identity + server-initiated push) are
+// entirely `MCPAdapter`'s concern now; see that file's header comment.
 
-/// Builds the spike's hello-world MCP server: one `ping` tool, resources +
-/// tools capabilities declared (so `Client.listTools()` — which asserts a
-/// non-nil `tools` capability — and a future `resources/subscribe` handler
-/// both have somewhere to attach).
-public func makeSpikeMCPServer() async -> MCP.Server {
-    let server = MCP.Server(
-        name: "infsketch",
-        version: ServerInfo.version,
-        capabilities: .init(
-            resources: .init(subscribe: true, listChanged: nil),
-            tools: .init(listChanged: nil)
-        )
-    )
-
-    let pingTool = Tool(
-        name: "ping",
-        description: "Spike hello-world tool: always available, takes no arguments.",
-        inputSchema: .object(["type": "object", "properties": .object([:])])
-    )
-
-    await server.withMethodHandler(ListTools.self) { _ in
-        ListTools.Result(tools: [pingTool])
-    }
-
-    return server
-}
-
-/// [SPIKE-PIN-1] Mounts one `MCP.Server` behind FlyingFox's `POST /mcp`,
-/// `GET /mcp`, `DELETE /mcp` routes via a single `StatefulHTTPServerTransport`.
-///
-/// This is a single-session bridge (matching the spike's one-client proof in
-/// `MCPSpikeTests`): the transport itself only supports one `initialize` per
-/// instance (a second `initialize` is rejected with 400 "Session already
-/// initialized"), and one `MCP.Server` actor can only usefully back one live
-/// transport (see PIN-2/PIN-3 above). Multi-session support for Tasks 6-7
-/// means keying a `[sessionID: (server, transport)]` map by the
-/// `Mcp-Session-Id` header and creating a fresh pair per `initialize`, exactly
-/// as the SDK's own `MCPConformance/Server/HTTPApp.swift` reference does for
-/// its NIO transport.
-public func mountMCP(on http: HTTPServer, server: MCP.Server) async {
-    let transport = StatefulHTTPServerTransport()
-    try? await server.start(transport: transport)
-
+/// Mounts the MCP endpoint behind FlyingFox's `POST /mcp`, `GET /mcp`,
+/// `DELETE /mcp` routes. Every request is bridged to `MCP.HTTPRequest` and
+/// handed to `adapter.handle(_:)`, which owns all session routing.
+public func mountMCP(on http: HTTPServer, adapter: MCPAdapter) async {
     let handler: @Sendable (FlyingFox.HTTPRequest) async throws -> FlyingFox.HTTPResponse = { request in
-        await mcpBridgeResponse(for: request, through: transport)
+        await mcpBridgeResponse(for: request, through: adapter)
     }
 
     await http.appendRoute("POST /mcp", handler: handler)
@@ -111,12 +55,12 @@ public func mountMCP(on http: HTTPServer, server: MCP.Server) async {
     await http.appendRoute("DELETE /mcp", handler: handler)
 }
 
-/// Converts a FlyingFox request into `MCP.HTTPRequest`, calls the transport,
+/// Converts a FlyingFox request into `MCP.HTTPRequest`, calls the adapter,
 /// and converts the `MCP.HTTPResponse` back — including the `.stream` (SSE)
 /// case.
 private func mcpBridgeResponse(
     for request: FlyingFox.HTTPRequest,
-    through transport: StatefulHTTPServerTransport
+    through adapter: MCPAdapter
 ) async -> FlyingFox.HTTPResponse {
     var headers: [String: String] = [:]
     for (key, value) in request.headers {
@@ -131,8 +75,11 @@ private func mcpBridgeResponse(
         path: request.path
     )
 
-    let mcpResponse = await transport.handleRequest(mcpRequest)
+    let mcpResponse = await adapter.handle(mcpRequest)
+    return flyingFoxResponse(from: mcpResponse)
+}
 
+private func flyingFoxResponse(from mcpResponse: MCP.HTTPResponse) -> FlyingFox.HTTPResponse {
     var responseHeaders = FlyingFox.HTTPHeaders()
     for (key, value) in mcpResponse.headers {
         responseHeaders[FlyingFox.HTTPHeader(key)] = value
@@ -143,14 +90,12 @@ private func mcpBridgeResponse(
         return FlyingFox.HTTPResponse(
             statusCode: flyingFoxStatusCode(mcpResponse.statusCode),
             headers: responseHeaders,
-            body: HTTPBodySequence(from: SSEByteSequence(stream: stream))
-        )
+            body: HTTPBodySequence(from: SSEByteSequence(stream: stream)))
     default:
         return FlyingFox.HTTPResponse(
             statusCode: flyingFoxStatusCode(mcpResponse.statusCode),
             headers: responseHeaders,
-            body: mcpResponse.bodyData ?? Data()
-        )
+            body: mcpResponse.bodyData ?? Data())
     }
 }
 
