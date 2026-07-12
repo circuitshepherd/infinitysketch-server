@@ -464,6 +464,23 @@ public actor MCPAdapter {
                 "required": .array(["docId", "bytes"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "create_doc",
+            description: """
+                Creates a new document containing the InfinitySketch app's empty default \
+                content, authored by a connected InfinitySketch device. REQUIRES such a \
+                device to be connected to the server — fails with noDeviceAvailable if none \
+                is, deviceTimeout if it doesn't respond in time, and docExists if a document \
+                with this id already exists.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to create."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -476,6 +493,7 @@ public actor MCPAdapter {
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
+        case "create_doc": return await callCreateDoc(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -570,6 +588,44 @@ public actor MCPAdapter {
             let bytes = try Self.base64DataArg(arguments, "bytes")
             return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
                 "replaced \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Unlike the other four tools, the bytes to write don't come from the
+    /// agent or from mutating the current document — they're solicited live
+    /// from a connected InfinitySketch device via `broker.requestCreation`
+    /// (Task 3's `CreateDocBroker`, routed over the WS `createDocRequest`/
+    /// `createDocReply` pair). `docExists` is checked BEFORE ever contacting
+    /// a device, so an existing docId never reaches (or wakes) the device.
+    private func callCreateDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+
+            if await manager.currentBytes(docId: docId) != nil {
+                return Self.errorResult("docExists")
+            }
+
+            let bytes: Data
+            do {
+                bytes = try await broker.requestCreation(docId: docId)
+            } catch let error as CreateDocBroker.CreateDocError {
+                switch error {
+                case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
+                case .creationInProgress: return Self.errorResult("creationInProgress")
+                case .deviceTimeout: return Self.errorResult("deviceTimeout")
+                case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
+                }
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
+                "created \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
