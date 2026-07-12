@@ -10,16 +10,26 @@ public struct SessionConfig: Sendable {
     /// Payload bytes per binary chunk message. Header + payload stays under
     /// URLSessionWebSocketTask's 1 MiB default receive cap.
     public var chunkSize: Int
+    /// MCP sessions idle longer than this are reaped (the SDK's own client
+    /// never sends `DELETE /mcp`, so idle reaping is the ORDINARY teardown
+    /// path for MCP sessions, not a safety net — see MCPAdapter).
+    public var mcpSessionIdleTimeout: Duration
+    /// How often the MCP adapter sweeps for idle sessions.
+    public var mcpSessionCleanupInterval: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
         inlineLimit: Int = 256 * 1024,
-        chunkSize: Int = 512 * 1024
+        chunkSize: Int = 512 * 1024,
+        mcpSessionIdleTimeout: Duration = .seconds(3600),
+        mcpSessionCleanupInterval: Duration = .seconds(60)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
         self.inlineLimit = inlineLimit
         self.chunkSize = chunkSize
+        self.mcpSessionIdleTimeout = mcpSessionIdleTimeout
+        self.mcpSessionCleanupInterval = mcpSessionCleanupInterval
     }
 }
 
@@ -38,6 +48,28 @@ public struct SubscribeResult: Sendable {
 public struct WatchResult: Sendable {
     public let events: AsyncStream<ServerMessage>
     public let token: UUID
+}
+
+/// Outcome of a document write. `accepted` carries the seq this write was
+/// assigned, threaded back from the ONE place that knows it atomically —
+/// `DocumentSession.submit`, the same actor turn that increments the
+/// counter. Callers must use THIS seq for acks, never a separate read-back
+/// after the write returns: both actors are reentrant, so a racing
+/// concurrent write to the same doc can land in the gap between the write
+/// and a follow-up `seq`/`liveInfo()` read, making the read-back report the
+/// LATER write's seq (Task 7 review, Important #1 — empirically reproduced).
+/// `rejected` carries the `.reject` ServerMessage to deliver to the
+/// submitter only.
+public enum SubmitOutcome: Equatable, Sendable {
+    case accepted(seq: Int)
+    case rejected(ServerMessage)
+
+    /// The `.reject` message when rejected, nil when accepted — for callers
+    /// (the WS adapter) that only need to forward a rejection.
+    public var rejectMessage: ServerMessage? {
+        if case .rejected(let message) = self { return message }
+        return nil
+    }
 }
 
 /// Per-document hub: current bytes, seq counter, subscriber fan-out.
@@ -70,6 +102,12 @@ actor DocumentSession {
     }
 
     var subscriberCount: Int { subscribers.count }
+
+    /// The document's current in-memory bytes — always in sync with the
+    /// store's on-disk copy, since `submit` writes through before updating
+    /// this. Read-only accessor for callers (e.g. MCP tools) that just need
+    /// the live content without subscribing.
+    var currentBytes: Data { bytes }
 
     func subscribe() -> SubscribeResult {
         let token = UUID()
@@ -130,26 +168,28 @@ actor DocumentSession {
         broadcast(.watchers(docId: docId, count: watchers.count))
     }
 
-    /// Returns nil when accepted (the broadcast echo is the submitter's ack),
-    /// or a .reject to deliver to the submitter only.
-    func submit(opId: String, payload: OpPayload) -> ServerMessage? {
+    /// Returns `.accepted(seq:)` carrying the newly assigned seq (the
+    /// broadcast echo remains the subscriber-facing ack; the returned seq is
+    /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
+    /// a .reject to deliver to the submitter only.
+    func submit(opId: String, payload: OpPayload) -> SubmitOutcome {
         guard payload.type == "fullDoc" else {
-            return .reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq)
+            return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
         }
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let newBytes) = payload.bulk else {
-            return .reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq)
+            return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
         }
         do {
             try store.save(docId: docId, bytes: newBytes)
         } catch {
             FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
-            return .reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq)
+            return .rejected(.reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq))
         }
         bytes = newBytes
         seq += 1
         broadcast(.event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload))
-        return nil
+        return .accepted(seq: seq)
     }
 
     private func broadcast(_ message: ServerMessage) {

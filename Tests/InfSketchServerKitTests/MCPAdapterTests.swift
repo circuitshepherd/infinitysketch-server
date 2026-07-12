@@ -1,0 +1,767 @@
+// macOS-only: the SDK's HTTPClientTransport does not support SSE on Linux
+// (documented in its source), so its Client cannot complete initialize against
+// StatefulHTTPServerTransport there; the server-side mount + adapter are
+// Linux-safe to compile — see task-1-report.md (gate resolution) and
+// MCPSpikeTests.swift, which carries the identical gate.
+#if !os(Linux)
+
+import Foundation
+import Testing
+@testable import InfSketchServerKit
+import MCP
+import InfSketchWire
+
+
+/// Task 6 (mcp_endpoint branch): `MCPAdapter` — the MCP resource surface
+/// (doc list / summary / raw bytes / frame PNG) plus `resources/subscribe`
+/// with debounced update notifications. Uses the SDK's own `Client` +
+/// `HTTPClientTransport` over real HTTP, the same pattern as
+/// `MCPSpikeTests.swift`.
+private func startServer(
+    seedDocId: String = "d",
+    bytes: Data = Fixtures.docBytes,
+    config: SessionConfig = SessionConfig()
+) async throws -> (
+    InfSketchServer, UInt16, Task<Void, any Error>
+) {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mcp-adapter-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let store = DirectoryDocumentStore(directory: dir)
+    try store.save(docId: seedDocId, bytes: bytes)
+
+    let server = InfSketchServer(port: 0, docsDirectory: dir, config: config)
+    let task = Task { try await server.run() }
+    try await server.waitUntilListening()
+    let port = try #require(await server.listeningPort)
+    return (server, port, task)
+}
+
+/// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK
+/// client cannot: explicit `DELETE /mcp`, `resources/unsubscribe`, and
+/// header-less / validation-failing POSTs.
+private func rawMCPRequest(
+    port: UInt16,
+    method: String,
+    sessionID: String? = nil,
+    accept: String = "application/json, text/event-stream",
+    jsonBody: String? = nil
+) async throws -> (Data, HTTPURLResponse) {
+    var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/mcp")!)
+    request.httpMethod = method
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
+    if let jsonBody {
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        request.httpBody = Data(jsonBody.utf8)
+    }
+    let (data, response) = try await URLSession.shared.data(for: request)
+    let http = try #require(response as? HTTPURLResponse)
+    return (data, http)
+}
+
+private func connectedClient(port: UInt16) async throws -> Client {
+    let endpoint = URL(string: "http://127.0.0.1:\(port)/mcp")!
+    // Short sseInitializationTimeout: the SDK client's SSE task waits for an
+    // internal "session id set" signal before opening its standalone GET
+    // stream, and that signal is racy (the trigger can fire before the task
+    // registers its continuation — more likely under parallel test load), in
+    // which case the task waits out the FULL timeout (default 10s!) before
+    // proceeding anyway. Our tests only use the client after connect()
+    // returns, when the session id is always set, so a short timeout just
+    // caps the raced wait at 500ms instead of stalling notifications for 10s.
+    let transport = HTTPClientTransport(endpoint: endpoint, sseInitializationTimeout: 0.5)
+    let client = Client(name: "mcp-adapter-test-client", version: "0.0.1")
+    _ = try await client.connect(transport: transport)
+    return client
+}
+
+/// Collects `notifications/resources/updated` uris off the client's
+/// notification handler. An actor (not a plain array) because the handler
+/// closure runs off whatever task drives the client's receive loop.
+private actor NotificationSink {
+    private(set) var uris: [String] = []
+    func record(_ uri: String) { uris.append(uri) }
+    func reset() { uris.removeAll() }
+}
+
+/// Polls (bounded by `timeoutMS`) rather than a fixed sleep, so the happy
+/// path resolves as soon as the notification actually arrives.
+private func waitFor(_ sink: NotificationSink, atLeast n: Int, timeoutMS: Int = 2000) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(timeoutMS))
+    while ContinuousClock.now < deadline {
+        if await sink.uris.count >= n { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return await sink.uris.count >= n
+}
+
+/// The SDK client attaches its standalone GET SSE stream ASYNCHRONOUSLY
+/// after initialize (HTTPClientTransport's `streamingTask`) — a notification
+/// pushed before it attaches is stored server-side for replay only and never
+/// live-delivered, so a test that writes immediately after subscribing races
+/// the attach. Prime the channel: submit throwaway writes until one is
+/// actually delivered, then let cooldowns drain and reset the sink so the
+/// test counts from a clean, attached state.
+private func primePushChannel(
+    server: InfSketchServer, sink: NotificationSink, docId: String = "d"
+) async throws {
+    for attempt in 0..<10 {
+        _ = await server.manager.submit(
+            docId: docId, opId: "prime-\(attempt)",
+            payload: OpPayload(type: "fullDoc", data: Data([0xEE])))
+        if await waitFor(sink, atLeast: 1, timeoutMS: 700) { break }
+    }
+    #expect(await sink.uris.count >= 1, "push channel never became live")
+    #expect(await sink.uris.first == "infsketch://doc/\(docId)")
+    try await quiesce(sink)
+    await sink.reset()
+}
+
+/// Waits until no notification has arrived for a full cooldown-plus-margin
+/// window, so no in-flight trailing notify (the debouncer's 500ms trailing
+/// edge) can pollute counts taken after this returns.
+private func quiesce(_ sink: NotificationSink) async throws {
+    var last = await sink.uris.count
+    while true {
+        try await Task.sleep(for: .milliseconds(700))
+        let now = await sink.uris.count
+        if now == last { return }
+        last = now
+    }
+}
+
+private struct SummaryEnvelope: Decodable {
+    var seq: Int
+    var summary: DocJSON.DocSummary
+}
+
+/// Concatenates every `.text` content item's string. This adapter's tool
+/// results are always a single text item, but staying robust to more is free.
+private func toolResultText(_ content: [Tool.Content]) -> String {
+    content.compactMap { item -> String? in
+        if case .text(let text, _, _) = item { return text }
+        return nil
+    }.joined()
+}
+
+/// Tool results that report success are shaped "<verb> <id> at seq <n>" —
+/// this pulls the id back out for tests that need to act on it afterward
+/// (e.g. edit/remove a just-added text).
+private func addedId(from resultText: String) -> String {
+    String(resultText.split(separator: " ").dropFirst().first ?? "")
+}
+
+/// `.serialized`: the SDK client's standalone GET SSE stream is unreliable
+/// under parallel in-process load — its internal session-id signal race,
+/// "POST stream closed without data → cancel GET" reconnection heuristic,
+/// and 3s retry interval combine so that several concurrent clients in one
+/// process can leave one deaf to server pushes for many seconds (observed:
+/// zero deliveries for 7s with 6+ concurrent clients; every test passes
+/// solo and in small parallel groups). Serializing this suite removes that
+/// client-side flake without weakening any server-side assertion.
+@Suite(.serialized) struct MCPAdapterTests {
+    @Test func listResourcesContainsTemplatesAndSeededDoc() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (resources, _) = try await client.listResources()
+        #expect(resources.contains { $0.uri == "infsketch://docs" })
+        #expect(resources.contains { $0.uri == "infsketch://doc/d" })
+
+        await server.stop()
+    }
+
+    @Test func readResourceCoversDocsSummaryRawAndFrame() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let docsContents = try await client.readResource(uri: "infsketch://docs")
+        #expect(docsContents.count == 1)
+        #expect(docsContents[0].mimeType == "application/json")
+        let docsJSON = try #require(docsContents[0].text)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entries = try decoder.decode([DocListEntry].self, from: Data(docsJSON.utf8))
+        #expect(entries.contains { $0.id == "d" })
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        #expect(summaryContents.count == 1)
+        #expect(summaryContents[0].mimeType == "application/json")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)  // no live session yet
+        #expect(envelope.summary.texts.isEmpty)
+        #expect(envelope.summary.darkColorScheme == false)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        #expect(rawContents.count == 1)
+        #expect(rawContents[0].mimeType == "application/octet-stream")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+
+        let frameContents = try await client.readResource(uri: "infsketch://doc/d/frame")
+        #expect(frameContents.count == 1)
+        #expect(frameContents[0].mimeType == "image/png")
+        let frameBlob = try #require(frameContents[0].blob)
+        #expect(Data(base64Encoded: frameBlob) == Fixtures.thumbnailPNG)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await client.readResource(uri: "infsketch://doc/ghost")
+        }
+
+        await server.stop()
+    }
+
+    @Test func subscribedSessionReceivesUpdateNotificationOnWrite() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let sink = NotificationSink()
+        await client.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+
+        try await client.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // Channel proven live and quiet: one write → exactly its notification.
+        let outcome = await server.manager.submit(
+            docId: "d", opId: "mcp-adapter-1",
+            payload: OpPayload(type: "fullDoc", data: Fixtures.docBytes))
+        #expect(outcome.rejectMessage == nil)
+
+        let arrived = await waitFor(sink, atLeast: 1)
+        #expect(arrived)
+        #expect(await sink.uris.first == "infsketch://doc/d")
+
+        await server.stop()
+    }
+
+    @Test func rapidWritesDebounceToAtMostTwoNotifications() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let sink = NotificationSink()
+        await client.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+
+        try await client.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // Two writes back-to-back: the debouncer's contract is one
+        // immediate notify + at most one trailing notify after the 500ms
+        // cooldown (NotificationDebouncer.minInterval) — never one per write.
+        _ = await server.manager.submit(
+            docId: "d", opId: "rapid-1", payload: OpPayload(type: "fullDoc", data: Data([1])))
+        _ = await server.manager.submit(
+            docId: "d", opId: "rapid-2", payload: OpPayload(type: "fullDoc", data: Data([2])))
+
+        // Wait comfortably past the cooldown window so a trailing notify
+        // (if owed) has time to fire, then assert the cap.
+        try await Task.sleep(for: .milliseconds(1200))
+        let count = await sink.uris.count
+        #expect(count >= 1)
+        #expect(count <= 2)
+
+        await server.stop()
+    }
+
+    @Test func explicitDeleteEndsSessionAndStopsNotifications() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+
+        let sink = NotificationSink()
+        await client.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+
+        try await client.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // The SDK client (0.12.1) never sends DELETE — client.disconnect()
+        // only invalidates its local URLSession — so real session teardown
+        // must be driven with an explicit DELETE /mcp carrying the session id.
+        let sessionIDs = await server.mcpAdapter.activeSessionIDs
+        #expect(sessionIDs.count == 1)
+        let sessionID = try #require(sessionIDs.first)
+        let (_, deleteResponse) = try await rawMCPRequest(
+            port: port, method: "DELETE", sessionID: sessionID)
+        #expect(deleteResponse.statusCode == 200)
+
+        // The registry entry and the debouncer subscription are gone…
+        #expect(await server.mcpAdapter.activeSessionIDs.isEmpty)
+        #expect(await server.mcpAdapter.debouncerSubscriptions.isEmpty)
+
+        // …and a post-DELETE write pushes nothing (sink was reset by the
+        // primer) and must not crash the pump.
+        _ = await server.manager.submit(
+            docId: "d", opId: "after-end", payload: OpPayload(type: "fullDoc", data: Data([2])))
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await sink.uris.isEmpty)
+
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test func idleSessionIsReapedAndItsSubscriptionsDropped() async throws {
+        // The SDK client never sends DELETE, so idle reaping is the ordinary
+        // teardown path for MCP sessions. Shortened timeouts via config.
+        // All assertions are server-side (registry + debouncer hooks):
+        // client-side silence after a reap is trivially true (the reap
+        // closes the client's SSE stream), so it proves nothing.
+        let (server, port, task) = try await startServer(config: SessionConfig(
+            mcpSessionIdleTimeout: .milliseconds(500),
+            mcpSessionCleanupInterval: .milliseconds(100)))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+
+        try await client.subscribeToResource(uri: "infsketch://doc/d")
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 1)
+        #expect(await server.mcpAdapter.debouncerSubscriptions["d"]?.count == 1)
+
+        // Client goes quiet (sends no further requests): past the idle
+        // timeout the adapter must reap the session — registry entry
+        // removed and debouncer subscription dropped.
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(await server.mcpAdapter.activeSessionIDs.isEmpty)
+        #expect(await server.mcpAdapter.debouncerSubscriptions.isEmpty)
+
+        // A post-reap write must not crash the pump.
+        _ = try await server.manager.subscribe(docId: "d")
+        _ = await server.manager.submit(
+            docId: "d", opId: "after-reap", payload: OpPayload(type: "fullDoc", data: Data([2])))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await server.mcpAdapter.debouncerSubscriptions.isEmpty)
+
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test func resourcesUnsubscribeStopsNotifications() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+
+        let sink = NotificationSink()
+        await client.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+
+        try await client.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // The SDK client (0.12.1) has no unsubscribe method, so drive
+        // resources/unsubscribe with a raw JSON-RPC POST carrying the
+        // session id. The response streams back SSE-framed; assert it is a
+        // result, not an error (unwired handler would be method-not-found).
+        let sessionID = try #require(await server.mcpAdapter.activeSessionIDs.first)
+        let (body, response) = try await rawMCPRequest(
+            port: port, method: "POST", sessionID: sessionID,
+            jsonBody: #"{"jsonrpc":"2.0","id":"unsub-1","method":"resources/unsubscribe","params":{"uri":"infsketch://doc/d"}}"#)
+        #expect(response.statusCode == 200)
+        let text = String(decoding: body, as: UTF8.self)
+        #expect(text.contains(#""result""#))
+        #expect(!text.contains(#""error""#))
+
+        // Dropped server-side…
+        #expect(await server.mcpAdapter.debouncerSubscriptions.isEmpty)
+
+        // …and the client is STILL fully connected (live GET stream, session
+        // registered) — so this silence assertion is meaningful: were the
+        // subscription still registered, the notification WOULD arrive.
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 1)
+        _ = await server.manager.submit(
+            docId: "d", opId: "post-unsub", payload: OpPayload(type: "fullDoc", data: Data([2])))
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await sink.uris.isEmpty)
+
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test func headerlessNonInitializePostIsRejectedWithoutCreatingASession() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+
+        let (_, response) = try await rawMCPRequest(
+            port: port, method: "POST",
+            jsonBody: #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        #expect(response.statusCode == 400)
+        #expect(await server.mcpAdapter.activeSessionIDs.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func initializeFailingTransportValidationRollsBackTheSession() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+
+        // A genuine initialize request whose Accept header fails the
+        // transport's validation pipeline (no text/event-stream): the
+        // adapter creates the session pair, the transport 406es, and the
+        // rollback branch must remove the just-registered session.
+        let (_, response) = try await rawMCPRequest(
+            port: port, method: "POST",
+            accept: "application/json",
+            jsonBody: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#)
+        #expect(response.statusCode == 406)
+        #expect(await server.mcpAdapter.activeSessionIDs.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - Tools (Task 7)
+
+    @Test func listToolsContainsAllFourWriteTools() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        let names = Set(tools.map(\.name))
+        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc"])
+        // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
+        let editText = try #require(tools.first { $0.name == "edit_text" })
+        #expect(editText.description?.contains("resets") == true)
+
+        await server.stop()
+    }
+
+    @Test func addTextSucceedsAndSummaryReflectsIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "hello agent", "x": 10, "y": 20, "pinned": false])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("added "))
+        #expect(text.contains("seq 1"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == 1)
+        #expect(envelope.summary.texts.count == 1)
+        #expect(envelope.summary.texts.first?.text == "hello agent")
+        #expect(envelope.summary.texts.first?.x == 10)
+        #expect(envelope.summary.texts.first?.y == 20)
+        #expect(envelope.summary.texts.first?.pinned == false)
+
+        await server.stop()
+    }
+
+    /// The mandatory rider (Task 3 review, N2): a numeric-looking JSON STRING
+    /// must be rejected as a tool error, never coerced (`Double("40000")`
+    /// would succeed and, for a truly non-finite string, would arm DocJSON's
+    /// x/y finite-value precondition remotely).
+    @Test func addTextRejectsNonNumericCoordinateWithoutCoercion() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "hi", "x": .string("40000"), "y": 20])
+        #expect(isError == true)
+        #expect(!toolResultText(content).isEmpty)
+
+        // No crash, and the doc is untouched (no session was ever opened).
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+        #expect(envelope.summary.texts.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func addTextUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "ghost", "text": "hi", "x": 1, "y": 2])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func editTextUnknownIdReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": "ghost-id", "text": "new"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "textNotFound")
+
+        await server.stop()
+    }
+
+    @Test func editTextUpdatesTextAndPosition() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (addContent, addIsError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "before", "x": 1, "y": 2])
+        #expect(addIsError != true)
+        let id = addedId(from: toolResultText(addContent))
+
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(id), "text": "after", "x": 5, "y": 6])
+        #expect(editIsError != true)
+        #expect(toolResultText(editContent).contains("seq 2"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.summary.texts.count == 1)
+        #expect(envelope.summary.texts.first?.text == "after")
+        #expect(envelope.summary.texts.first?.x == 5)
+        #expect(envelope.summary.texts.first?.y == 6)
+
+        await server.stop()
+    }
+
+    @Test func removeTextRemovesEntryById() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (addContent, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "gone soon", "x": 1, "y": 2])
+        let id = addedId(from: toolResultText(addContent))
+
+        let (removeContent, removeIsError) = try await client.callTool(
+            name: "remove_text", arguments: ["docId": "d", "textId": .string(id)])
+        #expect(removeIsError != true)
+        #expect(toolResultText(removeContent).contains("seq 2"))
+
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.summary.texts.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Covers the `createIfMissing: true` path `create_doc` would have used
+    /// (deferred per the Task 2 gate resolution — see the plan doc).
+    @Test func replaceDocForFreshIdStoresFile() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let freshBytes = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8)
+        let (content, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "fresh", "bytes": .string(freshBytes.base64EncodedString())])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("seq 1"))
+
+        let entries = try await server.manager.listDocuments()
+        #expect(entries.contains { $0.id == "fresh" })
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/fresh/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == freshBytes)
+
+        await server.stop()
+    }
+
+    @Test func replaceDocRoundTripsRawBytes() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let originalRaw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        #expect(Data(base64Encoded: try #require(originalRaw[0].blob)) == Fixtures.docBytes)
+
+        let replacement = Data(#"{"aaa001_thumbnailData":"","marker":"replaced"}"#.utf8)
+        let (_, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "d", "bytes": .string(replacement.base64EncodedString())])
+        #expect(isError != true)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == replacement)
+
+        await server.stop()
+    }
+
+    /// The seq in a tool ack must be the seq THIS call's own write was
+    /// assigned — not whatever the doc's seq happens to be a beat later
+    /// (Task 7 review, Important #1: the original implementation read the
+    /// seq back via a separate `liveInfo()` actor hop AFTER the write, so a
+    /// racing concurrent write landing in that gap made the ack report the
+    /// wrong seq). Race shape: several concurrent `add_text` calls to the
+    /// same doc. Ground truth comes from the broadcast events — each
+    /// accepted write's event carries its assigned seq, and the event that
+    /// FIRST contains a given text id is that text's own write (no other
+    /// writer can carry id U in its payload before U's own write landed, and
+    /// seqs are assigned in landing order).
+    @Test func toolAckSeqIsTheWritesOwnAssignedSeqUnderConcurrency() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // Direct manager subscription = the broadcast ground truth.
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+
+        let concurrency = 6
+        let results: [(id: String, reportedSeq: Int)] = try await withThrowingTaskGroup(
+            of: (String, Int).self
+        ) { group in
+            for i in 0..<concurrency {
+                group.addTask {
+                    let (content, isError) = try await client.callTool(
+                        name: "add_text",
+                        arguments: ["docId": "d", "text": "race \(i)", "x": 1, "y": 2])
+                    #expect(isError != true)
+                    let text = toolResultText(content)
+                    let reportedSeq = try #require(Int(text.split(separator: " ").last ?? ""))
+                    return (addedId(from: text), reportedSeq)
+                }
+            }
+            var collected: [(String, Int)] = []
+            for try await result in group { collected.append(result) }
+            return collected
+        }
+
+        // Drain the ops off the event stream and record, per text id, the
+        // seq of the event that first contains it (= its own write's seq).
+        var firstSeenSeq: [String: Int] = [:]
+        var opsSeen = 0
+        for await message in sub.events {
+            guard case .event(_, let seq, _, let opId, let payload) = message else { continue }
+            #expect(opId.hasPrefix("mcp-"))
+            opsSeen += 1
+            let bytes = try #require(payload.bulk.inlineData)
+            for text in try DocJSON.summary(from: bytes).texts
+            where firstSeenSeq[text.id] == nil {
+                firstSeenSeq[text.id] = seq
+            }
+            if opsSeen == concurrency { break }
+        }
+
+        for (id, reportedSeq) in results {
+            #expect(
+                firstSeenSeq[id] == reportedSeq,
+                "ack for \(id) reported seq \(reportedSeq) but its write was assigned seq \(String(describing: firstSeenSeq[id]))")
+        }
+
+        await server.stop()
+    }
+
+    @Test func twoConcurrentSessionsSubscriberSeesAddTextFromAnotherSession() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let subscriberClient = try await connectedClient(port: port)
+        let writerClient = try await connectedClient(port: port)
+
+        let sink = NotificationSink()
+        await subscriberClient.onNotification(ResourceUpdatedNotification.self) { message in
+            await sink.record(message.params.uri)
+        }
+        try await subscriberClient.subscribeToResource(uri: "infsketch://doc/d")
+        _ = try await server.manager.subscribe(docId: "d")
+        try await primePushChannel(server: server, sink: sink)
+
+        // `primePushChannel`'s own throwaway writes leave "d"'s live bytes as
+        // garbage (not valid JSON) — restore real document content before
+        // exercising add_text below, and drain/reset the sink so this
+        // reseed's own notification doesn't count toward the assertions.
+        _ = await server.manager.submit(
+            docId: "d", opId: "reseed", payload: OpPayload(type: "fullDoc", data: Fixtures.docBytes))
+        try await quiesce(sink)
+        await sink.reset()
+
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 2)
+
+        let (content, isError) = try await writerClient.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "from another session", "x": 3, "y": 4])
+        #expect(isError != true)
+        #expect(toolResultText(content).hasPrefix("added "))
+
+        let arrived = await waitFor(sink, atLeast: 1)
+        #expect(arrived)
+        #expect(await sink.uris.first == "infsketch://doc/d")
+
+        // Both sessions keep working after the cross-session push.
+        #expect(await server.mcpAdapter.activeSessionIDs.count == 2)
+        let (resources, _) = try await subscriberClient.listResources()
+        #expect(resources.contains { $0.uri == "infsketch://doc/d" })
+        let summaryContents = try await writerClient.readResource(uri: "infsketch://doc/d")
+        #expect(summaryContents.count == 1)
+
+        await subscriberClient.disconnect()
+        await writerClient.disconnect()
+        await server.stop()
+    }
+}
+
+@Suite struct ResourceURITests {
+    @Test func parsesAllFourKinds() {
+        #expect(ResourceURI("infsketch://docs") == .docsList)
+        #expect(ResourceURI("infsketch://doc/abc") == .docSummary(docId: "abc"))
+        #expect(ResourceURI("infsketch://doc/abc/raw") == .docRaw(docId: "abc"))
+        #expect(ResourceURI("infsketch://doc/abc/frame") == .docFrame(docId: "abc"))
+    }
+
+    @Test func rejectsUnrecognizedShapes() {
+        #expect(ResourceURI("infsketch://doc/abc/bogus") == nil)
+        #expect(ResourceURI("bogus://doc/abc") == nil)
+        #expect(ResourceURI("infsketch://doc/abc/raw/extra") == nil)
+        #expect(ResourceURI("infsketch://") == nil)
+        #expect(ResourceURI("infsketch://doc") == nil)
+    }
+
+    @Test func roundTripsUriString() {
+        #expect(ResourceURI.docSummary(docId: "x").uriString == "infsketch://doc/x")
+        #expect(ResourceURI.docRaw(docId: "x").uriString == "infsketch://doc/x/raw")
+        #expect(ResourceURI.docFrame(docId: "x").uriString == "infsketch://doc/x/frame")
+        #expect(ResourceURI.docsList.uriString == "infsketch://docs")
+    }
+}
+
+#endif  // !os(Linux)

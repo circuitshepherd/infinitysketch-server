@@ -250,9 +250,9 @@ private struct ServerMessageReader {
         _ = try await reader.next()   // subscribed
         // Submit a big op directly through the manager (incoming chunks land in Task 6).
         let bigBytes = Data((0..<200).map { UInt8($0 % 256) })
-        let reject = await manager.submit(docId: "d", opId: "big-1",
-                                          payload: OpPayload(type: "fullDoc", data: bigBytes))
-        #expect(reject == nil)
+        let outcome = await manager.submit(docId: "d", opId: "big-1",
+                                           payload: OpPayload(type: "fullDoc", data: bigBytes))
+        #expect(outcome == .accepted(seq: 1))
         #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "big-1",
                                                   payload: OpPayload(type: "fullDoc", data: bigBytes)))
     }
