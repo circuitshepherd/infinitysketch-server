@@ -98,11 +98,12 @@ public enum ClientMessage: Equatable, Sendable {
     case watchDoc(docId: String)
     case unwatchDoc(docId: String)
     case frame(docId: String, payload: BulkPayload)
+    case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
 }
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer
+        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason
     }
 
     public init(from decoder: any Decoder) throws {
@@ -148,6 +149,20 @@ extension ClientMessage: Codable {
                 payload = .inline(try c.decode(Data.self, forKey: .data))
             }
             self = .frame(docId: try c.decode(String.self, forKey: .docId), payload: payload)
+        case "createDocReply":
+            let payload: BulkPayload?
+            if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+                payload = .transfer(descriptor)
+            } else if let data = try c.decodeIfPresent(Data.self, forKey: .data) {
+                payload = .inline(data)
+            } else {
+                payload = nil
+            }
+            self = .createDocReply(
+                requestId: try c.decode(UInt32.self, forKey: .requestId),
+                docId: try c.decode(String.self, forKey: .docId),
+                payload: payload,
+                failureReason: try c.decodeIfPresent(String.self, forKey: .failureReason))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown client message type: \(other)")
@@ -200,6 +215,16 @@ extension ClientMessage: Codable {
             case .inline(let data): try c.encode(data, forKey: .data)
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
+        case .createDocReply(let requestId, let docId, let payload, let failureReason):
+            try c.encode("createDocReply", forKey: .type)
+            try c.encode(requestId, forKey: .requestId)
+            try c.encode(docId, forKey: .docId)
+            switch payload {
+            case .inline(let data): try c.encode(data, forKey: .data)
+            case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+            case nil: break
+            }
+            try c.encodeIfPresent(failureReason, forKey: .failureReason)
         }
     }
 }
@@ -217,11 +242,12 @@ public enum ServerMessage: Equatable, Sendable {
     case transferAbort(transferId: UInt32, reason: String)
     case frameAvailable(docId: String, seq: Int)
     case watchers(docId: String, count: Int)
+    case createDocRequest(requestId: UInt32, docId: String)
 }
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId
     }
 
     public init(from decoder: any Decoder) throws {
@@ -277,6 +303,10 @@ extension ServerMessage: Codable {
             self = .watchers(
                 docId: try c.decode(String.self, forKey: .docId),
                 count: try c.decode(Int.self, forKey: .count))
+        case "createDocRequest":
+            self = .createDocRequest(
+                requestId: try c.decode(UInt32.self, forKey: .requestId),
+                docId: try c.decode(String.self, forKey: .docId))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown server message type: \(other)")
@@ -338,6 +368,10 @@ extension ServerMessage: Codable {
             try c.encode("watchers", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(count, forKey: .count)
+        case .createDocRequest(let requestId, let docId):
+            try c.encode("createDocRequest", forKey: .type)
+            try c.encode(requestId, forKey: .requestId)
+            try c.encode(docId, forKey: .docId)
         }
     }
 }
@@ -365,6 +399,7 @@ extension ClientMessage: TransferCarrying {
         switch self {
         case .op(_, _, let payload): return payload.bulk.inlineData
         case .frame(_, let payload): return payload.inlineData
+        case .createDocReply(_, _, let payload, _): return payload?.inlineData
         default: return nil
         }
     }
@@ -375,6 +410,9 @@ extension ClientMessage: TransferCarrying {
                        payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .transfer(descriptor))
+        case .createDocReply(let requestId, let docId, _, let failureReason):
+            return .createDocReply(requestId: requestId, docId: docId,
+                                    payload: .transfer(descriptor), failureReason: failureReason)
         default:
             return self
         }
@@ -386,6 +424,9 @@ extension ClientMessage: TransferCarrying {
             return nil
         case .frame(_, .transfer(let d)):
             return d
+        case .createDocReply(_, _, let payload, _):
+            if case .transfer(let d) = payload { return d }
+            return nil
         default: return nil
         }
     }
@@ -395,6 +436,9 @@ extension ClientMessage: TransferCarrying {
             return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes))
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .inline(bytes))
+        case .createDocReply(let requestId, let docId, _, let failureReason):
+            return .createDocReply(requestId: requestId, docId: docId,
+                                    payload: .inline(bytes), failureReason: failureReason)
         default:
             return self
         }

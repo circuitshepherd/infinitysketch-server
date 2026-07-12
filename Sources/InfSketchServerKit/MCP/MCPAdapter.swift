@@ -53,6 +53,10 @@ public actor MCPAdapter {
     private let manager: SessionManager
     private let idleTimeout: Duration
     private let cleanupInterval: Duration
+    /// The shared create_doc broker (one per `InfSketchServer` process, the
+    /// same instance `WSAdapter` registers createDoc-capable connections
+    /// with); `callCreateDoc` awaits `broker.requestCreation` on it.
+    private let broker: CreateDocBroker
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -79,11 +83,13 @@ public actor MCPAdapter {
     public init(
         manager: SessionManager,
         idleTimeout: Duration = .seconds(3600),
-        cleanupInterval: Duration = .seconds(60)
+        cleanupInterval: Duration = .seconds(60),
+        broker: CreateDocBroker
     ) {
         self.manager = manager
         self.idleTimeout = idleTimeout
         self.cleanupInterval = cleanupInterval
+        self.broker = broker
     }
 
     /// Starts the notification pump and the idle-session cleanup loop on
@@ -457,6 +463,23 @@ public actor MCPAdapter {
                 "required": .array(["docId", "bytes"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "create_doc",
+            description: """
+                Creates a new document containing the InfinitySketch app's empty default \
+                content, authored by a connected InfinitySketch device. REQUIRES such a \
+                device to be connected to the server — fails with noDeviceAvailable if none \
+                is, deviceTimeout if it doesn't respond in time, and docExists if a document \
+                with this id already exists.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to create."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -469,6 +492,7 @@ public actor MCPAdapter {
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
+        case "create_doc": return await callCreateDoc(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -556,7 +580,7 @@ public actor MCPAdapter {
     /// Unlike the other three tools, this never reads/parses the current
     /// bytes first — the replacement is opaque by design (spec: "the agent
     /// owns their validity"), and `createIfMissing: true` is what a
-    /// `create_doc` tool would have used (deferred; see the plan doc).
+    /// `create_doc` tool also uses.
     private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
@@ -571,7 +595,45 @@ public actor MCPAdapter {
         }
     }
 
-    /// Shared submit tail for all four tools: opens a session on demand,
+    /// Unlike the other four tools, the bytes to write don't come from the
+    /// agent or from mutating the current document — they're solicited live
+    /// from a connected InfinitySketch device via `broker.requestCreation`
+    /// (Task 3's `CreateDocBroker`, routed over the WS `createDocRequest`/
+    /// `createDocReply` pair). `docExists` is checked BEFORE ever contacting
+    /// a device, so an existing docId never reaches (or wakes) the device.
+    private func callCreateDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+
+            if await manager.currentBytes(docId: docId) != nil {
+                return Self.errorResult("docExists")
+            }
+
+            let bytes: Data
+            do {
+                bytes = try await broker.requestCreation(docId: docId)
+            } catch let error as CreateDocBroker.CreateDocError {
+                switch error {
+                case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
+                case .creationInProgress: return Self.errorResult("creationInProgress")
+                case .deviceTimeout: return Self.errorResult("deviceTimeout")
+                case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
+                }
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
+                "created \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Shared submit tail for all five tools: opens a session on demand,
     /// writes the composed full-document bytes, and shapes the MCP result —
     /// success names the assigned seq (carried back by the write itself in
     /// `SubmitOutcome.accepted` — NEVER read back via a separate

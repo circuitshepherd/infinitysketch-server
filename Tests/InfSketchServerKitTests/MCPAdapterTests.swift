@@ -154,6 +154,66 @@ private func addedId(from resultText: String) -> String {
     String(resultText.split(separator: " ").dropFirst().first ?? "")
 }
 
+/// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
+/// WebSocket client against the same running server's `/ws` endpoint (NOT
+/// the in-process `WSAdapterTests` harness — this needs to share the
+/// server's actual `CreateDocBroker`/`SessionManager` instances with the MCP
+/// client under test, which only a real running `InfSketchServer` provides).
+/// Hellos with the "createDoc" capability so `WSAdapter` registers it with
+/// the broker, then runs a background receive pump so it can react to an
+/// inbound `createDocRequest` whenever the broker sends one — independent of
+/// whatever the test's main task is doing (typically awaiting
+/// `client.callTool(name: "create_doc", ...)` on the MCP side).
+private actor FakeCreateDocDevice {
+    private let ws: URLSessionWebSocketTask
+    private var pumpTask: Task<Void, Never>?
+    private(set) var receivedRequests: [(requestId: UInt32, docId: String)] = []
+    private let autoReplyBytes: Data?
+
+    /// - Parameter autoReplyBytes: when non-nil, every inbound
+    ///   `createDocRequest` is answered immediately with these bytes as an
+    ///   inline `createDocReply`. When nil, requests are recorded but never
+    ///   answered — the `deviceTimeout` scenario.
+    init(port: UInt16, autoReplyBytes: Data?) async throws {
+        self.autoReplyBytes = autoReplyBytes
+        let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        self.ws = ws
+        ws.resume()
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["createDoc"]).jsonText()))
+        let ack = try await Self.receiveOne(ws)
+        guard ack == .helloAck(protocolVersion: 1) else {
+            throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
+        }
+        pumpTask = Task { [weak self] in await self?.pumpLoop() }
+    }
+
+    private func pumpLoop() async {
+        while true {
+            guard let message = try? await Self.receiveOne(ws) else { return }
+            guard case .createDocRequest(let requestId, let docId) = message else { continue }
+            receivedRequests.append((requestId, docId))
+            guard let bytes = autoReplyBytes else { continue }
+            try? await ws.send(.string(ClientMessage.createDocReply(
+                requestId: requestId, docId: docId,
+                payload: .inline(bytes), failureReason: nil
+            ).jsonText()))
+        }
+    }
+
+    private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
+        let frame = try await ws.receive()
+        guard case .string(let text) = frame else {
+            throw DocumentStoreError.notFound  // any error type; a binary frame here is unexpected
+        }
+        return try ServerMessage(jsonText: text)
+    }
+
+    func close() {
+        pumpTask?.cancel()
+        ws.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
 /// `.serialized`: the SDK client's standalone GET SSE stream is unreliable
 /// under parallel in-process load — its internal session-id signal race,
 /// "POST stream closed without data → cancel GET" reconnection heuristic,
@@ -429,7 +489,7 @@ private func addedId(from resultText: String) -> String {
 
     // MARK: - Tools (Task 7)
 
-    @Test func listToolsContainsAllFourWriteTools() async throws {
+    @Test func listToolsContainsAllFiveWriteTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -437,7 +497,7 @@ private func addedId(from resultText: String) -> String {
 
         let (tools, _) = try await client.listTools()
         let names = Set(tools.map(\.name))
-        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc"])
+        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc", "create_doc"])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
         #expect(editText.description?.contains("resets") == true)
@@ -736,6 +796,84 @@ private func addedId(from resultText: String) -> String {
 
         await subscriberClient.disconnect()
         await writerClient.disconnect()
+        await server.stop()
+    }
+
+    // MARK: - create_doc (Task 4)
+
+    @Test func createDocSucceedsWithCapableDevice() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "Fresh"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("seq 1"))
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/Fresh/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+
+        let entries = try await server.manager.listDocuments()
+        #expect(entries.contains { $0.id == "Fresh" })
+
+        await server.stop()
+    }
+
+    @Test func createDocOnExistingDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docExists")
+
+        // The existence check must short-circuit BEFORE ever contacting the
+        // device — no createDocRequest should have been sent.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func createDocWithNoDeviceErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device connects in this test.
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "NoDevice"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+
+        await server.stop()
+    }
+
+    @Test func createDocDeviceTimeoutErrors() async throws {
+        let (server, port, task) = try await startServer(
+            config: SessionConfig(createDocTimeout: .milliseconds(100)))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Capable device connects but never answers.
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: nil)
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "SlowDoc"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceTimeout")
+
         await server.stop()
     }
 }

@@ -16,13 +16,17 @@ public struct SessionConfig: Sendable {
     public var mcpSessionIdleTimeout: Duration
     /// How often the MCP adapter sweeps for idle sessions.
     public var mcpSessionCleanupInterval: Duration
+    /// How long `CreateDocBroker.requestCreation` waits for a device's
+    /// `createDocReply` before failing with `.deviceTimeout`.
+    public var createDocTimeout: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
         inlineLimit: Int = 256 * 1024,
         chunkSize: Int = 512 * 1024,
         mcpSessionIdleTimeout: Duration = .seconds(3600),
-        mcpSessionCleanupInterval: Duration = .seconds(60)
+        mcpSessionCleanupInterval: Duration = .seconds(60),
+        createDocTimeout: Duration = .seconds(10)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
@@ -30,6 +34,7 @@ public struct SessionConfig: Sendable {
         self.chunkSize = chunkSize
         self.mcpSessionIdleTimeout = mcpSessionIdleTimeout
         self.mcpSessionCleanupInterval = mcpSessionCleanupInterval
+        self.createDocTimeout = createDocTimeout
     }
 }
 
