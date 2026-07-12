@@ -160,3 +160,48 @@ import InfSketchWire
         #expect(try ServerMessage(jsonText: m.jsonText()) == m)
     }
 }
+
+@Suite struct CreateDocWireTests {
+    @Test func createDocRequestRoundTrips() throws {
+        let msg = ServerMessage.createDocRequest(requestId: 7, docId: "AgentDoc")
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ServerMessage.self, from: data) == msg)
+    }
+
+    @Test func createDocReplySuccessRoundTrips() throws {
+        let msg = ClientMessage.createDocReply(
+            requestId: 7, docId: "AgentDoc",
+            payload: .inline(Data("doc-bytes".utf8)), failureReason: nil)
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func createDocReplyFailureRoundTrips() throws {
+        let msg = ClientMessage.createDocReply(
+            requestId: 8, docId: "AgentDoc", payload: nil, failureReason: "templateMissing")
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func createDocReplyTransferFormRoundTrips() throws {
+        let msg = ClientMessage.createDocReply(
+            requestId: 9, docId: "AgentDoc",
+            payload: .transfer(TransferDescriptor(transferId: 3, totalBytes: 1_000_000, chunkSize: 65536)),
+            failureReason: nil)
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func createDocReplyChunksThroughSenderAndReassembler() throws {
+        let bytes = Data((0..<100).map { UInt8($0 % 256) })
+        var sender = TransferSender<ClientMessage>(inlineLimit: 16, chunkSize: 8)
+        var reassembler = TransferReassembler<ClientMessage>()
+        var results: [ClientMessage] = []
+        let original = ClientMessage.createDocReply(
+            requestId: 9, docId: "AgentDoc", payload: .inline(bytes), failureReason: nil)
+        for frame in try sender.frames(for: original) {
+            if let m = try reassembler.consume(frame) { results.append(m) }
+        }
+        #expect(results == [original])
+    }
+}

@@ -176,6 +176,13 @@ actor Connection {
             if await manager.submitFrame(docId: docId, bytes: bytes) == false {
                 emit(.error(reason: "unknownDoc"))
             }
+
+        case .createDocReply:
+            // Wire shape only (app-commanded document creation, Task 1).
+            // Routing this reply to the create_doc caller that's awaiting it
+            // lands in a later task; a no-op here just keeps this switch
+            // exhaustive.
+            break
         }
     }
 
