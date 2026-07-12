@@ -15,6 +15,10 @@ public final class InfSketchServer: Sendable {
     private let store: DirectoryDocumentStore
     private let http: HTTPServer
     private let config: SessionConfig
+    /// One broker per process, shared by the WS layer (registers
+    /// createDoc-capable connections, routes replies) and the MCP layer
+    /// (will call `requestCreation` from the `create_doc` tool, Task 4).
+    private let createDocBroker: CreateDocBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
@@ -24,10 +28,13 @@ public final class InfSketchServer: Sendable {
         self.manager = manager
         self.http = HTTPServer(port: port)
         self.config = config
+        let createDocBroker = CreateDocBroker(timeout: config.createDocTimeout)
+        self.createDocBroker = createDocBroker
         self.mcpAdapter = MCPAdapter(
             manager: manager,
             idleTimeout: config.mcpSessionIdleTimeout,
-            cleanupInterval: config.mcpSessionCleanupInterval)
+            cleanupInterval: config.mcpSessionCleanupInterval,
+            broker: createDocBroker)
     }
 
     /// Configures routes and serves until stopped.
@@ -133,7 +140,9 @@ public final class InfSketchServer: Sendable {
                 body: Data(WebUI.docHTML(docId: docId).utf8)))
         }
 
-        await http.appendRoute("GET /ws", to: .webSocket(WSAdapter(manager: manager, config: config)))
+        await http.appendRoute(
+            "GET /ws",
+            to: .webSocket(WSAdapter(manager: manager, config: config, broker: createDocBroker)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
         // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the

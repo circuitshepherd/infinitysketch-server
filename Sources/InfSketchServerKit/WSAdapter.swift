@@ -7,10 +7,12 @@ import InfSketchWire
 public struct WSAdapter: WSMessageHandler, Sendable {
     private let manager: SessionManager
     private let config: SessionConfig
+    private let broker: CreateDocBroker
 
-    public init(manager: SessionManager, config: SessionConfig = SessionConfig()) {
+    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: CreateDocBroker) {
         self.manager = manager
         self.config = config
+        self.broker = broker
     }
 
     public func makeMessages(for client: AsyncStream<WSMessage>) async throws -> AsyncStream<WSMessage> {
@@ -20,7 +22,7 @@ public struct WSAdapter: WSMessageHandler, Sendable {
         // never engages for a slow *socket*. A stalled client therefore buffers
         // events in memory until keepalive/reaping (future plan) drops it.
         let (output, outputCont) = AsyncStream<WSMessage>.makeStream()
-        let connection = Connection(manager: manager, output: outputCont, config: config)
+        let connection = Connection(manager: manager, output: outputCont, config: config, broker: broker)
         Task {
             for await frame in client {
                 await connection.handle(frame)
@@ -42,11 +44,18 @@ actor Connection {
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var watchSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
+    private let broker: CreateDocBroker
+    private let connectionId = UUID()
+    private var registeredWithBroker = false
 
-    init(manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig) {
+    init(
+        manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
+        broker: CreateDocBroker
+    ) {
         self.manager = manager
         self.output = output
         self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
+        self.broker = broker
     }
 
     func handle(_ frame: WSMessage) async {
@@ -83,13 +92,19 @@ actor Connection {
 
     private func dispatch(_ message: ClientMessage) async {
         switch message {
-        case .hello(let version, _):
+        case .hello(let version, let capabilities):
             guard version == WireProtocol.version else {
                 emit(.error(reason: "unsupportedVersion"))
                 await close()
                 return
             }
             helloed = true
+            if capabilities.contains("createDoc") {
+                registeredWithBroker = true
+                await broker.register(connectionId: connectionId) { [weak self] message in
+                    Task { await self?.emitFromBroker(message) }
+                }
+            }
             emit(.helloAck(protocolVersion: WireProtocol.version))
 
         case _ where !helloed:
@@ -177,12 +192,28 @@ actor Connection {
                 emit(.error(reason: "unknownDoc"))
             }
 
-        case .createDocReply:
-            // Wire shape only (app-commanded document creation, Task 1).
-            // Routing this reply to the create_doc caller that's awaiting it
-            // lands in a later task; a no-op here just keeps this switch
-            // exhaustive.
-            break
+        case .createDocReply(let requestId, _, let payload, let failureReason):
+            // The wire type can't enforce exactly-one-of payload/failureReason,
+            // so routing applies an explicit precedence: an inline payload
+            // always wins as a success (even if a failureReason is also
+            // present — a spec-violating combination); with neither present,
+            // substitute a failureReason rather than ever calling
+            // handleReply(bytes: nil, failureReason: nil) — the broker
+            // defaults THAT combination to a success with empty Data, which
+            // must stay unreachable from here.
+            guard case .inline(let bytes)? = payload else {
+                if payload == nil {
+                    await broker.handleReply(
+                        requestId: requestId, bytes: nil, failureReason: failureReason ?? "unspecified")
+                } else {
+                    // Unreachable in practice: the reassembler resolves
+                    // .transfer payloads to .inline before dispatch ever
+                    // sees this message (mirrors the `frame` case's guard).
+                    emit(.error(reason: "unresolvedTransfer"))
+                }
+                return
+            }
+            await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
         }
     }
 
@@ -203,6 +234,10 @@ actor Connection {
             statusSubscription = nil
             sub.pump.cancel()
             await manager.unsubscribeStatus(sub.token)
+        }
+        if registeredWithBroker {
+            registeredWithBroker = false
+            await broker.unregister(connectionId: connectionId)
         }
         output.finish()
     }
@@ -267,6 +302,17 @@ actor Connection {
                 await self.releaseStatusSubscription(token: token)
             }
         }
+    }
+
+    /// Target of the broker's send closure (registered at hello). The
+    /// closure itself is `@Sendable` and fires from the broker actor via an
+    /// unstructured `Task { await self?.emitFromBroker(message) }` — the
+    /// `await` there is what hops back onto this actor before touching
+    /// connection state; this method must never be called except through
+    /// that hop.
+    private func emitFromBroker(_ message: ServerMessage) {
+        guard !closed else { return }
+        emit(message)
     }
 
     /// Single serialized exit point for every outgoing message. Expands

@@ -53,6 +53,11 @@ public actor MCPAdapter {
     private let manager: SessionManager
     private let idleTimeout: Duration
     private let cleanupInterval: Duration
+    /// The shared create_doc broker (one per `InfSketchServer` process, the
+    /// same instance `WSAdapter` registers createDoc-capable connections
+    /// with). Storage only for now — the `create_doc` MCP tool that calls
+    /// `broker.requestCreation` lands in Task 4.
+    private let broker: CreateDocBroker
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -79,11 +84,13 @@ public actor MCPAdapter {
     public init(
         manager: SessionManager,
         idleTimeout: Duration = .seconds(3600),
-        cleanupInterval: Duration = .seconds(60)
+        cleanupInterval: Duration = .seconds(60),
+        broker: CreateDocBroker
     ) {
         self.manager = manager
         self.idleTimeout = idleTimeout
         self.cleanupInterval = cleanupInterval
+        self.broker = broker
     }
 
     /// Starts the notification pump and the idle-session cleanup loop on

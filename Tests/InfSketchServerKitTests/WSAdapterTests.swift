@@ -9,12 +9,18 @@ private struct Harness {
     let input: AsyncStream<WSMessage>.Continuation
     let output: AsyncStream<WSMessage>
     let manager: SessionManager
+    let broker: CreateDocBroker
 
-    init(manager: SessionManager, config: SessionConfig = SessionConfig()) async throws {
+    init(
+        manager: SessionManager, config: SessionConfig = SessionConfig(),
+        broker: CreateDocBroker = CreateDocBroker()
+    ) async throws {
         self.manager = manager
+        self.broker = broker
         let (inStream, inCont) = AsyncStream<WSMessage>.makeStream()
         self.input = inCont
-        self.output = try await WSAdapter(manager: manager, config: config).makeMessages(for: inStream)
+        self.output = try await WSAdapter(manager: manager, config: config, broker: broker)
+            .makeMessages(for: inStream)
     }
 
     func send(_ message: ClientMessage) throws {
@@ -424,6 +430,117 @@ private struct ServerMessageReader {
         // the watch, observable as the count dropping back to 0.
         browser.input.finish()
         #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
+    }
+}
+
+/// Task 3 (create_doc branch): wires `CreateDocBroker` into `Connection` —
+/// registers a createDoc-capable connection at hello, routes an inbound
+/// `createDocReply` to `broker.handleReply`, unregisters on close. Each test
+/// injects its own test-owned broker so assertions can drive
+/// `broker.requestCreation` directly alongside the WS frames the adapter
+/// exchanges with the (fake) client.
+@Suite struct WSAdapterCreateDocTests {
+    @Test func helloWithCreateDocCapabilityRegisters() async throws {
+        let broker = CreateDocBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        // Drive requestCreation on the broker the Connection registered
+        // with at hello; the request must reach the client as a wire frame.
+        let task = Task { try await broker.requestCreation(docId: "newDoc") }
+        guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
+            Issue.record("expected createDocRequest frame"); return
+        }
+        // Resolve directly through the broker (not the client) so the test
+        // doesn't leave a pending continuation/timeout Task dangling.
+        await broker.handleReply(requestId: requestId, bytes: Data(), failureReason: nil)
+        _ = try await task.value
+    }
+
+    @Test func createDocReplyRoutesToBroker() async throws {
+        let broker = CreateDocBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestCreation(docId: "newDoc") }
+        guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
+            Issue.record("expected createDocRequest frame"); return
+        }
+        // The client answers over the wire; Connection.dispatch must route
+        // this to broker.handleReply, resolving the pending requestCreation.
+        try harness.send(.createDocReply(
+            requestId: requestId, docId: "newDoc",
+            payload: .inline(Data("bytes".utf8)), failureReason: nil))
+        #expect(try await task.value == Data("bytes".utf8))
+    }
+
+    @Test func replyBeforeHelloIsRejected() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.createDocReply(requestId: 1, docId: "d", payload: nil, failureReason: "x"))
+        #expect(try await reader.next() == .error(reason: "helloRequired"))
+    }
+
+    @Test func disconnectUnregisters() async throws {
+        let broker = CreateDocBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        harness.input.finish()  // client disconnects
+        while try await reader.next() != nil {}  // drain until adapter closes output (calls close())
+
+        // close() awaits broker.unregister before finishing the output
+        // stream, so by the time the drain above completes the registration
+        // is already gone: no connection to route a new request to.
+        await #expect(throws: CreateDocBroker.CreateDocError.noDeviceAvailable) {
+            _ = try await broker.requestCreation(docId: "d")
+        }
+    }
+
+    /// RIDER (b): the broker's `handleReply` defaults a nil payload with no
+    /// failureReason to a success with empty Data — Connection's dispatch
+    /// arm must make that path unreachable by always substituting a
+    /// failureReason ("unspecified") when neither is present on the wire.
+    @Test func replyWithNeitherPayloadNorFailureReasonIsDeviceFailed() async throws {
+        let broker = CreateDocBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestCreation(docId: "newDoc") }
+        guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
+            Issue.record("expected createDocRequest frame"); return
+        }
+        try harness.send(.createDocReply(requestId: requestId, docId: "newDoc", payload: nil, failureReason: nil))
+        await #expect(throws: CreateDocBroker.CreateDocError.deviceFailed("unspecified")) {
+            _ = try await task.value
+        }
+    }
+
+    /// RIDER (a), other half: a payload present alongside a (spec-violating)
+    /// failureReason must win as a success — never surfaced as a failure.
+    @Test func replyWithPayloadWinsOverFailureReason() async throws {
+        let broker = CreateDocBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestCreation(docId: "newDoc") }
+        guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
+            Issue.record("expected createDocRequest frame"); return
+        }
+        try harness.send(.createDocReply(
+            requestId: requestId, docId: "newDoc",
+            payload: .inline(Data("bytes".utf8)), failureReason: "ignored-because-payload-wins"))
+        #expect(try await task.value == Data("bytes".utf8))
     }
 }
 
