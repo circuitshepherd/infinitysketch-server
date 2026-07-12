@@ -55,8 +55,7 @@ public actor MCPAdapter {
     private let cleanupInterval: Duration
     /// The shared create_doc broker (one per `InfSketchServer` process, the
     /// same instance `WSAdapter` registers createDoc-capable connections
-    /// with). Storage only for now — the `create_doc` MCP tool that calls
-    /// `broker.requestCreation` lands in Task 4.
+    /// with); `callCreateDoc` awaits `broker.requestCreation` on it.
     private let broker: CreateDocBroker
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
@@ -581,7 +580,7 @@ public actor MCPAdapter {
     /// Unlike the other three tools, this never reads/parses the current
     /// bytes first — the replacement is opaque by design (spec: "the agent
     /// owns their validity"), and `createIfMissing: true` is what a
-    /// `create_doc` tool would have used (deferred; see the plan doc).
+    /// `create_doc` tool also uses.
     private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
@@ -634,7 +633,7 @@ public actor MCPAdapter {
         }
     }
 
-    /// Shared submit tail for all four tools: opens a session on demand,
+    /// Shared submit tail for all five tools: opens a session on demand,
     /// writes the composed full-document bytes, and shapes the MCP result —
     /// success names the assigned seq (carried back by the write itself in
     /// `SubmitOutcome.accepted` — NEVER read back via a separate
