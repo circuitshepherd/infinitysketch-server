@@ -480,6 +480,79 @@ public actor MCPAdapter {
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "draw_strokes",
+            description: """
+                Draws one or more freehand strokes into a document, authored by a connected \
+                InfinitySketch device. Each stroke is a device-defined shape (a polyline of \
+                (x, y) points, plus tool/width/colour) given in canvas coordinates — the same \
+                space as add_text's x/y. Defaults to a pen tool, width 4, colour #000000 for \
+                any stroke that omits them. REQUIRES a connected device — fails with \
+                noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
+                time, opInProgress if another stroke operation on this document is already in \
+                flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
+                malformed points). The result names the seq the write was assigned.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "strokes": .object([
+                        "type": "array",
+                        "description": """
+                            One or more strokes to draw, each an object with the stroke's \
+                            points (canvas coordinates) and optional tool/width/colour \
+                            (defaults: pen, 4, #000000). Opaque to the server — passed \
+                            through to the device verbatim.
+                            """,
+                        "items": .object(["type": "object"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "strokes"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "delete_strokes",
+            description: """
+                Deletes one or more strokes from a document by their composite stroke keys \
+                (as returned by list_strokes), authored by a connected InfinitySketch device. \
+                REQUIRES a connected device — fails with noDeviceAvailable if none is \
+                connected, deviceTimeout if it doesn't respond in time, opInProgress if \
+                another stroke operation on this document is already in flight, and \
+                deviceFailed: <reason> if a key doesn't match any stroke. The result names the \
+                seq the write was assigned.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "keys": .object([
+                        "type": "array",
+                        "description": "The composite stroke keys to delete, as returned by list_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "keys"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_strokes",
+            description: """
+                Lists every stroke currently in a document — each with its composite key \
+                (usable with delete_strokes) and geometry — authored by a connected \
+                InfinitySketch device. REQUIRES a connected device — fails with \
+                noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
+                respond in time. Returns the device's listing verbatim as text; this call \
+                never writes to the document.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to list strokes from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -493,6 +566,9 @@ public actor MCPAdapter {
         case "remove_text": return await callRemoveText(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
         case "create_doc": return await callCreateDoc(arguments)
+        case "draw_strokes": return await callDrawStrokes(arguments)
+        case "delete_strokes": return await callDeleteStrokes(arguments)
+        case "list_strokes": return await callListStrokes(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -637,7 +713,150 @@ public actor MCPAdapter {
         }
     }
 
-    /// Shared submit tail for all five tools: opens a session on demand,
+    // MARK: - Stroke-op tools (Task 4, agent stroke-authoring)
+    //
+    // Unlike `add_text`/`edit_text`/`remove_text` (which mutate the document
+    // JSON locally via `DocJSON`), stroke construction/deletion/listing
+    // happens on a connected InfinitySketch device: the server's job is only
+    // to compose a minimal op-spec envelope (`{"op": "draw"|"delete"|"list",
+    // …}`, built by JSON-encoding the SDK's own `Value` arguments — `Value`
+    // is `Codable`, so `JSONEncoder().encode(Value.object(...))` produces the
+    // exact wire bytes), relay it plus the document's current bytes through
+    // `broker.requestStrokeOp`, and (for draw/delete) write back whatever
+    // full-document bytes the device returns through the same
+    // `submitAndRespond` tail every other write tool uses. Validation here is
+    // deliberately MINIMAL — non-empty docId, a non-empty `strokes` array for
+    // draw, a non-empty string `keys` array for delete — deep validation
+    // (stroke shape, colours, unknown keys, …) is the device's job, surfaced
+    // verbatim as `deviceFailed: <reason>`. `list_strokes` never writes: its
+    // result is the device's listing bytes decoded as UTF-8 text, passed
+    // straight through.
+
+    private func callDrawStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let strokes = try Self.nonEmptyValueArrayArg(arguments, "strokes")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(
+                    Value.object(["op": .string("draw"), "strokes": .array(strokes)]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: Data
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+                "drew \(strokes.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callDeleteStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(
+                    Value.object(["op": .string("delete"), "keys": .array(keys.map(Value.string))]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: Data
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+                "deleted \(keys.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Never writes: the device's listing bytes are decoded as UTF-8 and
+    /// passed straight through as the tool result's text content — opaque to
+    /// this server, same trust posture as `replace_doc`'s bytes.
+    private func callListStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("list")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: Data
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return CallTool.Result(content: [
+                .text(text: String(data: out, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
+    /// tool-error string for all three stroke-op tools. UNLIKE `create_doc`
+    /// (whose `.requestInFlight` publishes the pinned "creationInProgress"
+    /// string — see `callCreateDoc` above), stroke ops publish "opInProgress"
+    /// per the Task 4 spec's error-string mapping.
+    private static func strokeOpErrorResult(_ error: DeviceCommandBroker.DeviceCommandError) -> CallTool.Result {
+        switch error {
+        case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
+        case .requestInFlight: return Self.errorResult("opInProgress")
+        case .deviceTimeout: return Self.errorResult("deviceTimeout")
+        case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
+        }
+    }
+
+    /// Shared submit tail for every write tool (add/edit/remove_text,
+    /// replace_doc, create_doc, draw/delete_strokes): opens a session on demand,
     /// writes the composed full-document bytes, and shapes the MCP result —
     /// success names the assigned seq (carried back by the write itself in
     /// `SubmitOutcome.accepted` — NEVER read back via a separate
@@ -727,6 +946,36 @@ public actor MCPAdapter {
         let string = try stringArg(arguments, key)
         guard let data = Data(base64Encoded: string) else { throw ArgumentError.invalidType(key) }
         return data
+    }
+
+    /// A `stringArg` that additionally rejects the empty string — the
+    /// stroke-op tools' minimal `docId` validation (Task 4).
+    private static func nonEmptyStringArg(_ arguments: [String: Value]?, _ key: String) throws -> String {
+        let s = try stringArg(arguments, key)
+        guard !s.isEmpty else { throw ArgumentError.invalidType(key) }
+        return s
+    }
+
+    /// A non-empty JSON array argument, returned as raw `Value`s so the
+    /// caller can re-embed it verbatim into an op-spec envelope (the
+    /// stroke-op tools never inspect element shape — see the MARK above).
+    private static func nonEmptyValueArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [Value] {
+        guard let value = arguments?[key] else { throw ArgumentError.missing(key) }
+        guard case .array(let items) = value, !items.isEmpty else { throw ArgumentError.invalidType(key) }
+        return items
+    }
+
+    /// A non-empty JSON array argument whose elements must all be strings
+    /// (`delete_strokes`'s `keys`).
+    private static func nonEmptyStringArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [String] {
+        let items = try nonEmptyValueArrayArg(arguments, key)
+        var strings: [String] = []
+        strings.reserveCapacity(items.count)
+        for item in items {
+            guard case .string(let s) = item else { throw ArgumentError.invalidType(key) }
+            strings.append(s)
+        }
+        return strings
     }
 
     // MARK: - Idle-session reaping

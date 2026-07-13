@@ -224,6 +224,88 @@ private actor FakeCreateDocDevice {
     }
 }
 
+/// A fake InfinitySketch device for the stroke-op tools (Task 4,
+/// `draw_strokes`/`delete_strokes`/`list_strokes`): the same real-WS-client
+/// pattern as `FakeCreateDocDevice` above, hello'd with the "authorStrokes"
+/// capability instead of "createDoc", answering `strokeOpRequest` with a
+/// `strokeOpReply` — either a success (`autoReply: .bytes`) or a device-side
+/// failure (`autoReply: .failure`). `nil` stalls every request (recorded but
+/// never answered) — the `opInProgress`/manual-release scenarios.
+private actor FakeStrokeOpDevice {
+    struct ReceivedRequest {
+        let requestId: UInt32
+        let docId: String
+        let docBytes: Data
+        let spec: Data
+    }
+
+    enum AutoReply {
+        case bytes(Data)
+        case failure(String)
+    }
+
+    private let ws: URLSessionWebSocketTask
+    private var pumpTask: Task<Void, Never>?
+    private(set) var receivedRequests: [ReceivedRequest] = []
+    private let autoReply: AutoReply?
+
+    init(port: UInt16, autoReply: AutoReply?) async throws {
+        self.autoReply = autoReply
+        let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        self.ws = ws
+        ws.resume()
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["authorStrokes"]).jsonText()))
+        let ack = try await Self.receiveOne(ws)
+        guard ack == .helloAck(protocolVersion: 1) else {
+            throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
+        }
+        pumpTask = Task { [weak self] in await self?.pumpLoop() }
+    }
+
+    private func pumpLoop() async {
+        while true {
+            guard let message = try? await Self.receiveOne(ws) else { return }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec) = message else { continue }
+            receivedRequests.append(ReceivedRequest(
+                requestId: requestId, docId: docId, docBytes: payload.inlineData ?? Data(), spec: spec))
+            switch autoReply {
+            case .bytes(let bytes):
+                try? await ws.send(.string(ClientMessage.strokeOpReply(
+                    requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+                ).jsonText()))
+            case .failure(let reason):
+                try? await ws.send(.string(ClientMessage.strokeOpReply(
+                    requestId: requestId, docId: docId, payload: nil, failureReason: reason
+                ).jsonText()))
+            case nil:
+                continue  // stall: recorded above, never answered until sendReply is called manually
+            }
+        }
+    }
+
+    /// Manually answers a recorded request — for the `opInProgress` scenario,
+    /// which stalls the device (`autoReply: nil`) to hold a request in
+    /// flight, then releases it once the collision has been observed.
+    func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
+        try await ws.send(.string(ClientMessage.strokeOpReply(
+            requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+        ).jsonText()))
+    }
+
+    private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
+        let frame = try await ws.receive()
+        guard case .string(let text) = frame else {
+            throw DocumentStoreError.notFound  // any error type; a binary frame here is unexpected
+        }
+        return try ServerMessage(jsonText: text)
+    }
+
+    func close() {
+        pumpTask?.cancel()
+        ws.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
 /// `.serialized`: the SDK client's standalone GET SSE stream is unreliable
 /// under parallel in-process load — its internal session-id signal race,
 /// "POST stream closed without data → cancel GET" reconnection heuristic,
@@ -499,7 +581,10 @@ private actor FakeCreateDocDevice {
 
     // MARK: - Tools (Task 7)
 
-    @Test func listToolsContainsAllFiveWriteTools() async throws {
+    // Renamed from `listToolsContainsAllFiveWriteTools` (Task 4, agent
+    // stroke-authoring): three more tools joined the surface, so "Five" was
+    // no longer accurate.
+    @Test func listToolsContainsAllEightWriteTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -507,7 +592,10 @@ private actor FakeCreateDocDevice {
 
         let (tools, _) = try await client.listTools()
         let names = Set(tools.map(\.name))
-        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc", "create_doc"])
+        #expect(names == [
+            "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
+            "draw_strokes", "delete_strokes", "list_strokes",
+        ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
         #expect(editText.description?.contains("resets") == true)
@@ -921,6 +1009,148 @@ private actor FakeCreateDocDevice {
 
         // Release the stalled first request so it completes normally
         // (rather than dangling until the 10 s default timeout).
+        let pending = try #require(await device.receivedRequests.first)
+        try await device.sendReply(
+            requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
+        let (firstContent, firstIsError) = try await firstCall.value
+        #expect(firstIsError != true)
+        #expect(toolResultText(firstContent).contains("seq 1"))
+
+        await server.stop()
+    }
+
+    // MARK: - Stroke-op tools (Task 4, agent stroke-authoring)
+
+    @Test func listStrokesReturnsFakeListingVerbatimWithNoWrite() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listingJSON = Data(#"{"strokes":[{"key":"seed123:1.0","pointCount":2}]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listingJSON))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_strokes", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        // No write: list_strokes never opens a session, so the doc's live
+        // seq stays unset (-1), same as the never-touched state in
+        // readResourceCoversDocsSummaryRawAndFrame.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        // The fake received a "list" op-spec plus the doc's current bytes.
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "list")
+
+        await server.stop()
+    }
+
+    @Test func drawStrokesSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["new-stroke"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modifiedBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object(["tool": .string("pen"), "points": .array([.array([.int(0), .int(0)])])])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "drew 1 stroke(s) at seq 1")
+
+        // The fake received a "draw" op-spec carrying the strokes array verbatim.
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "draw")
+        #expect((specJSON["strokes"] as? [Any])?.count == 1)
+
+        // The raw resource now reflects the fake's returned bytes.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modifiedBytes)
+
+        await server.stop()
+    }
+
+    @Test func deleteStrokesUnknownKeyErrorPropagatesDeviceReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .failure("strokeNotFound: [k9]"))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_strokes", arguments: ["docId": "d", "keys": .array([.string("k9")])])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: strokeNotFound: [k9]")
+
+        await server.stop()
+    }
+
+    @Test func drawStrokesWithNoDeviceErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device connects in this test.
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": .array([.object([:])])])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+
+        await server.stop()
+    }
+
+    /// A second stroke op on the SAME docId while the first is stalled in
+    /// flight collides on `DeviceCommandBroker`'s shared per-docId
+    /// `docIdsInFlight` guard — deliberately mixing kinds (draw, then
+    /// delete) to prove the guard is keyed by docId alone, not per tool.
+    @Test func secondStrokeOpOnSameDocWhileInFlightErrorsOpInProgress() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Capable device that records requests but never answers on its own
+        // — holds the first draw_strokes in flight until we release it below.
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let firstCall = Task { try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": .array([.object([:])])]) }
+
+        // Wait until the request is actually in flight (has reached the
+        // device), so the second call below is a genuine collision.
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_strokes", arguments: ["docId": "d", "keys": .array([.string("k1")])])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "opInProgress")
+
+        // Release the stalled first request so it completes normally
+        // (rather than dangling until the strokeOpTimeout default).
         let pending = try #require(await device.receivedRequests.first)
         try await device.sendReply(
             requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
