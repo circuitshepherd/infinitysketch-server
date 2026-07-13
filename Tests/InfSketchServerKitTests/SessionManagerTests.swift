@@ -197,13 +197,15 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
 /// write that result if the document changed underneath it — `expectedBytes`
 /// is the guard against exactly that race.
 @Suite struct WriteCompareAndSwapTests {
-    private func makeStoreAndManager(seed: Data) throws -> (DirectoryDocumentStore, SessionManager) {
+    private func makeStoreAndManager(
+        seed: Data, gracePeriod: Duration = .seconds(60)
+    ) throws -> (DirectoryDocumentStore, SessionManager) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("write-cas-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let store = DirectoryDocumentStore(directory: dir)
         try store.save(docId: "D", bytes: seed)
-        return (store, SessionManager(store: store, config: SessionConfig()))
+        return (store, SessionManager(store: store, config: SessionConfig(gracePeriod: gracePeriod)))
     }
 
     @Test func expectedBytesMatchingCurrentContentIsAccepted() async throws {
@@ -219,12 +221,13 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
 
     @Test func expectedBytesStaleIsRejectedAndNothingIsWritten() async throws {
         let stale = Data("v1".utf8)
-        let (_, manager) = try makeStoreAndManager(seed: stale)
+        let (store, manager) = try makeStoreAndManager(seed: stale)
         _ = try await manager.subscribe(docId: "D")
         // A different writer (the user) lands first, moving the doc past `stale`.
         _ = await manager.submit(docId: "D", opId: "user",
                                  payload: OpPayload(type: "fullDoc", data: Data("v2-user".utf8)))
         let seqBefore = await manager.liveInfo()["D"]?.seq
+        #expect(seqBefore == 1)  // pin the concrete value: an Int? == Int? compare is vacuous when both are nil
         // Now the stale-based write (the agent's) must be refused.
         let outcome = await manager.submit(docId: "D", opId: "agent",
                                            payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
@@ -232,8 +235,15 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         guard case .rejected(let message) = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
         guard case .reject(_, _, let reason, _) = message else { Issue.record("expected .reject, got \(message)"); return }
         #expect(reason == "docChangedDuringOp")
-        #expect(await manager.currentBytes(docId: "D") == Data("v2-user".utf8))   // the user's write survives
+        #expect(await manager.currentBytes(docId: "D") == Data("v2-user".utf8))   // the user's write survives in memory
         #expect(await manager.liveInfo()["D"]?.seq == seqBefore)                   // no seq bump
+        // ...and on DISK. This assertion is the one that pins the guard's
+        // PLACEMENT (before `store.save`), not merely its existence:
+        // `manager.currentBytes` returns the live session's in-memory bytes and
+        // never reads the store, so a CAS moved below `store.save` would leave
+        // the agent's stale bytes on disk — silently resurrected at the next
+        // session reopen — with every in-memory assertion above still green.
+        #expect(try store.load(docId: "D") == Data("v2-user".utf8))
     }
 
     @Test func nilExpectedBytesStaysUnconditional() async throws {
@@ -268,5 +278,47 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
             if case .event = message { eventCount += 1 }
         }
         #expect(eventCount == 1)
+    }
+
+    /// The path Task 2's MCP tools actually take: no live session at write
+    /// time, so `submitOpeningSession` opens one from the STORE inside the
+    /// call. The guard must therefore compare against the store's current
+    /// content — proving "no second pre-check needed" behaviorally, not just
+    /// in a comment.
+    @Test func submitOpeningSessionRejectsStaleExpectationOnAReopenedSession() async throws {
+        let stale = Data("v1".utf8)
+        let (store, manager) = try makeStoreAndManager(seed: stale, gracePeriod: .milliseconds(50))
+        // The agent reads `stale`. Then a device subscribes, pushes, disconnects,
+        // and the session grace-tears-down — so the doc has NO live session, and
+        // the store now holds content the agent has never seen.
+        let sub = try await manager.subscribe(docId: "D")
+        _ = await manager.submit(docId: "D", opId: "user",
+                                 payload: OpPayload(type: "fullDoc", data: Data("v2-user".utf8)))
+        await manager.unsubscribe(docId: "D", token: sub.token)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await manager.liveInfo()["D"] == nil)  // session really is gone: the reopen branch runs below
+
+        let outcome = await manager.submitOpeningSession(
+            docId: "D", createIfMissing: false, opId: "agent",
+            payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
+            expectedBytes: stale)
+        guard case .rejected(let message) = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
+        guard case .reject(_, _, let reason, _) = message else { Issue.record("expected .reject, got \(message)"); return }
+        #expect(reason == "docChangedDuringOp")
+        #expect(try store.load(docId: "D") == Data("v2-user".utf8))  // disk untouched by the refused write
+    }
+
+    @Test func submitOpeningSessionAcceptsMatchingExpectationOnAReopenedSession() async throws {
+        let current = Data("v1".utf8)
+        let (store, manager) = try makeStoreAndManager(seed: current)
+        // No session was ever opened for "D": submitOpeningSession opens it from
+        // the store, and the expectation matches that content.
+        #expect(await manager.liveInfo()["D"] == nil)
+        let outcome = await manager.submitOpeningSession(
+            docId: "D", createIfMissing: false, opId: "agent",
+            payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
+            expectedBytes: current)
+        guard case .accepted = outcome else { Issue.record("expected accepted, got \(outcome)"); return }
+        #expect(try store.load(docId: "D") == Data("v2-agent".utf8))
     }
 }
