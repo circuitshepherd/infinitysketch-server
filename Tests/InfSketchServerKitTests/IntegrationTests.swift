@@ -267,8 +267,8 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // Reply so the pending broker call resolves cleanly (no leaked Task).
         try await send(.strokeOpReply(
             requestId: requestId, docId: "sample",
-            payload: .inline(Data("ok".utf8)), failureReason: nil))
-        #expect(try await requestTask.value == Data("ok".utf8))
+            payload: .inline(Data("ok".utf8)), meta: nil, failureReason: nil))
+        #expect(try await requestTask.value.bytes == Data("ok".utf8))
 
         ws.cancel(with: .normalClosure, reason: nil)
         await server.stop()

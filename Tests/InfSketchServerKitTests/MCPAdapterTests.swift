@@ -357,11 +357,11 @@ private actor FakeStrokeOpDevice {
             switch autoReply {
             case .bytes(let bytes):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(
-                    requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+                    requestId: requestId, docId: docId, payload: .inline(bytes), meta: nil, failureReason: nil
                 ).jsonText()))
             case .failure(let reason):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(
-                    requestId: requestId, docId: docId, payload: nil, failureReason: reason
+                    requestId: requestId, docId: docId, payload: nil, meta: nil, failureReason: reason
                 ).jsonText()))
             case nil:
                 continue  // stall: recorded above, never answered until sendReply is called manually
@@ -374,7 +374,7 @@ private actor FakeStrokeOpDevice {
     /// flight, then releases it once the collision has been observed.
     func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
         try await ws.send(.string(ClientMessage.strokeOpReply(
-            requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+            requestId: requestId, docId: docId, payload: .inline(bytes), meta: nil, failureReason: nil
         ).jsonText()))
     }
 

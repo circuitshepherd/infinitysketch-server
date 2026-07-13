@@ -828,7 +828,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -840,8 +840,9 @@ public actor MCPAdapter {
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device — never a fresh re-read here, which would re-open the
             // very window this guard exists to close (Task 2, write CAS).
+            // `.meta` is render-only (nil here) — draw/delete ignore it.
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "drew \(strokes.count) stroke(s) at seq \(seq)"
             }
@@ -869,7 +870,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -880,8 +881,9 @@ public actor MCPAdapter {
 
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device — never a fresh re-read here (Task 2, write CAS).
+            // `.meta` is render-only (nil here) — delete ignores it.
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "deleted \(keys.count) stroke(s) at seq \(seq)"
             }
@@ -910,7 +912,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -919,8 +921,9 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
+            // `.meta` is render-only (nil here) — list ignores it.
             return CallTool.Result(content: [
-                .text(text: String(data: out, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
             ])
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

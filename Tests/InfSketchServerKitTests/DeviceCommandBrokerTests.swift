@@ -174,7 +174,8 @@ private actor SentBox {
         #expect(sentBytes == docBytes)
         #expect(sentSpec == spec)
         await broker.handleReply(requestId: rid, bytes: Data("result-bytes".utf8), failureReason: nil)
-        #expect(try await result == Data("result-bytes".utf8))
+        #expect(try await result.bytes == Data("result-bytes".utf8))
+        #expect(try await result.meta == nil)
     }
 
     // MARK: - Capability filtering
@@ -214,13 +215,13 @@ private actor SentBox {
         await broker.register(connectionId: UUID(), capabilities: ["createDoc", "authorStrokes"]) { msg in
             Task { await sent2.set(msg) }
         }
-        async let strokeResult: Data = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
+        async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
         guard case .strokeOpRequest(let strokeRid, "D2", _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
         await broker.handleReply(requestId: strokeRid, bytes: Data("stroke".utf8), failureReason: nil)
-        #expect(try await strokeResult == Data("stroke".utf8))
+        #expect(try await strokeResult.bytes == Data("stroke".utf8))
     }
 
     // MARK: - Shared per-docId in-flight guard
@@ -251,7 +252,7 @@ private actor SentBox {
         await broker.register(connectionId: UUID(), capabilities: ["createDoc", "authorStrokes"]) { msg in
             Task { await sent.set(msg) }
         }
-        async let strokeResult: Data = broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
+        async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent.awaitMessage())
         guard case .strokeOpRequest(let rid, "D", _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
@@ -262,7 +263,7 @@ private actor SentBox {
         }
 
         await broker.handleReply(requestId: rid, bytes: Data("T".utf8), failureReason: nil)
-        #expect(try await strokeResult == Data("T".utf8))
+        #expect(try await strokeResult.bytes == Data("T".utf8))
     }
 
     // MARK: - Per-kind timeout
@@ -303,7 +304,7 @@ private actor SentBox {
         await broker.register(connectionId: UUID(), capabilities: ["createDoc", "authorStrokes"]) { msg in
             Task { await sent2.set(msg) }
         }
-        async let strokeResult: Data = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
+        async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
         guard case .strokeOpRequest(let strokeRid, "D2", _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
@@ -314,7 +315,7 @@ private actor SentBox {
         await broker.handleReply(requestId: strokeRid, bytes: Data("stroke".utf8), failureReason: nil)
         await broker.handleReply(requestId: createRid, bytes: Data("create".utf8), failureReason: nil)
 
-        #expect(try await strokeResult == Data("stroke".utf8))
+        #expect(try await strokeResult.bytes == Data("stroke".utf8))
         #expect(try await createResult == Data("create".utf8))
     }
 }
