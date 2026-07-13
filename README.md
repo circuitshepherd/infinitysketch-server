@@ -13,7 +13,8 @@ intended to run on macOS, Linux, and Windows.
 > (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
 > Agents connect via MCP at `/mcp` (HTTP + SSE, official swift-sdk): document
 > resources incl. live frames, text-annotation and document tools, stroke authoring via a connected device.
-> MCP writes are compare-and-swap guarded (`docChangedDuringOp`) so a concurrent app edit is never clobbered — see the
+> MCP writes to an existing document are compare-and-swap guarded (`docChangedDuringOp`)
+> so a concurrent app edit is not clobbered (document *creation* is not yet guarded) — see the
 > 2026-07-11 MCP design in the app repo.
 > Not yet here: resume/backlog replay, auth
 > (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy),
