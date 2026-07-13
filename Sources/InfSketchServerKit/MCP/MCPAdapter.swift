@@ -540,7 +540,11 @@ public actor MCPAdapter {
                                 "inkType": .object([
                                     "type": "string",
                                     "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
-                                    "description": "The ink to draw with. Defaults to pen.",
+                                    "description": """
+                                        The ink to draw with. Defaults to pen. Note: monoline \
+                                        persists as pen — PencilKit's archive format does not \
+                                        preserve it, so a monoline stroke lists back as pen.
+                                        """,
                                 ]),
                             ]),
                             "required": .array(["points"].map(Value.string)),
@@ -582,7 +586,10 @@ public actor MCPAdapter {
                 InfinitySketch device. REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
-                never writes to the document.
+                never writes to the document. A stroke drawn by hand with an ink outside \
+                pen/pencil/marker (fountain pen, watercolour, crayon…) lists under that \
+                ink's name but cannot be re-drawn with draw_strokes, whose inkType enum \
+                covers only the four names above.
                 """,
             inputSchema: .object([
                 "type": "object",
