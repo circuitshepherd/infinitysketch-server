@@ -386,6 +386,14 @@ public actor MCPAdapter {
     // the JSON layer (verified in Task 3's review), so any `Double`/`Int`
     // case reaching here is guaranteed finite.
 
+    /// Task 2 (write CAS): appended verbatim to the description of every
+    /// tool whose write now carries an `expectedBytes` compare-and-swap
+    /// (add/edit/remove_text, replace_doc, draw/delete_strokes) — NOT
+    /// create_doc (nothing to compare — its docExists guard is the race's
+    /// only meaningful shape) or list_strokes (never writes).
+    private static let casRejectionSentence =
+        "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
+
     private static let tools: [Tool] = [
         Tool(
             name: "add_text",
@@ -393,7 +401,8 @@ public actor MCPAdapter {
                 Appends a minimal-attribute placed-text entry to a document: a new id, \
                 plain unformatted text (the app backfills body-style font/colour on load), \
                 the document's current colour scheme, and an identity transform/opacity. \
-                (x, y) is the text box's top-left corner, in canvas coordinates.
+                (x, y) is the text box's top-left corner, in canvas coordinates. \
+                \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -418,7 +427,7 @@ public actor MCPAdapter {
                 defaults — the attributed run's bold/italic/font/colour attributes are \
                 UIKit-archived data no server-side code can synthesize, so a new text run \
                 always replaces the old ones wholesale. Position-only edits (x and/or y with \
-                no text) do not touch formatting.
+                no text) do not touch formatting. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -437,7 +446,7 @@ public actor MCPAdapter {
         ),
         Tool(
             name: "remove_text",
-            description: "Removes a placed text entry from a document by id.",
+            description: "Removes a placed text entry from a document by id. \(casRejectionSentence)",
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
@@ -452,7 +461,7 @@ public actor MCPAdapter {
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
                 exist. The bytes are opaque to the server — the agent owns their validity, \
-                the same trust any other writer on the network has.
+                the same trust any other writer on the network has. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -491,7 +500,8 @@ public actor MCPAdapter {
                 noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
                 time, opInProgress if another stroke operation on this document is already in \
                 flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
-                malformed points). The result names the seq the write was assigned.
+                malformed points). The result names the seq the write was assigned. \
+                \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -563,7 +573,7 @@ public actor MCPAdapter {
                 connected, deviceTimeout if it doesn't respond in time, opInProgress if \
                 another stroke operation on this document is already in flight, and \
                 deviceFailed: <reason> if a key doesn't match any stroke. The result names the \
-                seq the write was assigned.
+                seq the write was assigned. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -638,7 +648,9 @@ public actor MCPAdapter {
             } catch let error as DocJSON.DocJSONError {
                 return Self.errorResult(Self.reason(for: error))
             }
-            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
                 "added \(newId.uuidString) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -665,7 +677,9 @@ public actor MCPAdapter {
             } catch let error as DocJSON.DocJSONError {
                 return Self.errorResult(Self.reason(for: error))
             }
-            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
                 "edited \(textId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -689,7 +703,9 @@ public actor MCPAdapter {
             } catch let error as DocJSON.DocJSONError {
                 return Self.errorResult(Self.reason(for: error))
             }
-            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
                 "removed \(textId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -699,15 +715,26 @@ public actor MCPAdapter {
         }
     }
 
-    /// Unlike the other three tools, this never reads/parses the current
-    /// bytes first — the replacement is opaque by design (spec: "the agent
-    /// owns their validity"), and `createIfMissing: true` is what a
-    /// `create_doc` tool also uses.
+    /// Unlike the other three text tools, this never reads/parses the
+    /// current bytes to compute the replacement — the bytes are opaque by
+    /// design (spec: "the agent owns their validity"). It still gets a CAS
+    /// (Task 2, write CAS): read the doc's current bytes first and pass them
+    /// as the expectation when it exists; `nil` when it doesn't, which also
+    /// selects the create path via `createIfMissing: true` (unchanged). A
+    /// blind overwrite of a doc that changed under the agent's feet is
+    /// exactly the loss this plan exists to prevent — on rejection, the
+    /// agent can re-read and re-decide instead of clobbering someone else's
+    /// edit. `createIfMissing: true` is harmless in the existing-doc branch
+    /// too (it only matters when no session and no stored doc exist), so one
+    /// call covers both branches.
     private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytes = try Self.base64DataArg(arguments, "bytes")
-            return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
+            let currentBytes = await manager.currentBytes(docId: docId)
+            return await submitAndRespond(
+                docId: docId, createIfMissing: true, fullDoc: bytes, expectedBytes: currentBytes
+            ) { seq in
                 "replaced \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -804,7 +831,12 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+            // expectedBytes is docBytes — the exact bytes relayed to the
+            // device — never a fresh re-read here, which would re-open the
+            // very window this guard exists to close (Task 2, write CAS).
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+            ) { seq in
                 "drew \(strokes.count) stroke(s) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -840,7 +872,11 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            return await submitAndRespond(docId: docId, createIfMissing: false, fullDoc: out) { seq in
+            // expectedBytes is docBytes — the exact bytes relayed to the
+            // device — never a fresh re-read here (Task 2, write CAS).
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+            ) { seq in
                 "deleted \(keys.count) stroke(s) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -909,14 +945,24 @@ public actor MCPAdapter {
     /// `liveInfo()` hop, which a racing concurrent write to the same doc
     /// could have bumped past this write's own seq before the read ran),
     /// `.rejected` becomes a tool error carrying the server's reason
-    /// verbatim.
+    /// verbatim — this is also how a stale `expectedBytes` (Task 2, write
+    /// CAS) surfaces: `docChangedDuringOp` flows through unchanged, no
+    /// separate mapping needed.
+    ///
+    /// `expectedBytes` MUST be the exact bytes the caller already
+    /// read/relayed for this write — never a fresh re-read taken here, which
+    /// would just re-open the very race window this guard exists to close.
+    /// `nil` (the default) stays unconditional, for `create_doc` and the
+    /// missing-doc branch of `replace_doc`.
     private func submitAndRespond(
-        docId: String, createIfMissing: Bool, fullDoc bytes: Data, successText: (Int) -> String
+        docId: String, createIfMissing: Bool, fullDoc bytes: Data,
+        expectedBytes: Data? = nil, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
         switch await manager.submitOpeningSession(
-            docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload
+            docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload,
+            expectedBytes: expectedBytes
         ) {
         case .accepted(let seq):
             return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
