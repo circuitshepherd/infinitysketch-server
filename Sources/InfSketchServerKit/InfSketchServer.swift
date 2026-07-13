@@ -19,7 +19,10 @@ public final class InfSketchServer: Sendable {
     /// capability-tagged connections, routes replies) and the MCP layer
     /// (calls `requestCreation` from the `create_doc` tool; will call
     /// `requestStrokeOp` from the agent stroke-authoring tool, Task 4).
-    private let deviceCommandBroker: DeviceCommandBroker
+    /// internal (not private) for tests — mirrors `mcpAdapter` below: Task 3's
+    /// real-socket outbound-chunking test drives `requestStrokeOp` directly
+    /// against the same broker instance the running server's `WSAdapter` uses.
+    let deviceCommandBroker: DeviceCommandBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {

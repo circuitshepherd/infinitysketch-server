@@ -99,13 +99,15 @@ actor Connection {
                 return
             }
             helloed = true
-            // TODO(Task 3): broaden this gate to the two-capability
-            // intersection (createDoc OR authorStrokes); the broker itself
-            // already filters per-request by capability, so widening the
-            // gate here is the only remaining piece.
-            if capabilities.contains("createDoc") {
+            // Register with the broker whenever the connection advertises
+            // either capability the broker brokers requests for — the broker
+            // itself filters per-request by capability (see
+            // DeviceCommandBroker.performRequest), so this gate only needs to
+            // recognize "some device command capability", not which one.
+            let caps = Set(capabilities)
+            if !caps.isDisjoint(with: ["createDoc", "authorStrokes"]) {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId, capabilities: Set(capabilities)) { [weak self] message in
+                await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
             }
@@ -219,11 +221,27 @@ actor Connection {
             }
             await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
 
-        case .strokeOpReply:
-            // Wire shape only (agent stroke authoring, Task 1). Routing this
-            // reply to the stroke-op caller that's awaiting it lands in a
-            // later task; a no-op here just keeps this switch exhaustive.
-            break
+        case .strokeOpReply(let requestId, _, let payload, let failureReason):
+            // Same precedence as createDocReply above (kept in exact lockstep
+            // on purpose — one broker, one reply-routing contract): an inline
+            // payload always wins as a success (even alongside a
+            // spec-violating failureReason); with neither present, substitute
+            // a failureReason rather than ever calling handleReply(bytes:
+            // nil, failureReason: nil) — the broker defaults THAT combination
+            // to a success with empty Data, which must stay unreachable here.
+            guard case .inline(let bytes)? = payload else {
+                if payload == nil {
+                    await broker.handleReply(
+                        requestId: requestId, bytes: nil, failureReason: failureReason ?? "unspecified")
+                } else {
+                    // Unreachable in practice: the reassembler resolves
+                    // .transfer payloads to .inline before dispatch ever sees
+                    // this message (mirrors the `createDocReply` case's guard).
+                    emit(.error(reason: "unresolvedTransfer"))
+                }
+                return
+            }
+            await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
         }
     }
 
