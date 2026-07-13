@@ -182,13 +182,25 @@ actor DocumentSession {
     /// broadcast echo remains the subscriber-facing ack; the returned seq is
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
-    func submit(opId: String, payload: OpPayload) -> SubmitOutcome {
+    func submit(opId: String, payload: OpPayload, expectedBytes: Data? = nil) -> SubmitOutcome {
         guard payload.type == "fullDoc" else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
         }
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let newBytes) = payload.bulk else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
+        }
+        // Compare-and-swap guard for callers that read-then-compute-then-write
+        // (MCP tools spanning a device round-trip): the token MUST be the
+        // document's bytes, never `seq`. `seq` is scoped to this
+        // DocumentSession's in-memory lifetime (`private(set) var seq = 0`
+        // above) and a grace-period teardown/reopen resets it to 0 over
+        // identical content — a seq-based CAS would false-reject after any
+        // such recycle. Byte equality is exact, recycle-proof, and this
+        // guard runs in the same actor turn as the write below, so nothing
+        // can interleave between the compare and the store.save.
+        if let expectedBytes, bytes != expectedBytes {
+            return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
         }
         do {
             try store.save(docId: docId, bytes: newBytes)

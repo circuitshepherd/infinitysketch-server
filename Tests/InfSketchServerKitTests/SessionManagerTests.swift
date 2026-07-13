@@ -191,3 +191,82 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         #expect(await manager.currentBytes(docId: "ghost") == nil)
     }
 }
+
+/// Task 1: the write compare-and-swap guard. An MCP write tool reads a
+/// document, spends a device round-trip computing a result, then must NOT
+/// write that result if the document changed underneath it — `expectedBytes`
+/// is the guard against exactly that race.
+@Suite struct WriteCompareAndSwapTests {
+    private func makeStoreAndManager(seed: Data) throws -> (DirectoryDocumentStore, SessionManager) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("write-cas-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "D", bytes: seed)
+        return (store, SessionManager(store: store, config: SessionConfig()))
+    }
+
+    @Test func expectedBytesMatchingCurrentContentIsAccepted() async throws {
+        let original = Data("v1".utf8)
+        let (_, manager) = try makeStoreAndManager(seed: original)
+        _ = try await manager.subscribe(docId: "D")
+        let outcome = await manager.submit(docId: "D", opId: "op1",
+                                           payload: OpPayload(type: "fullDoc", data: Data("v2".utf8)),
+                                           expectedBytes: original)
+        guard case .accepted = outcome else { Issue.record("expected accepted, got \(outcome)"); return }
+        #expect(await manager.currentBytes(docId: "D") == Data("v2".utf8))
+    }
+
+    @Test func expectedBytesStaleIsRejectedAndNothingIsWritten() async throws {
+        let stale = Data("v1".utf8)
+        let (_, manager) = try makeStoreAndManager(seed: stale)
+        _ = try await manager.subscribe(docId: "D")
+        // A different writer (the user) lands first, moving the doc past `stale`.
+        _ = await manager.submit(docId: "D", opId: "user",
+                                 payload: OpPayload(type: "fullDoc", data: Data("v2-user".utf8)))
+        let seqBefore = await manager.liveInfo()["D"]?.seq
+        // Now the stale-based write (the agent's) must be refused.
+        let outcome = await manager.submit(docId: "D", opId: "agent",
+                                           payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
+                                           expectedBytes: stale)
+        guard case .rejected(let message) = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
+        guard case .reject(_, _, let reason, _) = message else { Issue.record("expected .reject, got \(message)"); return }
+        #expect(reason == "docChangedDuringOp")
+        #expect(await manager.currentBytes(docId: "D") == Data("v2-user".utf8))   // the user's write survives
+        #expect(await manager.liveInfo()["D"]?.seq == seqBefore)                   // no seq bump
+    }
+
+    @Test func nilExpectedBytesStaysUnconditional() async throws {
+        let (_, manager) = try makeStoreAndManager(seed: Data("v0".utf8))
+        _ = try await manager.subscribe(docId: "D")
+        // The app-push path must be untouched: a write with no expectation always lands.
+        _ = await manager.submit(docId: "D", opId: "a",
+                                 payload: OpPayload(type: "fullDoc", data: Data("x".utf8)))
+        let outcome = await manager.submit(docId: "D", opId: "b",
+                                           payload: OpPayload(type: "fullDoc", data: Data("y".utf8)))
+        guard case .accepted = outcome else { Issue.record("expected accepted, got \(outcome)"); return }
+        #expect(await manager.currentBytes(docId: "D") == Data("y".utf8))
+    }
+
+    @Test func rejectedWriteDoesNotBroadcast() async throws {
+        let stale = Data("v1".utf8)
+        let (_, manager) = try makeStoreAndManager(seed: stale)
+        let sub = try await manager.subscribe(docId: "D")
+
+        // One accepted write, unconditional.
+        _ = await manager.submit(docId: "D", opId: "user",
+                                 payload: OpPayload(type: "fullDoc", data: Data("v2-user".utf8)))
+        // Then a stale-expectation write, which must be rejected without broadcasting.
+        let outcome = await manager.submit(docId: "D", opId: "agent",
+                                           payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
+                                           expectedBytes: stale)
+        guard case .rejected = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
+
+        await manager.unsubscribe(docId: "D", token: sub.token)
+        var eventCount = 0
+        for await message in sub.events {
+            if case .event = message { eventCount += 1 }
+        }
+        #expect(eventCount == 1)
+    }
+}
