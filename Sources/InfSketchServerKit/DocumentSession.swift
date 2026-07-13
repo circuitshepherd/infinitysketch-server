@@ -182,13 +182,35 @@ actor DocumentSession {
     /// broadcast echo remains the subscriber-facing ack; the returned seq is
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
-    func submit(opId: String, payload: OpPayload) -> SubmitOutcome {
+    func submit(opId: String, payload: OpPayload, expectedBytes: Data? = nil) -> SubmitOutcome {
         guard payload.type == "fullDoc" else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
         }
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let newBytes) = payload.bulk else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
+        }
+        // Compare-and-swap guard for callers that read-then-compute-then-write
+        // (MCP tools spanning a device round-trip): the token MUST be the
+        // document's bytes, never `seq`. `seq` is scoped to this
+        // DocumentSession's in-memory lifetime (`private(set) var seq = 0`
+        // above), and a grace-period teardown/reopen resets it to 0 while the
+        // CONTENT carries on from the store. That desync cuts both ways:
+        //   - false REJECT: recycle over identical content, seq 1 -> 0, a
+        //     seq CAS refuses a write that was perfectly safe; and worse,
+        //   - false ACCEPT: caller reads seq 0 from a fresh session -> the
+        //     user pushes (seq 1, content changes) -> teardown -> reopen at
+        //     seq 0 over the USER'S NEW content -> a stale expectedSeq 0
+        //     matches, and the guard waves through the very clobber it
+        //     exists to stop. (Out of reach today only because gracePeriod
+        //     60s > strokeOpTimeout 20s — a config coincidence, not a
+        //     structural guarantee. Do not rely on it.)
+        // Byte equality is exact and recycle-proof. This guard runs in the
+        // same actor turn as the write below, so nothing can interleave
+        // between the compare and the store.save — and it must stay ABOVE
+        // that save: below it, a rejected write would already have hit disk.
+        if let expectedBytes, bytes != expectedBytes {
+            return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
         }
         do {
             try store.save(docId: docId, bytes: newBytes)

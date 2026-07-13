@@ -12,7 +12,7 @@ public struct DocSummary: Codable, Equatable, Sendable {
 
 public final class InfSketchServer: Sendable {
     public let manager: SessionManager
-    private let store: DirectoryDocumentStore
+    private let store: any DocumentStore
     private let http: HTTPServer
     private let config: SessionConfig
     /// One broker per process, shared by the WS layer (registers
@@ -25,8 +25,20 @@ public final class InfSketchServer: Sendable {
     let deviceCommandBroker: DeviceCommandBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
 
-    public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
-        let store = DirectoryDocumentStore(directory: docsDirectory)
+    public convenience init(
+        port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
+    ) {
+        self.init(port: port, store: DirectoryDocumentStore(directory: docsDirectory), config: config)
+    }
+
+    /// Store-injecting designated init — `internal`, for tests only (the
+    /// public init above is the one real callers use, and it always builds a
+    /// `DirectoryDocumentStore`). The write-CAS boundary tests need a store
+    /// whose `load` can return different bytes on successive calls, so that a
+    /// tool handler's read and the session-open behind its submit see
+    /// DIFFERENT content with no timing involved at all — see
+    /// `StaleReadStore` in MCPAdapterTests.
+    init(port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
         let manager = SessionManager(store: store, config: config)
         self.manager = manager
