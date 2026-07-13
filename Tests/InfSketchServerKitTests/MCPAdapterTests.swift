@@ -200,6 +200,16 @@ private actor FakeCreateDocDevice {
         }
     }
 
+    /// Manually answers a recorded request — for tests that stall the
+    /// device (autoReplyBytes: nil) to hold a request in flight, then
+    /// release it at a moment of their choosing.
+    func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
+        try await ws.send(.string(ClientMessage.createDocReply(
+            requestId: requestId, docId: docId,
+            payload: .inline(bytes), failureReason: nil
+        ).jsonText()))
+    }
+
     private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
         let frame = try await ws.receive()
         guard case .string(let text) = frame else {
@@ -873,6 +883,50 @@ private actor FakeCreateDocDevice {
             name: "create_doc", arguments: ["docId": "SlowDoc"])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceTimeout")
+
+        await server.stop()
+    }
+
+    /// Pins the PUBLISHED tool-error string for a same-docId in-flight
+    /// collision to exactly "creationInProgress" — the broker's error case
+    /// was renamed to the kind-agnostic `.requestInFlight` (Task 2,
+    /// DeviceCommandBroker), but the string MCP clients see must not change.
+    /// MCPAdapter's `callCreateDoc` mapping cites this test.
+    @Test func createDocInFlightErrorPublishesCreationInProgress() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Capable device that records requests but never answers on its own
+        // — holds the first create_doc in flight until we release it below.
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: nil)
+        defer { Task { await device.close() } }
+
+        let firstCall = Task { try await client.callTool(
+            name: "create_doc", arguments: ["docId": "Pending"]) }
+
+        // Wait until the request is actually in flight (has reached the
+        // device), so the second call below is a genuine collision.
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "Pending"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "creationInProgress")
+
+        // Release the stalled first request so it completes normally
+        // (rather than dangling until the 10 s default timeout).
+        let pending = try #require(await device.receivedRequests.first)
+        try await device.sendReply(
+            requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
+        let (firstContent, firstIsError) = try await firstCall.value
+        #expect(firstIsError != true)
+        #expect(toolResultText(firstContent).contains("seq 1"))
 
         await server.stop()
     }

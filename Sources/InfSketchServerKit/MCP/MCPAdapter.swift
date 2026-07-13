@@ -615,9 +615,10 @@ public actor MCPAdapter {
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 switch error {
                 case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
-                // Published string stays "creationInProgress" (an
-                // MCPAdapterTests test asserts it) even though the case
-                // itself is now the kind-agnostic `.requestInFlight`.
+                // Published string stays "creationInProgress" (pinned by
+                // MCPAdapterTests.createDocInFlightErrorPublishesCreationInProgress)
+                // even though the case itself is now the kind-agnostic
+                // `.requestInFlight`.
                 case .requestInFlight: return Self.errorResult("creationInProgress")
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")

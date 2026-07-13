@@ -270,12 +270,18 @@ private actor SentBox {
     @Test func strokeOpTimesOutIndependentlyOfCreateTimeout() async {
         // A short strokeOpTimeout with a long (untouched) createTimeout:
         // the stroke op must time out on its own schedule without waiting
-        // for (or being affected by) the create timeout.
-        let broker = DeviceCommandBroker(createTimeout: .seconds(10), strokeOpTimeout: .milliseconds(50))
+        // for (or being affected by) the create timeout. The elapsed-time
+        // bound is what makes a parameter swap (the stroke op accidentally
+        // running on createTimeout) FAIL — 10 s > 1 s — instead of merely
+        // making the test slow.
+        let broker = DeviceCommandBroker(createTimeout: .seconds(10), strokeOpTimeout: .milliseconds(100))
         await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { _ in }
+        let clock = ContinuousClock()
+        let start = clock.now
         await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
             _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         }
+        #expect(clock.now - start < .seconds(1))
     }
 
     // MARK: - Kind-agnostic replies
