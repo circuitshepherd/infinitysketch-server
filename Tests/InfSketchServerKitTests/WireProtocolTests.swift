@@ -205,3 +205,56 @@ import InfSketchWire
         #expect(results == [original])
     }
 }
+
+@Suite struct StrokeOpWireTests {
+    @Test func strokeOpRequestRoundTrips() throws {
+        let msg = ServerMessage.strokeOpRequest(
+            requestId: 5, docId: "D",
+            payload: .inline(Data("doc".utf8)), spec: Data(#"{"op":"list"}"#.utf8))
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ServerMessage.self, from: data) == msg)
+    }
+
+    @Test func strokeOpRequestTransferFormRoundTrips() throws {
+        let msg = ServerMessage.strokeOpRequest(
+            requestId: 6, docId: "D",
+            payload: .transfer(TransferDescriptor(transferId: 9, totalBytes: 1_000_000, chunkSize: 65536)),
+            spec: Data(#"{"op":"draw"}"#.utf8))
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ServerMessage.self, from: data) == msg)
+    }
+
+    @Test func strokeOpReplySuccessRoundTrips() throws {
+        let msg = ClientMessage.strokeOpReply(
+            requestId: 5, docId: "D", payload: .inline(Data("out".utf8)), failureReason: nil)
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func strokeOpReplyFailureRoundTrips() throws {
+        let msg = ClientMessage.strokeOpReply(
+            requestId: 7, docId: "D", payload: nil, failureReason: "strokeNotFound: [k1]")
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func strokeOpMessagesParticipateInTransferCarrying() throws {
+        // The server chunks OUTBOUND requests and the app's reassembler resolves them
+        // (and symmetrically for replies) purely via these four hooks.
+        let bigDoc = Data(repeating: 7, count: 600_000)
+        let request = ServerMessage.strokeOpRequest(
+            requestId: 1, docId: "D", payload: .inline(bigDoc), spec: Data(#"{"op":"draw"}"#.utf8))
+        #expect(request.bulkBytes == bigDoc)
+        let descriptor = TransferDescriptor(transferId: 2, totalBytes: bigDoc.count, chunkSize: 65536)
+        let swapped = request.replacingBulk(with: descriptor)
+        #expect(swapped.openingDescriptor == descriptor)
+        #expect(swapped.resolvingBulk(with: bigDoc) == request)
+
+        let reply = ClientMessage.strokeOpReply(
+            requestId: 1, docId: "D", payload: .inline(bigDoc), failureReason: nil)
+        #expect(reply.bulkBytes == bigDoc)
+        let swappedReply = reply.replacingBulk(with: descriptor)
+        #expect(swappedReply.openingDescriptor == descriptor)
+        #expect(swappedReply.resolvingBulk(with: bigDoc) == reply)
+    }
+}

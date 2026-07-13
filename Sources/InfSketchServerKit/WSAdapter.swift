@@ -214,6 +214,12 @@ actor Connection {
                 return
             }
             await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
+
+        case .strokeOpReply:
+            // Wire shape only (agent stroke authoring, Task 1). Routing this
+            // reply to the stroke-op caller that's awaiting it lands in a
+            // later task; a no-op here just keeps this switch exhaustive.
+            break
         }
     }
 
