@@ -240,6 +240,15 @@ private func addedId(from resultText: String) -> String {
     String(resultText.split(separator: " ").dropFirst().first ?? "")
 }
 
+/// The `render_sketch` twin of `toolResultText` (Task 5): pulls the single
+/// `.image` content item's base64 `data` + `mimeType` back out.
+private func toolResultImage(_ content: [Tool.Content]) -> (data: String, mimeType: String)? {
+    for item in content {
+        if case .image(let data, let mimeType, _, _) = item { return (data, mimeType) }
+    }
+    return nil
+}
+
 /// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
 /// WebSocket client against the same running server's `/ws` endpoint (NOT
 /// the in-process `WSAdapterTests` harness — this needs to share the
@@ -327,6 +336,9 @@ private actor FakeStrokeOpDevice {
 
     enum AutoReply {
         case bytes(Data)
+        /// The `render_sketch` shape (Task 5): a PNG payload plus its
+        /// metadata JSON, riding the reply's additive `meta` field.
+        case bytesWithMeta(bytes: Data, meta: Data)
         case failure(String)
     }
 
@@ -358,6 +370,10 @@ private actor FakeStrokeOpDevice {
             case .bytes(let bytes):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(
                     requestId: requestId, docId: docId, payload: .inline(bytes), meta: nil, failureReason: nil
+                ).jsonText()))
+            case .bytesWithMeta(let bytes, let meta):
+                try? await ws.send(.string(ClientMessage.strokeOpReply(
+                    requestId: requestId, docId: docId, payload: .inline(bytes), meta: meta, failureReason: nil
                 ).jsonText()))
             case .failure(let reason):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(
@@ -667,10 +683,10 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - Tools (Task 7)
 
-    // Renamed from `listToolsContainsAllFiveWriteTools` (Task 4, agent
-    // stroke-authoring): three more tools joined the surface, so "Five" was
-    // no longer accurate.
-    @Test func listToolsContainsAllEightWriteTools() async throws {
+    // Renamed from `listToolsContainsAllEightWriteTools` (Task 5, render_sketch):
+    // a ninth tool joined the surface — read-only, unlike the other eight, so
+    // "WriteTools" was no longer accurate either.
+    @Test func listToolsContainsAllNineTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -680,7 +696,7 @@ private actor FakeStrokeOpDevice {
         let names = Set(tools.map(\.name))
         #expect(names == [
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
-            "draw_strokes", "delete_strokes", "list_strokes",
+            "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1184,7 +1200,8 @@ private actor FakeStrokeOpDevice {
     /// Task 2 (write CAS): pins the verbatim rejection sentence onto exactly
     /// the six CAS-guarded write tools, and its absence from `create_doc` /
     /// `list_strokes` (which are unaffected — see createDocIsUnaffected and
-    /// listStrokesReturnsFakeListingVerbatimWithNoWrite).
+    /// listStrokesReturnsFakeListingVerbatimWithNoWrite) and, since Task 5,
+    /// `render_sketch` (read-only — no write at all, so the CAS does not apply).
     @Test func toolDescriptionsCarryTheCASRejectionSentenceOnlyWhereGuarded() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -1197,7 +1214,7 @@ private actor FakeStrokeOpDevice {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
         }
-        for name in ["create_doc", "list_strokes"] {
+        for name in ["create_doc", "list_strokes", "render_sketch"] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) != true, "\(name) should not carry the CAS sentence")
         }
@@ -1671,6 +1688,251 @@ private actor FakeStrokeOpDevice {
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    // MARK: - render_sketch (Task 5, agent render/preview)
+    //
+    // Unlike every tool above, `render_sketch` is READ-ONLY: it never calls
+    // `submitAndRespond`/`submitOpeningSession` and never passes
+    // `expectedBytes` — a read never writes, so the write-CAS does not apply
+    // (see toolDescriptionsCarryTheCASRejectionSentenceOnlyWhereGuarded,
+    // updated above to include it in the unaffected set).
+
+    @Test func renderSketchReturnsImageAndMetadataContent() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF])
+        let metaBytes = Data(#"{"rect":[0,0,100,100],"scale":2.0}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: metaBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d"])
+        #expect(isError != true)
+
+        let image = try #require(toolResultImage(content))
+        #expect(image.mimeType == "image/png")
+        #expect(Data(base64Encoded: image.data) == pngBytes)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        await server.stop()
+    }
+
+    /// THE read-only invariant (Global Constraints: "A test must prove the
+    /// document is byte-identical afterwards"): a render must not open a
+    /// session, assign a seq, or otherwise touch document state. Establish a
+    /// live session at a KNOWN seq first (an accepted add_text), then prove
+    /// render_sketch leaves it exactly where it was.
+    @Test func renderSketchIsReadOnlySeqUnchanged() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (addContent, addIsError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "hi", "x": 1, "y": 2])
+        #expect(addIsError != true)
+        #expect(toolResultText(addContent).contains("seq 1"))
+        let seqBeforeRender = await server.manager.liveInfo()["d"]?.seq
+        #expect(seqBeforeRender == 1)
+        let rawBefore = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlobBefore = try #require(rawBefore[0].blob)
+
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data([1, 2, 3]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultImage(content) != nil)
+
+        // The live seq is UNCHANGED — no session was opened, no write landed.
+        #expect(await server.manager.liveInfo()["d"]?.seq == seqBeforeRender)
+        // The document bytes are byte-identical to before the render too.
+        let rawAfter = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlobAfter = try #require(rawAfter[0].blob)
+        #expect(rawBlobAfter == rawBlobBefore)
+
+        await server.stop()
+    }
+
+    @Test func renderSketchUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device needs to connect — unknownDoc short-circuits before
+        // any device round trip, mirroring every other tool's unknownDoc path.
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func renderSketchDeviceFailurePropagatesReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .failure("emptyRender"))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "include": .string("none")])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: emptyRender")
+
+        await server.stop()
+    }
+
+    @Test func renderSketchWithNoDeviceErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device connects in this test.
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+
+        await server.stop()
+    }
+
+    /// THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN for `render_sketch` (mirrors
+    /// drawStrokesSpecEnvelopeMatchesCanonicalShape): the op-spec JSON this
+    /// server builds is decoded app-side by `SketchRenderer.RenderSpec`
+    /// (Task 3), a plain `Decodable` that silently drops unknown keys — so a
+    /// field-name drift on either side would never fail loudly, it would
+    /// just silently fall back to a default. This asserts the exact envelope
+    /// shape with every Global-Constraints parameter name as a string
+    /// literal, including the nested `strokes` item shape shared with
+    /// `draw_strokes` (points/width/color/inkType):
+    ///
+    ///     {"op": "render", "include": …, "strokeKeys": […],
+    ///      "strokes": [{"points": […], "width": …, "color": …, "inkType": …}],
+    ///      "rect": […], "padding": …, "background": …, "axes": …, "maxPixels": …}
+    @Test func renderSketchSpecEnvelopeMatchesCanonicalShape() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "points": .array([
+                    .array([.double(1.5), .double(2.5)]),
+                    .array([.int(30), .int(40)]),
+                ]),
+                "width": .double(6.5),
+                "color": .string("#FF00AA"),
+                "inkType": .string("marker"),
+            ])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "render_sketch",
+            arguments: [
+                "docId": "d",
+                "include": .string("strokes"),
+                "strokeKeys": .array([.string("seed123:1.0")]),
+                "strokes": strokesArg,
+                "rect": .array([.int(0), .int(0), .int(100), .int(200)]),
+                "padding": .double(15),
+                "background": .string("paper+grid"),
+                "axes": .bool(true),
+                "maxPixels": .int(2_000_000),
+            ])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == [
+            "op", "include", "strokeKeys", "strokes", "rect", "padding", "background", "axes", "maxPixels",
+        ])
+        #expect(envelope["op"] as? String == "render")
+        #expect(envelope["include"] as? String == "strokes")
+        #expect(envelope["strokeKeys"] as? [String] == ["seed123:1.0"])
+        #expect(envelope["rect"] as? [Double] == [0, 0, 100, 200])
+        #expect(envelope["padding"] as? Double == 15)
+        #expect(envelope["background"] as? String == "paper+grid")
+        #expect(envelope["axes"] as? Bool == true)
+        #expect(envelope["maxPixels"] as? Double == 2_000_000)
+
+        let strokes = try #require(envelope["strokes"] as? [[String: Any]])
+        #expect(strokes.count == 1)
+        let stroke = try #require(strokes.first)
+        // The CANONICAL per-stroke field names, asserted string-literally —
+        // the exact set draw_strokes's own envelope test pins.
+        #expect(Set(stroke.keys) == ["points", "width", "color", "inkType"])
+        let points = try #require(stroke["points"] as? [[Double]])
+        #expect(points == [[1.5, 2.5], [30, 40]])
+        #expect(stroke["width"] as? Double == 6.5)
+        #expect(stroke["color"] as? String == "#FF00AA")
+        #expect(stroke["inkType"] as? String == "marker")
+
+        await server.stop()
+    }
+
+    /// A bare call with ONLY `docId` must omit every optional field from the
+    /// envelope rather than sending them as explicit nulls — `render_sketch`
+    /// with no arguments beyond docId is the common case (render the whole
+    /// document, auto-fit, defaults everywhere), and `RenderSpec`'s optional
+    /// `Decodable` fields treat "absent" and "null" the same, but an
+    /// envelope that quietly grew `"rect": null` etc. for every unspecified
+    /// param would be needless wire noise on every single call.
+    @Test func renderSketchWithOnlyDocIdOmitsEveryOptionalField() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(name: "render_sketch", arguments: ["docId": "d"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+        #expect(envelope["op"] as? String == "render")
+
+        await server.stop()
+    }
+
+    @Test func renderSketchToolDescriptionStatesReadOnlyContract() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        let tool = try #require(tools.first { $0.name == "render_sketch" })
+        let description = try #require(tool.description)
+        #expect(description.contains("ephemeral"))
+        #expect(description.contains("not") && description.contains("written"))
+        #expect(description.contains("draw_strokes"))
+        #expect(description.contains("visible"))
+        #expect(description.contains("enabled"))
+        #expect(description.contains("connected device"))
 
         await server.stop()
     }
