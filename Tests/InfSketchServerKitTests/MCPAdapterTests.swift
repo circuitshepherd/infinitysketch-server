@@ -37,6 +37,92 @@ private func startServer(
     return (server, port, task)
 }
 
+/// Task 2 review (I1): the same harness over an INJECTED store, so a test can
+/// make the document's live bytes differ from what a tool handler read — with
+/// no timing, no device, and no concurrency (see `StaleReadStore`).
+private func startServer(
+    store: any DocumentStore,
+    config: SessionConfig = SessionConfig()
+) async throws -> (
+    InfSketchServer, UInt16, Task<Void, any Error>
+) {
+    let server = InfSketchServer(port: 0, store: store, config: config)
+    let task = Task { try await server.run() }
+    try await server.waitUntilListening()
+    let port = try #require(await server.listeningPort)
+    return (server, port, task)
+}
+
+/// A `DocumentStore` whose `load` returns `first` on its FIRST call and
+/// `afterFirst` on every call after — the timing-free seam that pins the
+/// write-CAS wiring inside the no-device tool handlers (`edit_text`,
+/// `remove_text`, `replace_doc`; Task 2 review, I1 / adjudication 2).
+///
+/// How it exercises the real handler body, with zero concurrency: no session
+/// is live, so the handler's `manager.currentBytes(docId:)` falls through to
+/// `store.load` — the FIRST load, returning `first`. The handler computes its
+/// result from those bytes and submits; `submitOpeningSession` then opens the
+/// session, which loads AGAIN — the second load, returning `afterFirst`. The
+/// session's content and the handler's expectation therefore differ, exactly
+/// as they would if a competing writer had landed in between, and the CAS must
+/// reject.
+///
+/// It discriminates all three failure modes, which is the point:
+///   - handler passes the bytes it read (correct)  → expectation `first` vs
+///     session `afterFirst` → REJECTED → test green.
+///   - handler passes `nil` (the regression)       → unconditional → ACCEPTED
+///     → test red.
+///   - handler re-reads at submit time (the other  → expectation `afterFirst`
+///     regression the binding rule forbids)          vs session `afterFirst`
+///                                                   → ACCEPTED → test red.
+///
+/// `saves` is the proof that nothing was written: a rejected submit must never
+/// reach `store.save`.
+private final class StaleReadStore: DocumentStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private let docId: String
+    private let first: Data
+    private let afterFirst: Data
+    private var loadCount = 0
+    private var savedBytes: [Data] = []
+
+    init(docId: String, first: Data, afterFirst: Data) {
+        self.docId = docId
+        self.first = first
+        self.afterFirst = afterFirst
+    }
+
+    var loads: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadCount
+    }
+
+    var saves: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return savedBytes
+    }
+
+    func list() throws -> [StoredDocInfo] {
+        [StoredDocInfo(docId: docId, name: docId, sizeBytes: first.count, modifiedAt: Date())]
+    }
+
+    func load(docId: String) throws -> Data {
+        guard docId == self.docId else { throw DocumentStoreError.notFound }
+        lock.lock()
+        defer { lock.unlock() }
+        loadCount += 1
+        return loadCount == 1 ? first : afterFirst
+    }
+
+    func save(docId: String, bytes: Data) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        savedBytes.append(bytes)
+    }
+}
+
 /// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK
 /// client cannot: explicit `DELETE /mcp`, `resources/unsubscribe`, and
 /// header-less / validation-failing POSTs.
@@ -671,53 +757,81 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// Task 2 (write CAS): `add_text` has no device round trip, so the real
-    /// window between its `currentBytes` read and its `submitOpeningSession`
-    /// call is a couple of actor hops with no reachable suspension point a
-    /// test can land a competing write inside (unlike draw_strokes/
-    /// delete_strokes, which stall on a real device reply for up to 20s) —
-    /// confirmed by attempting exactly this shape (see task-2-report.md for
-    /// the attempt and why it's unreliable). Per the brief's fallback, this
-    /// drives the IDENTICAL sequence `callAddText` performs — read via
-    /// `manager.currentBytes`, mutate via `DocJSON.addText` (the exact
-    /// function the tool calls), THEN land a competing write, THEN submit
-    /// with the pre-competing-write bytes as the expectation — just directly
-    /// through `SessionManager` rather than through the MCP tool boundary, so
-    /// the race is deterministic instead of best-effort-timed.
+    // MARK: - Write CAS at the tool boundary, via the StaleReadStore seam
+    //
+    // (Task 2 review, I1 / adjudication 2.) These four run the REAL handler
+    // bodies — callAddText / callEditText / callRemoveText / callReplaceDoc —
+    // end to end through `client.callTool`, and go green ONLY if the handler
+    // passes the bytes it read as its expectation. A `nil` expectation or a
+    // fresh re-read at submit time both make the write land and turn them red.
+    // See `StaleReadStore` above for why no timing, device, or concurrency is
+    // needed to make the doc's live bytes differ from what the handler read.
+    //
+    // The stroke tools (which DO have a device stall to lean on) get the real
+    // thing instead — a genuine competing write mid-round-trip; see
+    // drawStrokes/deleteStrokesRejectsWhenTheDocumentChangedMidOp below.
+
+    /// The bytes a StaleReadStore hands back on every load AFTER the first —
+    /// i.e. what the tool handler never saw.
+    private static let changedUnderneathBytes =
+        Data(#"{"aaa001_thumbnailData":"","marker":"changed-underneath"}"#.utf8)
+
     @Test func addTextRejectsWhenTheDocumentChangedMidOp() async throws {
-        let (server, _, task) = try await startServer()  // seeds doc "d"
+        let store = StaleReadStore(
+            docId: "d", first: Fixtures.docBytes, afterFirst: Self.changedUnderneathBytes)
+        let (server, port, task) = try await startServer(store: store)
         defer { task.cancel() }
-        _ = try await server.manager.subscribe(docId: "d")
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
 
-        let originalBytes = try #require(await server.manager.currentBytes(docId: "d"))
-        let mutated = try DocJSON.addText(
-            to: originalBytes, id: UUID(), text: "hi", x: 1, y: 2, pinned: false)
+        let (content, isError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "hi", "x": 1, "y": 2])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+        // Nothing reached the store: a rejected submit must never save.
+        #expect(store.saves.isEmpty)
 
-        // A competing write lands first, moving the doc past `originalBytes`
-        // — the exact shape of another writer editing the doc while add_text
-        // was mid-flight.
-        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing"}"#.utf8)
-        let competingOutcome = await server.manager.submit(
-            docId: "d", opId: "competing-writer",
-            payload: OpPayload(type: "fullDoc", data: competingBytes))
-        guard case .accepted = competingOutcome else {
-            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
-            return
-        }
+        await server.stop()
+    }
 
-        // add_text's own submit, now running with the STALE expectation.
-        let outcome = await server.manager.submitOpeningSession(
-            docId: "d", createIfMissing: false, opId: "mcp-add-text-sim",
-            payload: OpPayload(type: "fullDoc", data: mutated),
-            expectedBytes: originalBytes)
-        guard case .rejected(let message) = outcome else {
-            Issue.record("expected rejected, got \(outcome)"); return
-        }
-        guard case .reject(_, _, let reason, _) = message else {
-            Issue.record("expected .reject, got \(message)"); return
-        }
-        #expect(reason == "docChangedDuringOp")
-        #expect(await server.manager.currentBytes(docId: "d") == competingBytes)
+    @Test func editTextRejectsWhenTheDocumentChangedMidOp() async throws {
+        let textId = UUID()
+        let seeded = try DocJSON.addText(
+            to: Fixtures.docBytes, id: textId, text: "before", x: 1, y: 2, pinned: false)
+        let store = StaleReadStore(
+            docId: "d", first: seeded, afterFirst: Self.changedUnderneathBytes)
+        let (server, port, task) = try await startServer(store: store)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(textId.uuidString), "text": "after"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+        #expect(store.saves.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func removeTextRejectsWhenTheDocumentChangedMidOp() async throws {
+        let textId = UUID()
+        let seeded = try DocJSON.addText(
+            to: Fixtures.docBytes, id: textId, text: "gone soon", x: 1, y: 2, pinned: false)
+        let store = StaleReadStore(
+            docId: "d", first: seeded, afterFirst: Self.changedUnderneathBytes)
+        let (server, port, task) = try await startServer(store: store)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_text",
+            arguments: ["docId": "d", "textId": .string(textId.uuidString)])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+        #expect(store.saves.isEmpty)
 
         await server.stop()
     }
@@ -835,46 +949,26 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// Task 2 (write CAS): unlike add/edit/remove_text, `replace_doc`'s bytes
-    /// are opaque and supplied wholesale by the agent — there is no server-
-    /// side computation between its `currentBytes` read and its submit, so
-    /// (like addTextRejectsWhenTheDocumentChangedMidOp) the real race window
-    /// is not reliably reachable through the MCP tool boundary. This drives
-    /// the identical sequence `callReplaceDoc`'s existing-doc branch performs
-    /// — read current bytes, land a competing write, submit with the stale
-    /// read as the expectation — directly through `SessionManager`.
+    /// Task 2 review (I1): `replace_doc`'s EXISTING-doc branch, at the real
+    /// tool boundary, via the `StaleReadStore` seam (see the MARK above the
+    /// text-tool CAS tests). The agent's bytes are opaque, but the handler
+    /// still reads the doc first and must expect exactly what it read —
+    /// otherwise it blindly overwrites a document that changed under it.
     @Test func replaceDocOnExistingDocIsGuarded() async throws {
-        let (server, _, task) = try await startServer()  // seeds doc "d"
+        let store = StaleReadStore(
+            docId: "d", first: Fixtures.docBytes, afterFirst: Self.changedUnderneathBytes)
+        let (server, port, task) = try await startServer(store: store)
         defer { task.cancel() }
-        _ = try await server.manager.subscribe(docId: "d")
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
 
-        let originalBytes = try #require(await server.manager.currentBytes(docId: "d"))
         let replacement = Data(#"{"aaa001_thumbnailData":"","marker":"replacement"}"#.utf8)
-
-        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing"}"#.utf8)
-        let competingOutcome = await server.manager.submit(
-            docId: "d", opId: "competing-writer",
-            payload: OpPayload(type: "fullDoc", data: competingBytes))
-        guard case .accepted = competingOutcome else {
-            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
-            return
-        }
-
-        // replace_doc's own submit for an EXISTING doc: createIfMissing stays
-        // true (harmless once the doc exists), but expectedBytes must be the
-        // pre-competing-write content, not nil.
-        let outcome = await server.manager.submitOpeningSession(
-            docId: "d", createIfMissing: true, opId: "mcp-replace-doc-sim",
-            payload: OpPayload(type: "fullDoc", data: replacement),
-            expectedBytes: originalBytes)
-        guard case .rejected(let message) = outcome else {
-            Issue.record("expected rejected, got \(outcome)"); return
-        }
-        guard case .reject(_, _, let reason, _) = message else {
-            Issue.record("expected .reject, got \(message)"); return
-        }
-        #expect(reason == "docChangedDuringOp")
-        #expect(await server.manager.currentBytes(docId: "d") == competingBytes)
+        let (content, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "d", "bytes": .string(replacement.base64EncodedString())])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+        #expect(store.saves.isEmpty)
 
         await server.stop()
     }
@@ -914,17 +1008,18 @@ private actor FakeStrokeOpDevice {
     /// writer can carry id U in its payload before U's own write landed, and
     /// seqs are assigned in landing order).
     ///
-    /// Updated for Task 2 (write CAS): each call now carries the bytes IT
-    /// read as its `expectedBytes`, so several truly-concurrent add_text
-    /// calls racing on the SAME doc can now legitimately lose the
-    /// compare-and-swap — a call that read before a sibling's write landed,
-    /// then tried to submit after it, is correctly rejected with
-    /// docChangedDuringOp instead of silently clobbering. That rejection
-    /// (never a silent wrong-content accept) is exactly the property this
-    /// plan exists to guarantee, so this test now tolerates a mix of
-    /// outcomes rather than requiring all six to succeed — verified pre-fix
-    /// (Task 1 state) that all six always succeeded here; post-fix, some
-    /// legitimately don't, and that's the correct new behavior.
+    /// Updated for Task 2 (write CAS): each call now carries the bytes IT read
+    /// as its `expectedBytes`, so several truly-concurrent add_text calls
+    /// racing on the SAME doc can legitimately lose the compare-and-swap — a
+    /// call that read before a sibling's write landed, then tried to submit
+    /// after it, is correctly rejected with docChangedDuringOp instead of
+    /// silently clobbering. Each racer therefore RETRIES on that reason (the
+    /// published contract — the six tool descriptions say verbatim "re-read
+    /// the document and retry"), which keeps all six racers accepting and so
+    /// pins the Task 7 seq-ack property at full strength, while making the
+    /// test double as the executable spec of that retry contract. A retry is
+    /// correct by construction: a rejected attempt wrote nothing, and the
+    /// retry re-reads fresh bytes.
     @Test func toolAckSeqIsTheWritesOwnAssignedSeqUnderConcurrency() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -936,37 +1031,49 @@ private actor FakeStrokeOpDevice {
         defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
 
         let concurrency = 6
-        let results: [(id: String, reportedSeq: Int)?] = try await withThrowingTaskGroup(
+        let maxAttempts = 10
+        let accepted: [(id: String, reportedSeq: Int)] = try await withThrowingTaskGroup(
             of: (String, Int)?.self
         ) { group in
             for i in 0..<concurrency {
                 group.addTask {
-                    let (content, isError) = try await client.callTool(
-                        name: "add_text",
-                        arguments: ["docId": "d", "text": "race \(i)", "x": 1, "y": 2])
-                    let text = toolResultText(content)
-                    if isError == true {
+                    // The retry loop the tool descriptions prescribe. Contention
+                    // falls off as racers succeed and drop out, so the bound is
+                    // generous rather than tight.
+                    for _ in 0..<maxAttempts {
+                        let (content, isError) = try await client.callTool(
+                            name: "add_text",
+                            arguments: ["docId": "d", "text": "race \(i)", "x": 1, "y": 2])
+                        let text = toolResultText(content)
+                        guard isError == true else {
+                            let reportedSeq = try #require(Int(text.split(separator: " ").last ?? ""))
+                            return (addedId(from: text), reportedSeq)
+                        }
+                        // The ONLY rejection a racer may see here: a lost CAS.
+                        // Any other error is a real failure, not a retryable one.
                         #expect(text == "docChangedDuringOp", "unexpected rejection reason: \(text)")
-                        return nil
+                        guard text == "docChangedDuringOp" else { return nil }
                     }
-                    let reportedSeq = try #require(Int(text.split(separator: " ").last ?? ""))
-                    return (addedId(from: text), reportedSeq)
+                    Issue.record("racer \(i) still lost the CAS after \(maxAttempts) attempts")
+                    return nil
                 }
             }
-            var collected: [(String, Int)?] = []
-            for try await result in group { collected.append(result) }
+            var collected: [(String, Int)] = []
+            for try await result in group {
+                if let result { collected.append(result) }
+            }
             return collected
         }
-        let accepted = results.compactMap { $0 }
-        // The very first submit to actually reach the actor always wins its
-        // own CAS (nothing else could have written before it), so at least
-        // one of the six must succeed.
-        #expect(!accepted.isEmpty)
+        // With retries, every racer must eventually land.
+        #expect(accepted.count == concurrency)
+        // M5: a bare #expect would let the drain loop below block forever on
+        // events that will never come. Fail fast instead of hanging.
+        guard !accepted.isEmpty else { return }
 
-        // Drain the ops off the event stream and record, per text id, the
-        // seq of the event that first contains it (= its own write's seq).
-        // A rejected call never reaches store.save, so it never broadcasts
-        // — stop after exactly as many ops as were actually ACCEPTED above.
+        // Drain the ops off the event stream and record, per text id, the seq
+        // of the event that first contains it (= its own write's seq). A
+        // rejected attempt never reaches store.save, so it never broadcasts —
+        // there is exactly one op per ACCEPTED call.
         var firstSeenSeq: [String: Int] = [:]
         var opsSeen = 0
         for await message in sub.events {
@@ -988,7 +1095,8 @@ private actor FakeStrokeOpDevice {
         }
 
         // Nothing lost, nothing leaked: the final doc holds exactly the
-        // accepted ids, no more and no fewer.
+        // accepted ids, no more and no fewer. (Without the CAS, the racers
+        // produce lost updates and an accepted id goes missing here.)
         let finalBytes = try #require(await server.manager.currentBytes(docId: "d"))
         let finalIds = Set(try DocJSON.summary(from: finalBytes).texts.map(\.id))
         #expect(finalIds == Set(accepted.map(\.id)))
@@ -1452,7 +1560,8 @@ private actor FakeStrokeOpDevice {
         // competing write below to be accepted (it requires a subscribed
         // session) — opening it here doesn't change what draw_strokes itself
         // reads (still Fixtures.docBytes).
-        _ = try await server.manager.subscribe(docId: "d")
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
         // Capable device that records requests but never answers on its own
         // — holds the draw in flight until we release it below, AFTER the
         // competing write has landed.
@@ -1499,6 +1608,66 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "docChangedDuringOp")
 
         // The competing write's content must survive untouched — nothing clobbered.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    /// Task 2 review (I1): the delete_strokes twin of the draw test above —
+    /// `callDeleteStrokes`'s CAS wiring was pinned by nothing, so flipping its
+    /// `expectedBytes: docBytes` to nil left the whole suite green while
+    /// restoring the silent clobber. Same deterministic device-stall harness
+    /// (`FakeStrokeOpDevice(autoReply: nil)`), which is already fired at this
+    /// exact tool by secondStrokeOpOnSameDocWhileInFlightErrorsOpInProgress.
+    @Test func deleteStrokesRejectsWhenTheDocumentChangedMidOp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Live session so the competing `manager.submit` below is accepted
+        // (see the draw test) — delete_strokes still reads Fixtures.docBytes.
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let deleteCall = Task { try await client.callTool(
+            name: "delete_strokes",
+            arguments: ["docId": "d", "keys": .array([.string("seed123:1.0")])]) }
+
+        // Wait until the request has reached the device — delete_strokes has
+        // now read the doc and is stalled on the reply.
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes == Fixtures.docBytes)
+
+        // Competing write lands mid-round-trip.
+        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing-delete"}"#.utf8)
+        let competingOutcome = await server.manager.submit(
+            docId: "d", opId: "competing-writer",
+            payload: OpPayload(type: "fullDoc", data: competingBytes))
+        guard case .accepted = competingOutcome else {
+            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
+            return
+        }
+
+        // The device's reply is computed against the stale doc it was handed.
+        let staleResultBytes = Data(#"{"aaa001_thumbnailData":"","strokes":[]}"#.utf8)
+        try await device.sendReply(
+            requestId: received.requestId, docId: received.docId, bytes: staleResultBytes)
+
+        let (content, isError) = try await deleteCall.value
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+
+        // Nothing clobbered.
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == competingBytes)

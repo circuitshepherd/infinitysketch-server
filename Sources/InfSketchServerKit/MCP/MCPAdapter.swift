@@ -776,7 +776,13 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            return await submitAndRespond(docId: docId, createIfMissing: true, fullDoc: bytes) { seq in
+            // expectedBytes: nil — nothing to compare against (the doc did not
+            // exist when `docExists` was checked above), so this write is
+            // deliberately unconditional. Stated explicitly, not defaulted,
+            // per the review's M1.
+            return await submitAndRespond(
+                docId: docId, createIfMissing: true, fullDoc: bytes, expectedBytes: nil
+            ) { seq in
                 "created \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
@@ -952,11 +958,17 @@ public actor MCPAdapter {
     /// `expectedBytes` MUST be the exact bytes the caller already
     /// read/relayed for this write — never a fresh re-read taken here, which
     /// would just re-open the very race window this guard exists to close.
-    /// `nil` (the default) stays unconditional, for `create_doc` and the
-    /// missing-doc branch of `replace_doc`.
+    /// `nil` means unconditional (`create_doc`, and the missing-doc branch of
+    /// `replace_doc`).
+    ///
+    /// DELIBERATELY NOT DEFAULTED (Task 2 review, M1): a write tool added
+    /// tomorrow that simply forgets the parameter would otherwise compile,
+    /// ship, and write unconditionally — silently reopening this plan's data
+    /// loss. Required means the compiler, not a test, is the guard; every
+    /// call site must state its expectation, `nil` included.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectedBytes: Data? = nil, successText: (Int) -> String
+        expectedBytes: Data?, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
