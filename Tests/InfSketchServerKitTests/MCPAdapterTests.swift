@@ -157,7 +157,7 @@ private func addedId(from resultText: String) -> String {
 /// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
 /// WebSocket client against the same running server's `/ws` endpoint (NOT
 /// the in-process `WSAdapterTests` harness — this needs to share the
-/// server's actual `CreateDocBroker`/`SessionManager` instances with the MCP
+/// server's actual `DeviceCommandBroker`/`SessionManager` instances with the MCP
 /// client under test, which only a real running `InfSketchServer` provides).
 /// Hellos with the "createDoc" capability so `WSAdapter` registers it with
 /// the broker, then runs a background receive pump so it can react to an

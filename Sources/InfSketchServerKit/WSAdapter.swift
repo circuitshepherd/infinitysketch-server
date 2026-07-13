@@ -7,9 +7,9 @@ import InfSketchWire
 public struct WSAdapter: WSMessageHandler, Sendable {
     private let manager: SessionManager
     private let config: SessionConfig
-    private let broker: CreateDocBroker
+    private let broker: DeviceCommandBroker
 
-    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: CreateDocBroker) {
+    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker) {
         self.manager = manager
         self.config = config
         self.broker = broker
@@ -44,13 +44,13 @@ actor Connection {
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var watchSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
-    private let broker: CreateDocBroker
+    private let broker: DeviceCommandBroker
     private let connectionId = UUID()
     private var registeredWithBroker = false
 
     init(
         manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
-        broker: CreateDocBroker
+        broker: DeviceCommandBroker
     ) {
         self.manager = manager
         self.output = output
@@ -99,9 +99,13 @@ actor Connection {
                 return
             }
             helloed = true
+            // TODO(Task 3): broaden this gate to the two-capability
+            // intersection (createDoc OR authorStrokes); the broker itself
+            // already filters per-request by capability, so widening the
+            // gate here is the only remaining piece.
             if capabilities.contains("createDoc") {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId) { [weak self] message in
+                await broker.register(connectionId: connectionId, capabilities: Set(capabilities)) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
             }

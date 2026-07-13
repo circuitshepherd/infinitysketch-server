@@ -53,10 +53,10 @@ public actor MCPAdapter {
     private let manager: SessionManager
     private let idleTimeout: Duration
     private let cleanupInterval: Duration
-    /// The shared create_doc broker (one per `InfSketchServer` process, the
-    /// same instance `WSAdapter` registers createDoc-capable connections
+    /// The shared device-command broker (one per `InfSketchServer` process,
+    /// the same instance `WSAdapter` registers capability-tagged connections
     /// with); `callCreateDoc` awaits `broker.requestCreation` on it.
-    private let broker: CreateDocBroker
+    private let broker: DeviceCommandBroker
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -84,7 +84,7 @@ public actor MCPAdapter {
         manager: SessionManager,
         idleTimeout: Duration = .seconds(3600),
         cleanupInterval: Duration = .seconds(60),
-        broker: CreateDocBroker
+        broker: DeviceCommandBroker
     ) {
         self.manager = manager
         self.idleTimeout = idleTimeout
@@ -598,7 +598,7 @@ public actor MCPAdapter {
     /// Unlike the other four tools, the bytes to write don't come from the
     /// agent or from mutating the current document — they're solicited live
     /// from a connected InfinitySketch device via `broker.requestCreation`
-    /// (Task 3's `CreateDocBroker`, routed over the WS `createDocRequest`/
+    /// (`DeviceCommandBroker`, routed over the WS `createDocRequest`/
     /// `createDocReply` pair). `docExists` is checked BEFORE ever contacting
     /// a device, so an existing docId never reaches (or wakes) the device.
     private func callCreateDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
@@ -612,10 +612,13 @@ public actor MCPAdapter {
             let bytes: Data
             do {
                 bytes = try await broker.requestCreation(docId: docId)
-            } catch let error as CreateDocBroker.CreateDocError {
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
                 switch error {
                 case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
-                case .creationInProgress: return Self.errorResult("creationInProgress")
+                // Published string stays "creationInProgress" (an
+                // MCPAdapterTests test asserts it) even though the case
+                // itself is now the kind-agnostic `.requestInFlight`.
+                case .requestInFlight: return Self.errorResult("creationInProgress")
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
                 }

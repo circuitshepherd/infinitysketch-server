@@ -9,11 +9,11 @@ private struct Harness {
     let input: AsyncStream<WSMessage>.Continuation
     let output: AsyncStream<WSMessage>
     let manager: SessionManager
-    let broker: CreateDocBroker
+    let broker: DeviceCommandBroker
 
     init(
         manager: SessionManager, config: SessionConfig = SessionConfig(),
-        broker: CreateDocBroker = CreateDocBroker()
+        broker: DeviceCommandBroker = DeviceCommandBroker()
     ) async throws {
         self.manager = manager
         self.broker = broker
@@ -433,7 +433,7 @@ private struct ServerMessageReader {
     }
 }
 
-/// Task 3 (create_doc branch): wires `CreateDocBroker` into `Connection` —
+/// Task 3 (create_doc branch): wires `DeviceCommandBroker` into `Connection` —
 /// registers a createDoc-capable connection at hello, routes an inbound
 /// `createDocReply` to `broker.handleReply`, unregisters on close. Each test
 /// injects its own test-owned broker so assertions can drive
@@ -441,7 +441,7 @@ private struct ServerMessageReader {
 /// exchanges with the (fake) client.
 @Suite struct WSAdapterCreateDocTests {
     @Test func helloWithCreateDocCapabilityRegisters() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -460,7 +460,7 @@ private struct ServerMessageReader {
     }
 
     @Test func createDocReplyRoutesToBroker() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -486,7 +486,7 @@ private struct ServerMessageReader {
     }
 
     @Test func disconnectUnregisters() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -498,7 +498,7 @@ private struct ServerMessageReader {
         // close() awaits broker.unregister before finishing the output
         // stream, so by the time the drain above completes the registration
         // is already gone: no connection to route a new request to.
-        await #expect(throws: CreateDocBroker.CreateDocError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
             _ = try await broker.requestCreation(docId: "d")
         }
     }
@@ -508,7 +508,7 @@ private struct ServerMessageReader {
     /// arm must make that path unreachable by always substituting a
     /// failureReason ("unspecified") when neither is present on the wire.
     @Test func replyWithNeitherPayloadNorFailureReasonIsDeviceFailed() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -519,7 +519,7 @@ private struct ServerMessageReader {
             Issue.record("expected createDocRequest frame"); return
         }
         try harness.send(.createDocReply(requestId: requestId, docId: "newDoc", payload: nil, failureReason: nil))
-        await #expect(throws: CreateDocBroker.CreateDocError.deviceFailed("unspecified")) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("unspecified")) {
             _ = try await task.value
         }
     }
@@ -527,7 +527,7 @@ private struct ServerMessageReader {
     /// RIDER (a), other half: a payload present alongside a (spec-violating)
     /// failureReason must win as a success — never surfaced as a failure.
     @Test func replyWithPayloadWinsOverFailureReason() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
