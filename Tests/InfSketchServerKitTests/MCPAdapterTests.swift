@@ -1021,6 +1021,14 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - Stroke-op tools (Task 4, agent stroke-authoring)
 
+    /// A minimal draw-spec strokes argument using the CANONICAL field names
+    /// (see drawStrokesSpecEnvelopeMatchesCanonicalShape) — for tests whose
+    /// point isn't the spec shape but that still must never teach a reader
+    /// (or copy-paster) a drifted field name.
+    private static let minimalCanonicalStrokes: Value = .array([
+        .object(["points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])])])
+    ])
+
     @Test func listStrokesReturnsFakeListingVerbatimWithNoWrite() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -1062,8 +1070,18 @@ private actor FakeStrokeOpDevice {
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modifiedBytes))
         defer { Task { await device.close() } }
 
+        // CANONICAL stroke-spec field names (points/width/color/inkType) —
+        // the exact keys the app-side StrokeAuthoring.StrokeSpec (Task 5)
+        // decodes. Never use e.g. "tool" here: Decodable drops unknown keys
+        // silently, so a wrong name would pass this test yet break every
+        // real draw. See drawStrokesSpecEnvelopeMatchesCanonicalShape.
         let strokesArg: Value = .array([
-            .object(["tool": .string("pen"), "points": .array([.array([.int(0), .int(0)])])])
+            .object([
+                "points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+                "width": .int(4),
+                "color": .string("#000000"),
+                "inkType": .string("pen"),
+            ])
         ])
         let (content, isError) = try await client.callTool(
             name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
@@ -1081,6 +1099,63 @@ private actor FakeStrokeOpDevice {
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == modifiedBytes)
+
+        await server.stop()
+    }
+
+    /// THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN (Task 4 review, Important):
+    /// the op-spec JSON this server builds is decoded app-side by Task 5's
+    /// plain-`Decodable` `StrokeAuthoring.StrokeSpec`, which silently drops
+    /// unknown keys — so a field-name drift on either side ("inkType"
+    /// mistyped as "tool", say) would never fail loudly; the value would
+    /// just fall back to its default. This test therefore asserts the exact
+    /// envelope shape with the CANONICAL key names as string literals:
+    ///
+    ///     {"op": "draw", "strokes": [{"points": [[x,y],…],
+    ///                                 "width": …, "color": …, "inkType": …}]}
+    ///
+    /// Task 5's own StrokeSpec decode tests must decode a fixture using
+    /// EXACTLY these field names (binding rider carried by the plan). If
+    /// this test ever needs changing, both repos change in lockstep.
+    @Test func drawStrokesSpecEnvelopeMatchesCanonicalShape() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "points": .array([
+                    .array([.double(1.5), .double(2.5)]),
+                    .array([.int(30), .int(40)]),
+                ]),
+                "width": .double(6.5),
+                "color": .string("#FF00AA"),
+                "inkType": .string("marker"),
+            ])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        // Exact envelope: exactly the two top-level keys, no extras.
+        #expect(Set(envelope.keys) == ["op", "strokes"])
+        #expect(envelope["op"] as? String == "draw")
+        let strokes = try #require(envelope["strokes"] as? [[String: Any]])
+        #expect(strokes.count == 1)
+        let stroke = try #require(strokes.first)
+        // The CANONICAL per-stroke field names, asserted string-literally.
+        #expect(Set(stroke.keys) == ["points", "width", "color", "inkType"])
+        let points = try #require(stroke["points"] as? [[Double]])
+        #expect(points == [[1.5, 2.5], [30, 40]])
+        #expect(stroke["width"] as? Double == 6.5)
+        #expect(stroke["color"] as? String == "#FF00AA")
+        #expect(stroke["inkType"] as? String == "marker")
 
         await server.stop()
     }
@@ -1110,7 +1185,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "draw_strokes",
-            arguments: ["docId": "d", "strokes": .array([.object([:])])])
+            arguments: ["docId": "d", "strokes": Self.minimalCanonicalStrokes])
         #expect(isError == true)
         #expect(toolResultText(content) == "noDeviceAvailable")
 
@@ -1133,7 +1208,7 @@ private actor FakeStrokeOpDevice {
 
         let firstCall = Task { try await client.callTool(
             name: "draw_strokes",
-            arguments: ["docId": "d", "strokes": .array([.object([:])])]) }
+            arguments: ["docId": "d", "strokes": Self.minimalCanonicalStrokes]) }
 
         // Wait until the request is actually in flight (has reached the
         // device), so the second call below is a genuine collision.

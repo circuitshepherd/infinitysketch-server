@@ -484,10 +484,10 @@ public actor MCPAdapter {
             name: "draw_strokes",
             description: """
                 Draws one or more freehand strokes into a document, authored by a connected \
-                InfinitySketch device. Each stroke is a device-defined shape (a polyline of \
-                (x, y) points, plus tool/width/colour) given in canvas coordinates — the same \
-                space as add_text's x/y. Defaults to a pen tool, width 4, colour #000000 for \
-                any stroke that omits them. REQUIRES a connected device — fails with \
+                InfinitySketch device. Each stroke is a polyline of (x, y) points in canvas \
+                coordinates — the same space as add_text's x/y — plus optional width, color, \
+                and inkType fields. Defaults for any stroke that omits them: inkType "pen", \
+                width 4, color "#000000". REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
                 time, opInProgress if another stroke operation on this document is already in \
                 flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
@@ -500,12 +500,51 @@ public actor MCPAdapter {
                     "strokes": .object([
                         "type": "array",
                         "description": """
-                            One or more strokes to draw, each an object with the stroke's \
-                            points (canvas coordinates) and optional tool/width/colour \
-                            (defaults: pen, 4, #000000). Opaque to the server — passed \
-                            through to the device verbatim.
+                            One or more strokes to draw. Passed through to the device \
+                            verbatim; the item properties below are the exact field names \
+                            the device decodes.
                             """,
-                        "items": .object(["type": "object"]),
+                        // The item properties are the CANONICAL stroke-spec field names —
+                        // points / width / color / inkType — that the app-side decoder
+                        // (StrokeAuthoring.StrokeSpec, Task 5) reads. That decoder is a
+                        // plain Decodable, which silently DROPS unknown keys, so this
+                        // schema is the only place a calling agent learns the exact
+                        // names; a drifted name (e.g. "tool") would not error — the field
+                        // would just fall back to its default. Pinned server-side by
+                        // drawStrokesSpecEnvelopeMatchesCanonicalShape; change both repos
+                        // in lockstep or not at all.
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "points": .object([
+                                    "type": "array",
+                                    "description": """
+                                        The stroke's polyline as [x, y] canvas-coordinate \
+                                        pairs; at least 2 points.
+                                        """,
+                                    "items": .object([
+                                        "type": "array",
+                                        "items": .object(["type": "number"]),
+                                        "minItems": 2,
+                                        "maxItems": 2,
+                                    ]),
+                                ]),
+                                "width": .object([
+                                    "type": "number",
+                                    "description": "Stroke width. Defaults to 4.",
+                                ]),
+                                "color": .object([
+                                    "type": "string",
+                                    "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. Defaults to #000000.",
+                                ]),
+                                "inkType": .object([
+                                    "type": "string",
+                                    "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                                    "description": "The ink to draw with. Defaults to pen.",
+                                ]),
+                            ]),
+                            "required": .array(["points"].map(Value.string)),
+                        ]),
                     ]),
                 ]),
                 "required": .array(["docId", "strokes"].map(Value.string)),
