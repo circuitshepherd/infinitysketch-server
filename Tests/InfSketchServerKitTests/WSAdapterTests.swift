@@ -9,11 +9,11 @@ private struct Harness {
     let input: AsyncStream<WSMessage>.Continuation
     let output: AsyncStream<WSMessage>
     let manager: SessionManager
-    let broker: CreateDocBroker
+    let broker: DeviceCommandBroker
 
     init(
         manager: SessionManager, config: SessionConfig = SessionConfig(),
-        broker: CreateDocBroker = CreateDocBroker()
+        broker: DeviceCommandBroker = DeviceCommandBroker()
     ) async throws {
         self.manager = manager
         self.broker = broker
@@ -433,7 +433,7 @@ private struct ServerMessageReader {
     }
 }
 
-/// Task 3 (create_doc branch): wires `CreateDocBroker` into `Connection` —
+/// Task 3 (create_doc branch): wires `DeviceCommandBroker` into `Connection` —
 /// registers a createDoc-capable connection at hello, routes an inbound
 /// `createDocReply` to `broker.handleReply`, unregisters on close. Each test
 /// injects its own test-owned broker so assertions can drive
@@ -441,7 +441,7 @@ private struct ServerMessageReader {
 /// exchanges with the (fake) client.
 @Suite struct WSAdapterCreateDocTests {
     @Test func helloWithCreateDocCapabilityRegisters() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -460,7 +460,7 @@ private struct ServerMessageReader {
     }
 
     @Test func createDocReplyRoutesToBroker() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -486,7 +486,7 @@ private struct ServerMessageReader {
     }
 
     @Test func disconnectUnregisters() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -498,7 +498,7 @@ private struct ServerMessageReader {
         // close() awaits broker.unregister before finishing the output
         // stream, so by the time the drain above completes the registration
         // is already gone: no connection to route a new request to.
-        await #expect(throws: CreateDocBroker.CreateDocError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
             _ = try await broker.requestCreation(docId: "d")
         }
     }
@@ -508,7 +508,7 @@ private struct ServerMessageReader {
     /// arm must make that path unreachable by always substituting a
     /// failureReason ("unspecified") when neither is present on the wire.
     @Test func replyWithNeitherPayloadNorFailureReasonIsDeviceFailed() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -519,7 +519,7 @@ private struct ServerMessageReader {
             Issue.record("expected createDocRequest frame"); return
         }
         try harness.send(.createDocReply(requestId: requestId, docId: "newDoc", payload: nil, failureReason: nil))
-        await #expect(throws: CreateDocBroker.CreateDocError.deviceFailed("unspecified")) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("unspecified")) {
             _ = try await task.value
         }
     }
@@ -527,7 +527,7 @@ private struct ServerMessageReader {
     /// RIDER (a), other half: a payload present alongside a (spec-violating)
     /// failureReason must win as a success — never surfaced as a failure.
     @Test func replyWithPayloadWinsOverFailureReason() async throws {
-        let broker = CreateDocBroker()
+        let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: ["createDoc"]))
@@ -562,5 +562,140 @@ private struct ServerMessageReader {
         #expect(d.sizeBytes == Fixtures.docBytes.count)
         #expect(d.seq == 0)
         #expect(d.subscriberCount == 1)
+    }
+}
+
+/// Task 3 (agent stroke-authoring branch): broadens the hello gate to
+/// register any connection advertising `createDoc` OR `authorStrokes` (the
+/// broker itself still filters per-request by capability), and routes an
+/// inbound `strokeOpReply` to `broker.handleReply` with the EXACT precedence
+/// `WSAdapterCreateDocTests` locks for `createDocReply` above. Each test
+/// injects its own test-owned broker, mirroring `WSAdapterCreateDocTests`.
+@Suite struct WSAdapterStrokeOpTests {
+    @Test func helloWithAuthorStrokesCapabilityRegistersForStrokeOpOnly() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        // Drive requestStrokeOp on the broker the Connection registered with
+        // at hello; the request must reach the client as a wire frame,
+        // carrying both the doc bytes and the spec bytes intact.
+        let docBytes = Data("stroke-doc-bytes".utf8)
+        let spec = Data("stroke-spec-bytes".utf8)
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: docBytes, spec: spec) }
+        guard case .strokeOpRequest(let requestId, "d", .inline(let sentBytes), let sentSpec) = try await reader.next()
+        else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        #expect(sentBytes == docBytes)
+        #expect(sentSpec == spec)
+        await broker.handleReply(requestId: requestId, bytes: Data("done".utf8), failureReason: nil)
+        #expect(try await task.value == Data("done".utf8))
+
+        // This connection only ever advertised authorStrokes: a createDoc
+        // request must find no capable device (the broker's own per-request
+        // capability filter, not something Connection re-implements).
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+            _ = try await broker.requestCreation(docId: "d")
+        }
+    }
+
+    @Test func strokeOpReplyRoutesToBroker() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        // The client answers over the wire; Connection.dispatch must route
+        // this to broker.handleReply, resolving the pending requestStrokeOp.
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "d",
+            payload: .inline(Data("bytes".utf8)), failureReason: nil))
+        #expect(try await task.value == Data("bytes".utf8))
+    }
+
+    @Test func replyBeforeHelloIsRejected() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.strokeOpReply(requestId: 1, docId: "d", payload: nil, failureReason: "x"))
+        #expect(try await reader.next() == .error(reason: "helloRequired"))
+    }
+
+    /// Mirrors `replyWithNeitherPayloadNorFailureReasonIsDeviceFailed` in
+    /// `WSAdapterCreateDocTests`: the broker's `handleReply` defaults a nil
+    /// payload with no failureReason to a success with empty Data —
+    /// Connection's dispatch arm must make that path unreachable by always
+    /// substituting a failureReason ("unspecified") when neither is present
+    /// on the wire.
+    @Test func replyWithNeitherPayloadNorFailureReasonIsDeviceFailed() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        try harness.send(.strokeOpReply(requestId: requestId, docId: "d", payload: nil, failureReason: nil))
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("unspecified")) {
+            _ = try await task.value
+        }
+    }
+
+    /// Mirrors `replyWithPayloadWinsOverFailureReason`: a payload present
+    /// alongside a (spec-violating) failureReason must win as a success —
+    /// never surfaced as a failure.
+    @Test func replyWithPayloadWinsOverFailureReason() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "d",
+            payload: .inline(Data("bytes".utf8)), failureReason: "ignored-because-payload-wins"))
+        #expect(try await task.value == Data("bytes".utf8))
+    }
+
+    /// Disconnect must fail a pending stroke op FAST (via
+    /// `DeviceCommandBroker.unregister`), not wait out the full
+    /// `strokeOpTimeout` — the elapsed-time bound is what makes a regression
+    /// (disconnect no longer unregistering) fail loudly instead of merely
+    /// making the test slow.
+    @Test func disconnectFailsPendingStrokeOpFast() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .seconds(30))
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        harness.input.finish()  // client disconnects
+        while try await reader.next() != nil {}  // drain until adapter closes output (calls close())
+
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
+            _ = try await task.value
+        }
+        #expect(clock.now - start < .seconds(1))
     }
 }

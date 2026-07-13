@@ -12,7 +12,7 @@ intended to run on macOS, Linux, and Windows.
 > Protocol design: the transport spec in the InfinitySketch app repo
 > (`docs/superpowers/specs/2026-07-09-server-transport-design.md`).
 > Agents connect via MCP at `/mcp` (HTTP + SSE, official swift-sdk): document
-> resources incl. live frames, text-annotation and document tools — see the
+> resources incl. live frames, text-annotation and document tools, stroke authoring via a connected device — see the
 > 2026-07-11 MCP design in the app repo.
 > Not yet here: resume/backlog replay, auth
 > (v1 runs open — intended for trusted networks only), TLS (use a reverse proxy),

@@ -157,7 +157,7 @@ private func addedId(from resultText: String) -> String {
 /// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
 /// WebSocket client against the same running server's `/ws` endpoint (NOT
 /// the in-process `WSAdapterTests` harness — this needs to share the
-/// server's actual `CreateDocBroker`/`SessionManager` instances with the MCP
+/// server's actual `DeviceCommandBroker`/`SessionManager` instances with the MCP
 /// client under test, which only a real running `InfSketchServer` provides).
 /// Hellos with the "createDoc" capability so `WSAdapter` registers it with
 /// the broker, then runs a background receive pump so it can react to an
@@ -198,6 +198,98 @@ private actor FakeCreateDocDevice {
                 payload: .inline(bytes), failureReason: nil
             ).jsonText()))
         }
+    }
+
+    /// Manually answers a recorded request — for tests that stall the
+    /// device (autoReplyBytes: nil) to hold a request in flight, then
+    /// release it at a moment of their choosing.
+    func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
+        try await ws.send(.string(ClientMessage.createDocReply(
+            requestId: requestId, docId: docId,
+            payload: .inline(bytes), failureReason: nil
+        ).jsonText()))
+    }
+
+    private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
+        let frame = try await ws.receive()
+        guard case .string(let text) = frame else {
+            throw DocumentStoreError.notFound  // any error type; a binary frame here is unexpected
+        }
+        return try ServerMessage(jsonText: text)
+    }
+
+    func close() {
+        pumpTask?.cancel()
+        ws.cancel(with: .normalClosure, reason: nil)
+    }
+}
+
+/// A fake InfinitySketch device for the stroke-op tools (Task 4,
+/// `draw_strokes`/`delete_strokes`/`list_strokes`): the same real-WS-client
+/// pattern as `FakeCreateDocDevice` above, hello'd with the "authorStrokes"
+/// capability instead of "createDoc", answering `strokeOpRequest` with a
+/// `strokeOpReply` — either a success (`autoReply: .bytes`) or a device-side
+/// failure (`autoReply: .failure`). `nil` stalls every request (recorded but
+/// never answered) — the `opInProgress`/manual-release scenarios.
+private actor FakeStrokeOpDevice {
+    struct ReceivedRequest {
+        let requestId: UInt32
+        let docId: String
+        let docBytes: Data
+        let spec: Data
+    }
+
+    enum AutoReply {
+        case bytes(Data)
+        case failure(String)
+    }
+
+    private let ws: URLSessionWebSocketTask
+    private var pumpTask: Task<Void, Never>?
+    private(set) var receivedRequests: [ReceivedRequest] = []
+    private let autoReply: AutoReply?
+
+    init(port: UInt16, autoReply: AutoReply?) async throws {
+        self.autoReply = autoReply
+        let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        self.ws = ws
+        ws.resume()
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["authorStrokes"]).jsonText()))
+        let ack = try await Self.receiveOne(ws)
+        guard ack == .helloAck(protocolVersion: 1) else {
+            throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
+        }
+        pumpTask = Task { [weak self] in await self?.pumpLoop() }
+    }
+
+    private func pumpLoop() async {
+        while true {
+            guard let message = try? await Self.receiveOne(ws) else { return }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec) = message else { continue }
+            receivedRequests.append(ReceivedRequest(
+                requestId: requestId, docId: docId, docBytes: payload.inlineData ?? Data(), spec: spec))
+            switch autoReply {
+            case .bytes(let bytes):
+                try? await ws.send(.string(ClientMessage.strokeOpReply(
+                    requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+                ).jsonText()))
+            case .failure(let reason):
+                try? await ws.send(.string(ClientMessage.strokeOpReply(
+                    requestId: requestId, docId: docId, payload: nil, failureReason: reason
+                ).jsonText()))
+            case nil:
+                continue  // stall: recorded above, never answered until sendReply is called manually
+            }
+        }
+    }
+
+    /// Manually answers a recorded request — for the `opInProgress` scenario,
+    /// which stalls the device (`autoReply: nil`) to hold a request in
+    /// flight, then releases it once the collision has been observed.
+    func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
+        try await ws.send(.string(ClientMessage.strokeOpReply(
+            requestId: requestId, docId: docId, payload: .inline(bytes), failureReason: nil
+        ).jsonText()))
     }
 
     private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
@@ -489,7 +581,10 @@ private actor FakeCreateDocDevice {
 
     // MARK: - Tools (Task 7)
 
-    @Test func listToolsContainsAllFiveWriteTools() async throws {
+    // Renamed from `listToolsContainsAllFiveWriteTools` (Task 4, agent
+    // stroke-authoring): three more tools joined the surface, so "Five" was
+    // no longer accurate.
+    @Test func listToolsContainsAllEightWriteTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -497,7 +592,10 @@ private actor FakeCreateDocDevice {
 
         let (tools, _) = try await client.listTools()
         let names = Set(tools.map(\.name))
-        #expect(names == ["add_text", "edit_text", "remove_text", "replace_doc", "create_doc"])
+        #expect(names == [
+            "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
+            "draw_strokes", "delete_strokes", "list_strokes",
+        ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
         #expect(editText.description?.contains("resets") == true)
@@ -873,6 +971,267 @@ private actor FakeCreateDocDevice {
             name: "create_doc", arguments: ["docId": "SlowDoc"])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceTimeout")
+
+        await server.stop()
+    }
+
+    /// Pins the PUBLISHED tool-error string for a same-docId in-flight
+    /// collision to exactly "creationInProgress" — the broker's error case
+    /// was renamed to the kind-agnostic `.requestInFlight` (Task 2,
+    /// DeviceCommandBroker), but the string MCP clients see must not change.
+    /// MCPAdapter's `callCreateDoc` mapping cites this test.
+    @Test func createDocInFlightErrorPublishesCreationInProgress() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Capable device that records requests but never answers on its own
+        // — holds the first create_doc in flight until we release it below.
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: nil)
+        defer { Task { await device.close() } }
+
+        let firstCall = Task { try await client.callTool(
+            name: "create_doc", arguments: ["docId": "Pending"]) }
+
+        // Wait until the request is actually in flight (has reached the
+        // device), so the second call below is a genuine collision.
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+
+        let (content, isError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "Pending"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "creationInProgress")
+
+        // Release the stalled first request so it completes normally
+        // (rather than dangling until the 10 s default timeout).
+        let pending = try #require(await device.receivedRequests.first)
+        try await device.sendReply(
+            requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
+        let (firstContent, firstIsError) = try await firstCall.value
+        #expect(firstIsError != true)
+        #expect(toolResultText(firstContent).contains("seq 1"))
+
+        await server.stop()
+    }
+
+    // MARK: - Stroke-op tools (Task 4, agent stroke-authoring)
+
+    /// A minimal draw-spec strokes argument using the CANONICAL field names
+    /// (see drawStrokesSpecEnvelopeMatchesCanonicalShape) — for tests whose
+    /// point isn't the spec shape but that still must never teach a reader
+    /// (or copy-paster) a drifted field name.
+    private static let minimalCanonicalStrokes: Value = .array([
+        .object(["points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])])])
+    ])
+
+    @Test func listStrokesReturnsFakeListingVerbatimWithNoWrite() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listingJSON = Data(#"{"strokes":[{"key":"seed123:1.0","pointCount":2}]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listingJSON))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_strokes", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        // No write: list_strokes never opens a session, so the doc's live
+        // seq stays unset (-1), same as the never-touched state in
+        // readResourceCoversDocsSummaryRawAndFrame.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        // The fake received a "list" op-spec plus the doc's current bytes.
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "list")
+
+        await server.stop()
+    }
+
+    @Test func drawStrokesSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["new-stroke"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modifiedBytes))
+        defer { Task { await device.close() } }
+
+        // CANONICAL stroke-spec field names (points/width/color/inkType) —
+        // the exact keys the app-side StrokeAuthoring.StrokeSpec (Task 5)
+        // decodes. Never use e.g. "tool" here: Decodable drops unknown keys
+        // silently, so a wrong name would pass this test yet break every
+        // real draw. See drawStrokesSpecEnvelopeMatchesCanonicalShape.
+        let strokesArg: Value = .array([
+            .object([
+                "points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+                "width": .int(4),
+                "color": .string("#000000"),
+                "inkType": .string("pen"),
+            ])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "drew 1 stroke(s) at seq 1")
+
+        // The fake received a "draw" op-spec carrying the strokes array verbatim.
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "draw")
+        #expect((specJSON["strokes"] as? [Any])?.count == 1)
+
+        // The raw resource now reflects the fake's returned bytes.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modifiedBytes)
+
+        await server.stop()
+    }
+
+    /// THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN (Task 4 review, Important):
+    /// the op-spec JSON this server builds is decoded app-side by Task 5's
+    /// plain-`Decodable` `StrokeAuthoring.StrokeSpec`, which silently drops
+    /// unknown keys — so a field-name drift on either side ("inkType"
+    /// mistyped as "tool", say) would never fail loudly; the value would
+    /// just fall back to its default. This test therefore asserts the exact
+    /// envelope shape with the CANONICAL key names as string literals:
+    ///
+    ///     {"op": "draw", "strokes": [{"points": [[x,y],…],
+    ///                                 "width": …, "color": …, "inkType": …}]}
+    ///
+    /// Task 5's own StrokeSpec decode tests must decode a fixture using
+    /// EXACTLY these field names (binding rider carried by the plan). If
+    /// this test ever needs changing, both repos change in lockstep.
+    @Test func drawStrokesSpecEnvelopeMatchesCanonicalShape() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "points": .array([
+                    .array([.double(1.5), .double(2.5)]),
+                    .array([.int(30), .int(40)]),
+                ]),
+                "width": .double(6.5),
+                "color": .string("#FF00AA"),
+                "inkType": .string("marker"),
+            ])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        // Exact envelope: exactly the two top-level keys, no extras.
+        #expect(Set(envelope.keys) == ["op", "strokes"])
+        #expect(envelope["op"] as? String == "draw")
+        let strokes = try #require(envelope["strokes"] as? [[String: Any]])
+        #expect(strokes.count == 1)
+        let stroke = try #require(strokes.first)
+        // The CANONICAL per-stroke field names, asserted string-literally.
+        #expect(Set(stroke.keys) == ["points", "width", "color", "inkType"])
+        let points = try #require(stroke["points"] as? [[Double]])
+        #expect(points == [[1.5, 2.5], [30, 40]])
+        #expect(stroke["width"] as? Double == 6.5)
+        #expect(stroke["color"] as? String == "#FF00AA")
+        #expect(stroke["inkType"] as? String == "marker")
+
+        await server.stop()
+    }
+
+    @Test func deleteStrokesUnknownKeyErrorPropagatesDeviceReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .failure("strokeNotFound: [k9]"))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_strokes", arguments: ["docId": "d", "keys": .array([.string("k9")])])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: strokeNotFound: [k9]")
+
+        await server.stop()
+    }
+
+    @Test func drawStrokesWithNoDeviceErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device connects in this test.
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": Self.minimalCanonicalStrokes])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+
+        await server.stop()
+    }
+
+    /// A second stroke op on the SAME docId while the first is stalled in
+    /// flight collides on `DeviceCommandBroker`'s shared per-docId
+    /// `docIdsInFlight` guard — deliberately mixing kinds (draw, then
+    /// delete) to prove the guard is keyed by docId alone, not per tool.
+    @Test func secondStrokeOpOnSameDocWhileInFlightErrorsOpInProgress() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Capable device that records requests but never answers on its own
+        // — holds the first draw_strokes in flight until we release it below.
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let firstCall = Task { try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": Self.minimalCanonicalStrokes]) }
+
+        // Wait until the request is actually in flight (has reached the
+        // device), so the second call below is a genuine collision.
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_strokes", arguments: ["docId": "d", "keys": .array([.string("k1")])])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "opInProgress")
+
+        // Release the stalled first request so it completes normally
+        // (rather than dangling until the strokeOpTimeout default).
+        let pending = try #require(await device.receivedRequests.first)
+        try await device.sendReply(
+            requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
+        let (firstContent, firstIsError) = try await firstCall.value
+        #expect(firstIsError != true)
+        #expect(toolResultText(firstContent).contains("seq 1"))
 
         await server.stop()
     }

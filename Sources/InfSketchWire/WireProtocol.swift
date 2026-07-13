@@ -99,6 +99,7 @@ public enum ClientMessage: Equatable, Sendable {
     case unwatchDoc(docId: String)
     case frame(docId: String, payload: BulkPayload)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
+    case strokeOpReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
 }
 
 extension ClientMessage: Codable {
@@ -159,6 +160,20 @@ extension ClientMessage: Codable {
                 payload = nil
             }
             self = .createDocReply(
+                requestId: try c.decode(UInt32.self, forKey: .requestId),
+                docId: try c.decode(String.self, forKey: .docId),
+                payload: payload,
+                failureReason: try c.decodeIfPresent(String.self, forKey: .failureReason))
+        case "strokeOpReply":
+            let payload: BulkPayload?
+            if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+                payload = .transfer(descriptor)
+            } else if let data = try c.decodeIfPresent(Data.self, forKey: .data) {
+                payload = .inline(data)
+            } else {
+                payload = nil
+            }
+            self = .strokeOpReply(
                 requestId: try c.decode(UInt32.self, forKey: .requestId),
                 docId: try c.decode(String.self, forKey: .docId),
                 payload: payload,
@@ -225,6 +240,16 @@ extension ClientMessage: Codable {
             case nil: break
             }
             try c.encodeIfPresent(failureReason, forKey: .failureReason)
+        case .strokeOpReply(let requestId, let docId, let payload, let failureReason):
+            try c.encode("strokeOpReply", forKey: .type)
+            try c.encode(requestId, forKey: .requestId)
+            try c.encode(docId, forKey: .docId)
+            switch payload {
+            case .inline(let data): try c.encode(data, forKey: .data)
+            case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+            case nil: break
+            }
+            try c.encodeIfPresent(failureReason, forKey: .failureReason)
         }
     }
 }
@@ -243,11 +268,12 @@ public enum ServerMessage: Equatable, Sendable {
     case frameAvailable(docId: String, seq: Int)
     case watchers(docId: String, count: Int)
     case createDocRequest(requestId: UInt32, docId: String)
+    case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data)
 }
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec
     }
 
     public init(from decoder: any Decoder) throws {
@@ -307,6 +333,18 @@ extension ServerMessage: Codable {
             self = .createDocRequest(
                 requestId: try c.decode(UInt32.self, forKey: .requestId),
                 docId: try c.decode(String.self, forKey: .docId))
+        case "strokeOpRequest":
+            let payload: BulkPayload
+            if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+                payload = .transfer(descriptor)
+            } else {
+                payload = .inline(try c.decode(Data.self, forKey: .data))
+            }
+            self = .strokeOpRequest(
+                requestId: try c.decode(UInt32.self, forKey: .requestId),
+                docId: try c.decode(String.self, forKey: .docId),
+                payload: payload,
+                spec: try c.decode(Data.self, forKey: .spec))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown server message type: \(other)")
@@ -372,6 +410,15 @@ extension ServerMessage: Codable {
             try c.encode("createDocRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
+        case .strokeOpRequest(let requestId, let docId, let payload, let spec):
+            try c.encode("strokeOpRequest", forKey: .type)
+            try c.encode(requestId, forKey: .requestId)
+            try c.encode(docId, forKey: .docId)
+            switch payload {
+            case .inline(let data): try c.encode(data, forKey: .data)
+            case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+            }
+            try c.encode(spec, forKey: .spec)
         }
     }
 }
@@ -400,6 +447,7 @@ extension ClientMessage: TransferCarrying {
         case .op(_, _, let payload): return payload.bulk.inlineData
         case .frame(_, let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
+        case .strokeOpReply(_, _, let payload, _): return payload?.inlineData
         default: return nil
         }
     }
@@ -413,6 +461,9 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .transfer(descriptor), failureReason: failureReason)
+        case .strokeOpReply(let requestId, let docId, _, let failureReason):
+            return .strokeOpReply(requestId: requestId, docId: docId,
+                                   payload: .transfer(descriptor), failureReason: failureReason)
         default:
             return self
         }
@@ -427,6 +478,9 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(_, _, let payload, _):
             if case .transfer(let d) = payload { return d }
             return nil
+        case .strokeOpReply(_, _, let payload, _):
+            if case .transfer(let d) = payload { return d }
+            return nil
         default: return nil
         }
     }
@@ -439,6 +493,9 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .inline(bytes), failureReason: failureReason)
+        case .strokeOpReply(let requestId, let docId, _, let failureReason):
+            return .strokeOpReply(requestId: requestId, docId: docId,
+                                   payload: .inline(bytes), failureReason: failureReason)
         default:
             return self
         }
@@ -460,6 +517,7 @@ extension ServerMessage: TransferCarrying {
         switch self {
         case .subscribed(_, _, let snapshot): return snapshot.inlineData
         case .event(_, _, _, _, let payload): return payload.bulk.inlineData
+        case .strokeOpRequest(_, _, let payload, _): return payload.inlineData
         default: return nil
         }
     }
@@ -470,6 +528,9 @@ extension ServerMessage: TransferCarrying {
         case .event(let docId, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId,
                           payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+        case .strokeOpRequest(let requestId, let docId, _, let spec):
+            return .strokeOpRequest(requestId: requestId, docId: docId,
+                                     payload: .transfer(descriptor), spec: spec)
         default:
             return self
         }
@@ -480,6 +541,7 @@ extension ServerMessage: TransferCarrying {
         case .event(_, _, _, _, let payload):
             if case .transfer(let d) = payload.bulk { return d }
             return nil
+        case .strokeOpRequest(_, _, .transfer(let d), _): return d
         default: return nil
         }
     }
@@ -490,6 +552,9 @@ extension ServerMessage: TransferCarrying {
         case .event(let docId, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId,
                           payload: OpPayload(type: payload.type, data: bytes))
+        case .strokeOpRequest(let requestId, let docId, _, let spec):
+            return .strokeOpRequest(requestId: requestId, docId: docId,
+                                     payload: .inline(bytes), spec: spec)
         default:
             return self
         }

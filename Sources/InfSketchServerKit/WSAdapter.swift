@@ -7,9 +7,9 @@ import InfSketchWire
 public struct WSAdapter: WSMessageHandler, Sendable {
     private let manager: SessionManager
     private let config: SessionConfig
-    private let broker: CreateDocBroker
+    private let broker: DeviceCommandBroker
 
-    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: CreateDocBroker) {
+    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker) {
         self.manager = manager
         self.config = config
         self.broker = broker
@@ -44,13 +44,13 @@ actor Connection {
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var watchSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
-    private let broker: CreateDocBroker
+    private let broker: DeviceCommandBroker
     private let connectionId = UUID()
     private var registeredWithBroker = false
 
     init(
         manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
-        broker: CreateDocBroker
+        broker: DeviceCommandBroker
     ) {
         self.manager = manager
         self.output = output
@@ -99,9 +99,15 @@ actor Connection {
                 return
             }
             helloed = true
-            if capabilities.contains("createDoc") {
+            // Register with the broker whenever the connection advertises
+            // either capability the broker brokers requests for — the broker
+            // itself filters per-request by capability (see
+            // DeviceCommandBroker.performRequest), so this gate only needs to
+            // recognize "some device command capability", not which one.
+            let caps = Set(capabilities)
+            if !caps.isDisjoint(with: ["createDoc", "authorStrokes"]) {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId) { [weak self] message in
+                await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
             }
@@ -209,6 +215,28 @@ actor Connection {
                     // Unreachable in practice: the reassembler resolves
                     // .transfer payloads to .inline before dispatch ever
                     // sees this message (mirrors the `frame` case's guard).
+                    emit(.error(reason: "unresolvedTransfer"))
+                }
+                return
+            }
+            await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
+
+        case .strokeOpReply(let requestId, _, let payload, let failureReason):
+            // Same precedence as createDocReply above (kept in exact lockstep
+            // on purpose — one broker, one reply-routing contract): an inline
+            // payload always wins as a success (even alongside a
+            // spec-violating failureReason); with neither present, substitute
+            // a failureReason rather than ever calling handleReply(bytes:
+            // nil, failureReason: nil) — the broker defaults THAT combination
+            // to a success with empty Data, which must stay unreachable here.
+            guard case .inline(let bytes)? = payload else {
+                if payload == nil {
+                    await broker.handleReply(
+                        requestId: requestId, bytes: nil, failureReason: failureReason ?? "unspecified")
+                } else {
+                    // Unreachable in practice: the reassembler resolves
+                    // .transfer payloads to .inline before dispatch ever sees
+                    // this message (mirrors the `createDocReply` case's guard).
                     emit(.error(reason: "unresolvedTransfer"))
                 }
                 return

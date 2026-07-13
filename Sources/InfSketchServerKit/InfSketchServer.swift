@@ -16,9 +16,13 @@ public final class InfSketchServer: Sendable {
     private let http: HTTPServer
     private let config: SessionConfig
     /// One broker per process, shared by the WS layer (registers
-    /// createDoc-capable connections, routes replies) and the MCP layer
-    /// (will call `requestCreation` from the `create_doc` tool, Task 4).
-    private let createDocBroker: CreateDocBroker
+    /// capability-tagged connections, routes replies) and the MCP layer
+    /// (calls `requestCreation` from the `create_doc` tool; will call
+    /// `requestStrokeOp` from the agent stroke-authoring tool, Task 4).
+    /// internal (not private) for tests — mirrors `mcpAdapter` below: Task 3's
+    /// real-socket outbound-chunking test drives `requestStrokeOp` directly
+    /// against the same broker instance the running server's `WSAdapter` uses.
+    let deviceCommandBroker: DeviceCommandBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
 
     public init(port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()) {
@@ -28,13 +32,14 @@ public final class InfSketchServer: Sendable {
         self.manager = manager
         self.http = HTTPServer(port: port)
         self.config = config
-        let createDocBroker = CreateDocBroker(timeout: config.createDocTimeout)
-        self.createDocBroker = createDocBroker
+        let deviceCommandBroker = DeviceCommandBroker(
+            createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout)
+        self.deviceCommandBroker = deviceCommandBroker
         self.mcpAdapter = MCPAdapter(
             manager: manager,
             idleTimeout: config.mcpSessionIdleTimeout,
             cleanupInterval: config.mcpSessionCleanupInterval,
-            broker: createDocBroker)
+            broker: deviceCommandBroker)
     }
 
     /// Configures routes and serves until stopped.
@@ -142,7 +147,7 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute(
             "GET /ws",
-            to: .webSocket(WSAdapter(manager: manager, config: config, broker: createDocBroker)))
+            to: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
         // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the

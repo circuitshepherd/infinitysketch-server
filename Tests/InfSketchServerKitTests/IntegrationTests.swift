@@ -178,6 +178,101 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         ws.cancel(with: .normalClosure, reason: nil)
         await server.stop()
     }
+
+    /// Task 3 (agent stroke-authoring branch): the OUTBOUND direction of
+    /// chunked transfer — server → device — driven by
+    /// `DeviceCommandBroker.requestStrokeOp` (not by anything the client
+    /// itself sends first, unlike every other chunking test above). This
+    /// locks the `ServerMessage.strokeOpRequest` `TransferCarrying` arms
+    /// end-to-end over a real socket: a small `inlineLimit` forces the
+    /// server to chunk the doc bytes handed to `requestStrokeOp`, and the
+    /// fake device (a real `URLSessionWebSocketTask`, hello'd with
+    /// `authorStrokes`) must see EXACTLY descriptor → N binary chunks →
+    /// transferEnd, reassembling to the exact bytes with `spec` intact
+    /// (spec is a plain `Data` field, never itself chunked).
+    @Test func strokeOpRequestArrivesChunkedOverRealSocketAndReassembles() async throws {
+        let (server, port, task) = try await startServer(
+            config: SessionConfig(inlineLimit: 1024, chunkSize: 4096))
+        defer { task.cancel() }
+
+        let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        ws.resume()
+
+        func send(_ m: ClientMessage) async throws {
+            try await ws.send(.string(try m.jsonText()))
+        }
+        func receiveFrame() async throws -> WireFrame {
+            while true {
+                switch try await ws.receive() {
+                case .string(let text): return .text(text)
+                case .data(let data): return .binary(data)
+                @unknown default: continue
+                }
+            }
+        }
+
+        // Fake device: hellos with authorStrokes so WSAdapter registers it
+        // with the server's real DeviceCommandBroker (the same instance the
+        // future stroke-authoring MCP tool, Task 4, will call into).
+        try await send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        guard case .text(let ackText) = try await receiveFrame(),
+              try ServerMessage(jsonText: ackText) == .helloAck(protocolVersion: 1)
+        else { Issue.record("expected helloAck"); return }
+
+        let bigBytes = Data((0..<100_000).map { UInt8($0 % 256) })
+        let spec = Data("stroke-spec".utf8)
+        let requestTask = Task {
+            try await server.deviceCommandBroker.requestStrokeOp(docId: "sample", docBytes: bigBytes, spec: spec)
+        }
+
+        // Frame 1: the descriptor announce (spec travels inline on this very
+        // frame — it is never chunked, only the doc-bytes bulk field is).
+        guard case .text(let announce) = try await receiveFrame(),
+              case .strokeOpRequest(let requestId, "sample", .transfer(let d), let announcedSpec)
+                = try ServerMessage(jsonText: announce)
+        else { Issue.record("expected strokeOpRequest descriptor"); return }
+        #expect(d.totalBytes == bigBytes.count)
+        #expect(announcedSpec == spec)
+
+        // Frames 2...N+1: exactly d.chunkCount binary chunks, in order. Fed
+        // into a client-side TransferReassembler as they arrive, alongside
+        // the raw-decode check, so this one pass both locks the wire SHAPE
+        // (descriptor, then exactly chunkCount binaries, then end) and
+        // proves semantic reassembly.
+        var reassembler = TransferReassembler<ServerMessage>()
+        #expect(try reassembler.consume(.text(announce)) == nil)
+        var reassembledBytes = Data()
+        for _ in 0..<d.chunkCount {
+            guard case .binary(let chunkFrame) = try await receiveFrame() else {
+                Issue.record("expected binary chunk"); return
+            }
+            reassembledBytes.append(try ChunkFraming.decode(chunkFrame).payload)
+            #expect(try reassembler.consume(.binary(chunkFrame)) == nil)
+        }
+        #expect(reassembledBytes == bigBytes)
+
+        // Final frame: transferEnd for this exact transferId — the
+        // reassembler resolves the complete semantic message right here.
+        guard case .text(let endText) = try await receiveFrame() else {
+            Issue.record("expected transferEnd"); return
+        }
+        #expect(try ServerMessage(jsonText: endText) == .transferEnd(transferId: d.transferId))
+        let resolved = try reassembler.consume(.text(endText))
+        guard case .strokeOpRequest(let resolvedRequestId, "sample", .inline(let resolvedBytes), let resolvedSpec) = resolved
+        else { Issue.record("expected resolved strokeOpRequest"); return }
+        #expect(resolvedRequestId == requestId)
+        #expect(resolvedBytes == bigBytes)
+        #expect(resolvedSpec == spec)
+
+        // Reply so the pending broker call resolves cleanly (no leaked Task).
+        try await send(.strokeOpReply(
+            requestId: requestId, docId: "sample",
+            payload: .inline(Data("ok".utf8)), failureReason: nil))
+        #expect(try await requestTask.value == Data("ok".utf8))
+
+        ws.cancel(with: .normalClosure, reason: nil)
+        await server.stop()
+    }
     #endif
 
     @Test func percentNamedDocServesPageAndFrame() async throws {
