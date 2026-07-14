@@ -686,7 +686,7 @@ private actor FakeStrokeOpDevice {
     // Renamed from `listToolsContainsAllNineTools` (stroke-editing spec,
     // 2026-07-14): four more tools joined the surface —
     // get/transform/restyle/reshape_strokes.
-    @Test func listToolsContainsAllThirteenTools() async throws {
+    @Test func listToolsContainsAllFourteenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -698,6 +698,7 @@ private actor FakeStrokeOpDevice {
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
+            "snap_points",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1222,7 +1223,7 @@ private actor FakeStrokeOpDevice {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
         }
-        for name in ["create_doc", "list_strokes", "render_sketch", "get_strokes"] {
+        for name in ["create_doc", "list_strokes", "render_sketch", "get_strokes", "snap_points"] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) != true, "\(name) should not carry the CAS sentence")
         }
@@ -1524,6 +1525,38 @@ private actor FakeStrokeOpDevice {
         let stroke = try #require(strokes.first)
         #expect(Set(stroke.keys) == ["points", "smooth"])
         #expect(stroke["smooth"] as? Bool == true)
+
+        await server.stop()
+    }
+
+    /// THE SILENT-FAILURE PIN for `draw_strokes`' returned KEYS (grid-snapping
+    /// spec, 2026-07-14): `draw`'s op-spec reply carries the created strokes'
+    /// composite keys in `out.meta` as `{"keys": […]}` (`StrokeAuthoring.draw`,
+    /// app repo) — an agent needs those to revise EXACTLY what it just drew
+    /// instead of re-finding it by bounding box, which is how a stroke once
+    /// got clobbered. If this server stopped reading `out.meta` (or read the
+    /// wrong key out of it), draw_strokes would keep reporting only "drew N
+    /// stroke(s) at seq M" forever — no error, just silently useless.
+    @Test func drawStrokesReportsTheKeysItCreated() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["new-stroke"]}"#.utf8)
+        let metaBytes = Data(#"{"keys":["111-222","333-444"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object(["points": .array([.array([.double(0), .double(0)]), .array([.double(1), .double(1)])])])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("111-222"), "an agent must be able to revise exactly what it just drew")
+        #expect(text.contains("333-444"))
 
         await server.stop()
     }
@@ -2100,6 +2133,132 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN for `snap_points` (grid-snapping
+    /// spec, 2026-07-14) — mirrors drawStrokesSpecEnvelopeMatchesCanonicalShape:
+    /// the op-spec JSON this server builds is decoded app-side by
+    /// `StrokeAuthoring.SnapSpec`, a plain `Decodable` that silently drops
+    /// unknown keys, so a field-name drift here (or simply forgetting to relay
+    /// `gridIds`/`maxCandidates`) would never fail loudly — every agent would
+    /// just keep snapping against every grid forever. Also proves the read-only
+    /// contract: no session opened, no seq assigned, same evidence style as
+    /// listStrokesReturnsFakeListingVerbatimWithNoWrite.
+    @Test func snapPointsIsReadOnlyAndRelaysItsEnvelope() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let candidatesJSON = Data(#"[{"point":[103,92],"candidates":[]}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(candidatesJSON))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d",
+            "points": .array([.array([.double(103), .double(92)])]),
+            "gridIds": .array([.int(0)]),
+            "maxCandidates": .int(5),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("candidates"))
+
+        // No write: snap never opens a session, so the doc's live seq stays
+        // unset (-1), exactly like listStrokesReturnsFakeListingVerbatimWithNoWrite.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(specJSON.keys) == ["op", "points", "gridIds", "maxCandidates"])
+        #expect(specJSON["op"] as? String == "snap")
+        let points = try #require(specJSON["points"] as? [[Double]])
+        #expect(points == [[103, 92]])
+        #expect(specJSON["gridIds"] as? [Int] == [0])
+        #expect(specJSON["maxCandidates"] as? Int == 5)
+
+        await server.stop()
+    }
+
+    /// `snap_points` with only the required arguments: `gridIds` and
+    /// `maxCandidates` must be OMITTED from the envelope, not sent as
+    /// explicit nulls — the app-side default (64, a safety valve, not a
+    /// working parameter — see `SnapCandidates`) only governs when the key
+    /// is truly absent.
+    @Test func snapPointsWithOnlyRequiredArgumentsOmitsOptionalKeys() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let candidatesJSON = Data(#"[{"point":[1,1],"candidates":[]}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(candidatesJSON))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d",
+            "points": .array([.array([.double(1), .double(1)])]),
+        ])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(specJSON.keys) == ["op", "points"])
+
+        await server.stop()
+    }
+
+    @Test func snapPointsWithNoDeviceErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device connects in this test.
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d", "points": .array([.array([.double(1), .double(1)])]),
+        ])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+
+        await server.stop()
+    }
+
+    @Test func snapPointsUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device needs to connect — unknownDoc short-circuits before
+        // any device round trip, mirroring renderSketchUnknownDocReturnsToolError.
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "ghost", "points": .array([.array([.double(1), .double(1)])]),
+        ])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func snapPointsDeviceFailurePropagatesReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("invalidSpec(maxCandidates must be > 0)"))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d", "points": .array([.array([.double(1), .double(1)])]),
+            "maxCandidates": .int(0),
+        ])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: invalidSpec(maxCandidates must be > 0)")
+
+        await server.stop()
+    }
+
     @Test func transformStrokesSendsSpecAndWritesReturnedBytes() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -2177,6 +2336,43 @@ private actor FakeStrokeOpDevice {
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    /// THE SILENT-FAILURE PIN for `snapTo` (grid-snapping spec, 2026-07-14) —
+    /// the twin of drawStrokesRelaysTheSmoothFlag: `snapTo` is a NEW envelope
+    /// key decoded app-side by `StrokeEditing.TransformSpec.SnapTarget`, a
+    /// plain `Decodable` that silently drops unknown keys. If this server
+    /// stopped relaying it (or relayed it under a drifted key), nothing would
+    /// fail — `snapToGrid` would keep snapping across EVERY enabled grid, so
+    /// the finest (usually invisible) one would keep winning even though the
+    /// caller named a specific grid. Asserts the nested object's OWN key set
+    /// too (`gridId`/`familyIds`), not just its presence.
+    @Test func transformStrokesRelaysSnapTo() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("{}".utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(name: "transform_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("1-2")]),
+            "translate": .array([.double(0), .double(0)]),
+            "snapToGrid": .bool(true),
+            "snapTo": .object(["gridId": .int(0), "familyIds": .array([.int(1)])]),
+        ])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "keys", "translate", "snapToGrid", "snapTo"])
+        let snapTo = try #require(envelope["snapTo"] as? [String: Any])
+        #expect(Set(snapTo.keys) == ["gridId", "familyIds"])
+        #expect(snapTo["gridId"] as? Int == 0)
+        #expect(snapTo["familyIds"] as? [Int] == [1])
 
         await server.stop()
     }
