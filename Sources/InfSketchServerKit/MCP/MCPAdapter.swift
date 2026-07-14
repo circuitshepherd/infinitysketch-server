@@ -488,6 +488,18 @@ public actor MCPAdapter {
                     preserve it, so a monoline stroke lists back as pen.
                     """,
             ]),
+            "smooth": .object([
+                "type": "boolean",
+                "description": """
+                    How to read `points`. DEFAULT false: they are a POLYLINE — straight \
+                    segments, sharp corners, which is almost certainly what you mean. Set \
+                    true to have them treated as spline knots and smoothly interpolated \
+                    (useful for a curve given as a few sparse points) — PKStrokePath \
+                    splines THROUGH its control points, so a sparse polyline misread as \
+                    knots renders as a rounded teardrop, not the shape you asked for. \
+                    Note reshape_strokes defaults the OTHER way.
+                    """,
+            ]),
         ]),
         "required": .array(["points"].map(Value.string)),
     ])
@@ -591,10 +603,17 @@ public actor MCPAdapter {
             name: "draw_strokes",
             description: """
                 Draws one or more freehand strokes into a document, authored by a connected \
-                InfinitySketch device. Each stroke is a polyline of (x, y) points in canvas \
+                InfinitySketch device. Each stroke is a list of (x, y) points in canvas \
                 coordinates — the same space as add_text's x/y — plus optional width, color, \
-                and inkType fields. Defaults for any stroke that omits them: inkType "pen", \
-                width 4, color "#000000". REQUIRES a connected device — fails with \
+                inkType, and smooth fields. Points are a POLYLINE by default (smooth: false, \
+                the default): straight segments and sharp corners, which is almost certainly \
+                what you mean. Set smooth: true to have them treated as spline knots and \
+                smoothly interpolated instead — useful for a curve given as a few sparse \
+                points; PencilKit splines THROUGH its control points, so a sparse polyline \
+                misread as knots renders as a rounded blob, not the shape you asked for. \
+                (reshape_strokes defaults smooth the OPPOSITE way — verbatim by default.) \
+                Other defaults for any stroke that omits them: inkType "pen", width 4, color \
+                "#000000". REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
                 time, opInProgress if another stroke operation on this document is already in \
                 flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
@@ -656,8 +675,12 @@ public actor MCPAdapter {
             name: "list_strokes",
             description: """
                 Lists every stroke currently in a document — each with its composite key \
-                (usable with delete_strokes) and geometry — authored by a connected \
-                InfinitySketch device. REQUIRES a connected device — fails with \
+                (usable with delete_strokes), geometry, and bbox/pathBounds — authored by a \
+                connected InfinitySketch device. bbox is the INK box (renderBounds: cap + \
+                antialias bleed, so it reads WIDER than what you placed — e.g. pins placed 80 \
+                pt apart show a bbox around 86); pathBounds is the box of the stroke's \
+                points — what you actually placed. Use pathBounds to verify geometry you \
+                positioned. REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. A stroke drawn by hand with an ink outside \
@@ -686,7 +709,10 @@ public actor MCPAdapter {
                 drawing and snapping. Align new strokes to the lattices of enabled \
                 grids; only visible grids actually appear in the rendered image — \
                 visible and enabled are independent, so a grid can be snapped to \
-                without being drawable, or drawn without being snapped to. REQUIRES a \
+                without being drawable, or drawn without being snapped to. To ZOOM IN, \
+                shrink the rect: the scale rises to fill the pixel budget, up to 16x. \
+                (A 60x50pt rect comes back around 800x640, not 120x100.) The scale \
+                actually used is always reported in the metadata. REQUIRES a \
                 connected device — fails with noDeviceAvailable if none is connected, \
                 deviceTimeout if it doesn't respond in time, and deviceFailed: <reason> \
                 for a bad spec (e.g. an unknown strokeKey, or nothing to render). \
@@ -780,18 +806,21 @@ public actor MCPAdapter {
             description: """
                 Reads strokes in full fidelity: every point with its size, opacity, \
                 force, azimuth, altitude, timeOffset and secondaryScale, plus the \
-                stroke's width, colour, inkType and transform. Point x/y are CANVAS \
-                coordinates — the stroke's transform is ALREADY applied to them, so \
-                they are the coordinates you see in render_sketch, the ones \
-                list_strokes' bbox is quoted in, and the ones transform_strokes moves \
-                in; the returned transform array is informational, never something you \
-                apply yourself. width is the stroke's peak stamp width — the quantity \
-                restyle_strokes' width sets — and is NOT scaled by the transform, so a \
-                scaled stroke renders proportionally wider than its width says (bbox \
-                and render_sketch show its true extent). Field names are symmetric with \
-                draw_strokes/reshape_strokes, so a fetch → alter → put-back needs no \
-                translation and loses nothing: handing the points straight back to \
-                reshape_strokes changes nothing at all. Nothing is capped or \
+                stroke's width, colour, inkType, transform, bbox and pathBounds. Point \
+                x/y are CANVAS coordinates — the stroke's transform is ALREADY applied \
+                to them, so they are the coordinates you see in render_sketch and the \
+                ones transform_strokes moves in; the returned transform array is \
+                informational, never something you apply yourself. bbox is the INK box \
+                (it includes cap and antialias bleed, so it reads wider than what you \
+                placed); pathBounds is the box of the stroke's points — use pathBounds \
+                to verify geometry you positioned. width is the stroke's peak stamp \
+                width — the quantity restyle_strokes' width sets — and is NOT scaled by \
+                the transform, so a scaled stroke renders proportionally wider than its \
+                width says (bbox and render_sketch show its true extent). Field names \
+                are symmetric with draw_strokes/reshape_strokes, so a fetch → alter → \
+                put-back needs no translation and loses nothing: handing the points \
+                straight back to reshape_strokes (whose smooth defaults to true — \
+                verbatim) changes nothing at all. Nothing is capped or \
                 decimated by the server — use list_strokes' pointCount to price a \
                 fetch first, and maxPoints if you want a guard of your own; a request \
                 over that guard fails with pointBudgetExceeded(<actual>), naming the \
@@ -944,6 +973,10 @@ public actor MCPAdapter {
                 it lands exactly there: the stroke's transform is preserved and \
                 accounted for on your behalf (never re-applied on top of your points). \
                 Handing back the exact points get_strokes gave you changes nothing. \
+                Points are used VERBATIM by default (smooth: true — the OPPOSITE of \
+                draw_strokes' default), because a reshape may be handing back a stroke \
+                a HUMAN drew, and re-sampling it would flatten their curve. Pass \
+                smooth: false to read them as a polyline with sharp corners instead. \
                 Attributes you OMIT on a point are resampled from the ORIGINAL stroke \
                 along the new path — so straightening a wobbly line with plain [x, y] \
                 pairs keeps its pressure taper. Supply attributes explicitly to \
@@ -970,6 +1003,16 @@ public actor MCPAdapter {
                                         either an [x, y] pair or a rich point object.
                                         """,
                                     "items": pointSchema,
+                                ]),
+                                "smooth": .object([
+                                    "type": "boolean",
+                                    "description": """
+                                        DEFAULT true here (the OPPOSITE of draw_strokes): the \
+                                        points are used verbatim, because a reshape may be \
+                                        round-tripping a stroke a HUMAN drew and re-sampling \
+                                        would flatten it. Pass false to read them as a \
+                                        polyline with sharp corners.
+                                        """,
                                 ]),
                             ]),
                             "required": .array(["key", "points"].map(Value.string)),
