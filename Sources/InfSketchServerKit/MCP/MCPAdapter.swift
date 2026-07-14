@@ -392,7 +392,7 @@ public actor MCPAdapter {
     /// stroke-editing writes transform/restyle/reshape_strokes) — NOT
     /// create_doc (nothing to compare — its docExists guard is the race's
     /// only meaningful shape) and NOT the read-only tools, which never write:
-    /// list_strokes, get_strokes, render_sketch.
+    /// list_strokes, get_strokes, render_sketch, snap_points.
     private static let casRejectionSentence =
         "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
 
@@ -618,13 +618,19 @@ public actor MCPAdapter {
                 points; PencilKit splines THROUGH its control points, so a sparse polyline \
                 misread as knots renders as a rounded blob, not the shape you asked for. \
                 (reshape_strokes defaults smooth the OPPOSITE way — verbatim by default.) \
-                Other defaults for any stroke that omits them: inkType "pen", width 4, color \
-                "#000000". REQUIRES a connected device — fails with \
+                Other defaults for any stroke that omits them: inkType "pen", width 4, and a \
+                colour that FOLLOWS THE PAPER — white on a dark document, black on a light \
+                one (never a hardcoded #000000, which renders invisible on dark paper). An \
+                explicit color is always honoured exactly as given. The result names the seq \
+                the write was assigned, and the composite KEY of each stroke it created, in \
+                the order supplied — use those, not a bounding-box guess, to revise exactly \
+                what you just drew with \
+                get_strokes/transform_strokes/restyle_strokes/reshape_strokes/delete_strokes. \
+                REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
                 time, opInProgress if another stroke operation on this document is already in \
                 flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
-                malformed points). The result names the seq the write was assigned. \
-                \(casRejectionSentence)
+                malformed points). \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -686,7 +692,9 @@ public actor MCPAdapter {
                 antialias bleed, so it reads WIDER than what you placed — e.g. pins placed 80 \
                 pt apart show a bbox around 86); pathBounds is the box of the stroke's \
                 points — what you actually placed. Use pathBounds to verify geometry you \
-                positioned. REQUIRES a connected device — fails with \
+                positioned. This tool does not report grids — render_sketch's metadata does, \
+                including each grid's id (what snap_points' gridIds and transform_strokes' \
+                snapTo refer to). REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. A stroke drawn by hand with an ink outside \
@@ -711,17 +719,26 @@ public actor MCPAdapter {
                 composited over the document's real content to judge fit and alignment. \
                 Authored by a connected InfinitySketch device. Returns a PNG plus \
                 metadata: the covered rect, the scale actually used, the current \
-                appearance, the canvas contentSize, and per-grid line families for both \
-                drawing and snapping. Align new strokes to the lattices of enabled \
-                grids; only visible grids actually appear in the rendered image — \
-                visible and enabled are independent, so a grid can be snapped to \
-                without being drawable, or drawn without being snapped to. To ZOOM IN, \
-                shrink the rect: the scale rises to fill the pixel budget, up to 16x. \
-                (A 60x50pt rect comes back 960x800, not 120x100.) The scale \
-                actually used is always reported in the metadata. REQUIRES a \
-                connected device — fails with noDeviceAvailable if none is connected, \
-                deviceTimeout if it doesn't respond in time, and deviceFailed: <reason> \
-                for a bad spec (e.g. an unknown strokeKey, or nothing to render). \
+                appearance, the canvas contentSize, and — per grid — its id, thickness, \
+                and each drawn/snap line family's id, lineAngleDeg and label. These grid \
+                and family ids are what snap_points' gridIds and transform_strokes' \
+                snapTo refer to. READ lineAngleDeg for a family's line direction, never \
+                infer it from `normal` — normal is PERPENDICULAR to the lines it \
+                describes ([1, 0] means VERTICAL lines, not horizontal). Only visible \
+                grids appear in the rendered image, but visible and enabled are \
+                independent — a grid can be snapped to without being drawable, or drawn \
+                without being snapped to; both flags are reported for every grid, so \
+                check `enabled` for whether a grid you can't see is still pulling \
+                strokes onto it. To ZOOM IN, shrink the rect: the scale rises to fill \
+                the pixel budget, up to 16x. (A 60x50pt rect comes back 960x800, not \
+                120x100.) The scale actually used is always reported in the metadata. \
+                An empty document (nothing to auto-fit, no explicit rect) now renders \
+                at the document's saved viewport instead of failing — only an explicit \
+                include: "none" with no ephemeral strokes still fails with \
+                deviceFailed: emptyRender (there is deliberately nothing to show). \
+                REQUIRES a connected device — fails with noDeviceAvailable if none is \
+                connected, deviceTimeout if it doesn't respond in time, and \
+                deviceFailed: <reason> for a bad spec (e.g. an unknown strokeKey). \
                 Read-only: it never writes to the document, so there is no seq assigned \
                 and nothing to retry.
                 """,
@@ -832,7 +849,9 @@ public actor MCPAdapter {
                 over that guard fails with pointBudgetExceeded(<actual>), naming the \
                 real total. Note: monoline persists as pen — PencilKit's archive \
                 format does not preserve it, so a monoline stroke lists back as pen. \
-                Read-only.
+                This tool does not report grids — render_sketch's metadata does, \
+                including each grid's id (what snap_points' gridIds and \
+                transform_strokes' snapTo refer to). Read-only.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -840,7 +859,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id to read strokes from."]),
                     "keys": .object([
                         "type": "array",
-                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "description": "Composite stroke keys, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
                     "maxPoints": .object([
@@ -856,6 +875,66 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "snap_points",
+            description: """
+                Where could these points snap to? Returns CANDIDATES — it never moves \
+                anything, and it never decides for you. Each candidate is either a LINE \
+                (one grid family: it constrains ONE direction, so a horizontal wire can \
+                snap its y and keep its x) or an INTERSECTION of two non-parallel \
+                families, which MAY come from two DIFFERENT grids — the 20pt grid's \
+                vertical crossing the 5pt grid's horizontal is a real point. Every \
+                candidate names its parent grid(s): gridId, familyId, label, \
+                lineAngleDeg, spacing, snapSpacing, visible, enabled, thickness, color \
+                — use gridId/familyId with transform_strokes' snapTo once you've picked \
+                one.
+
+                THE LIST IS ORDERED BY DISTANCE, AND DISTANCE IS NOT A RECOMMENDATION. \
+                Measured on the factory document, for a point near (103, 92) the top \
+                THREE candidates are the invisible, DISABLED 1pt grid's — at distance \
+                0.2 ("snap to where you already are") — and the candidate an agent \
+                actually wants, the VISIBLE 20×20 intersection at (100, 100), is LAST, \
+                at distance 8.43. Grabbing candidates[0] lands a schematic between the \
+                lines a human can see — that is exactly what happened to a real agent. \
+                For LAYOUT, prefer candidates whose parents are `visible`; the finest \
+                enabled grid is usually invisible.
+
+                maxCandidates (default 64) is a SAFETY VALVE, not a working parameter: \
+                truncation drops the FARTHEST candidates, which are usually the coarse \
+                VISIBLE ones you want — lowering it can silently delete the answer you \
+                need. REQUIRES a connected device — fails with noDeviceAvailable if none \
+                is connected and deviceTimeout if it doesn't respond in time. Read-only: \
+                no write, no seq bump.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                    "points": .object([
+                        "type": "array",
+                        "description": "Canvas-space [x, y] points to find snap candidates for.",
+                        "items": .object([
+                            "type": "array",
+                            "items": .object(["type": "number"]),
+                            "minItems": 2, "maxItems": 2,
+                        ]),
+                    ]),
+                    "gridIds": .object([
+                        "type": "array",
+                        "description": """
+                            Consider only these grids (ids from render_sketch's metadata). \
+                            Default: all of them, including invisible and disabled ones.
+                            """,
+                        "items": .object(["type": "integer"]),
+                    ]),
+                    "maxCandidates": .object([
+                        "type": "integer",
+                        "description": "Per point; default 64. The cap drops the FARTHEST candidates.",
+                    ]),
+                ]),
+                "required": .array(["docId", "points"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "transform_strokes",
             description: """
                 Moves, scales and/or rotates strokes in place. The strokes keep their \
@@ -865,10 +944,17 @@ public actor MCPAdapter {
                 in. Scale and rotate act about anchor, which defaults to the \
                 centre of the keys' union bounding box. With snapToGrid, the whole SET \
                 is shifted rigidly (never additionally scaled or rotated) so the anchor \
-                lands on the lattice of the document's ENABLED grids — including \
-                invisible guide grids (visible and enabled are independent; see \
-                render_sketch's metadata for every grid's lattice); with no enabled \
-                grid, snapToGrid is a no-op. snapToGrid alone, with no translate/scale/ \
+                lands on a lattice point. WITHOUT snapTo, that lattice is the nearest \
+                line across ALL of the document's ENABLED grids — so the FINEST enabled \
+                grid wins, and that grid is usually INVISIBLE (see render_sketch's \
+                metadata for every grid's visible/enabled flags and lattice); this stays \
+                the default because it's the app's own pen behaviour, but it is easy to \
+                land a schematic between the lines a human can see. Use snap_points \
+                first to see what's actually near your anchor, then pass snapTo to name \
+                the grid (and optionally which of its line families — one family \
+                constrains a single direction, e.g. a wire's y while its x stays put) \
+                you actually mean; with no enabled grid (and no snapTo match), \
+                snapToGrid is a no-op. snapToGrid alone, with no translate/scale/ \
                 rotate, is a legal request. \(casRejectionSentence)
                 """,
             inputSchema: .object([
@@ -877,7 +963,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
                     "keys": .object([
                         "type": "array",
-                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "description": "Composite stroke keys, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
                     "translate": .object([
@@ -910,6 +996,29 @@ public actor MCPAdapter {
                             No enabled grid = no-op.
                             """,
                     ]),
+                    "snapTo": .object([
+                        "type": "object",
+                        "description": """
+                            Which grid to snap to. WITHOUT this, snapToGrid takes the nearest \
+                            line across ALL enabled grids — so the FINEST grid wins, and that \
+                            grid is usually INVISIBLE, which will pull your drawing between \
+                            the lines a human sees. Name a grid (ids from render_sketch's \
+                            metadata, or snap_points' candidate parents), and optionally only \
+                            some of its families, to snap to what you mean.
+                            """,
+                        "properties": .object([
+                            "gridId": .object(["type": "integer"]),
+                            "familyIds": .object([
+                                "type": "array",
+                                "description": """
+                                    Snap only against these families of that grid (a single \
+                                    family constrains one direction). Default: all of them.
+                                    """,
+                                "items": .object(["type": "integer"]),
+                            ]),
+                        ]),
+                        "required": .array(["gridId"].map(Value.string)),
+                    ]),
                 ]),
                 "required": .array(["docId", "keys"].map(Value.string)),
             ])
@@ -940,7 +1049,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
                     "keys": .object([
                         "type": "array",
-                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "description": "Composite stroke keys, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
                     "color": .object([
@@ -1053,6 +1162,7 @@ public actor MCPAdapter {
         case "list_strokes": return await callListStrokes(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
+        case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
@@ -1271,11 +1381,23 @@ public actor MCPAdapter {
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device — never a fresh re-read here, which would re-open the
             // very window this guard exists to close (Task 2, write CAS).
-            // `.meta` is render-only (nil here) — draw/delete ignore it.
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                "drew \(strokes.count) stroke(s) at seq \(seq)"
+                // `out.meta` carries the created strokes' composite KEYS, in
+                // the order supplied (`StrokeAuthoring.draw`'s `{"keys": […]}`,
+                // app repo) — surfaced here so an agent can revise EXACTLY
+                // what it just drew instead of re-finding it by bounding box
+                // (the measured failure mode that once clobbered the wrong
+                // stroke). A missing/undecodable meta degrades to just the
+                // seq line rather than throwing.
+                var summary = "drew \(strokes.count) stroke(s) at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta),
+                   let keys = decoded["keys"] {
+                    summary += "\nkeys: \(keys.joined(separator: ", "))"
+                }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -1431,7 +1553,8 @@ public actor MCPAdapter {
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
-    // get/transform/restyle/reshape_strokes
+    // get/transform/restyle/reshape_strokes, plus snap_points
+    // (grid-snapping spec, 2026-07-14)
     //
     // Same shape as the Task 4 stroke-op tools above: compose a minimal
     // op-spec envelope containing ONLY the fields the caller actually
@@ -1441,9 +1564,10 @@ public actor MCPAdapter {
     // and — for the three writes — tail into `submitAndRespond` with
     // `expectedBytes: docBytes`, THE EXACT BYTES RELAYED TO THE DEVICE,
     // never a fresh re-read (Task 2, write CAS: a re-read would re-open the
-    // very race the guard exists to close). `get_strokes` never writes: no
-    // `submitAndRespond`, no seq bump, the device's listing bytes decoded as
-    // UTF-8 and passed straight through, exactly like `list_strokes`.
+    // very race the guard exists to close). `get_strokes` and `snap_points`
+    // never write: no `submitAndRespond`, no seq bump, the device's reply
+    // bytes decoded as UTF-8 and passed straight through, exactly like
+    // `list_strokes`.
 
     /// Read-only, like `list_strokes`/`render_sketch`: the device's listing
     /// bytes are decoded as UTF-8 and passed straight through. No
@@ -1498,6 +1622,59 @@ public actor MCPAdapter {
         }
     }
 
+    /// Read-only, like `get_strokes`/`list_strokes`/`render_sketch`: the
+    /// device's candidate-listing bytes are decoded as UTF-8 and passed
+    /// straight through. No `submitAndRespond`, so no seq bump and no CAS —
+    /// a snap query never writes, it only answers "where could this point
+    /// go?" (see the tool's description for why grabbing candidates[0] is a
+    /// trap, not a shortcut).
+    private func callSnapPoints(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let points = try Self.nonEmptyValueArrayArg(arguments, "points")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("snap"),
+                "points": .array(points),
+            ]
+            // Only the keys the caller actually supplied — deep validation
+            // (unknown gridId, maxCandidates <= 0) is the device's job,
+            // surfaced verbatim as `deviceFailed: <reason>`.
+            for name in ["gridIds", "maxCandidates"] {
+                if let value = arguments?[name] {
+                    envelope[name] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(decoding: out.bytes, as: UTF8.self), annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callTransformStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -1512,9 +1689,10 @@ public actor MCPAdapter {
                 "keys": .array(keys.map(Value.string)),
             ]
             // Only the keys the caller actually supplied — deep validation
-            // (finite values, non-zero scale, at-least-one-op) is the
-            // device's job, surfaced verbatim as `deviceFailed: <reason>`.
-            for name in ["translate", "scale", "rotate", "anchor", "snapToGrid"] {
+            // (finite values, non-zero scale, at-least-one-op, unknown
+            // gridId/familyIds on snapTo) is the device's job, surfaced
+            // verbatim as `deviceFailed: <reason>`.
+            for name in ["translate", "scale", "rotate", "anchor", "snapToGrid", "snapTo"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -1644,7 +1822,8 @@ public actor MCPAdapter {
     /// tool-error string for every device-relayed stroke-op tool
     /// (draw/delete/list_strokes; render_sketch since Task 5;
     /// get/transform/restyle/reshape_strokes since the stroke-editing spec,
-    /// 2026-07-14). UNLIKE `create_doc` (whose `.requestInFlight` publishes
+    /// 2026-07-14; snap_points since the grid-snapping spec, 2026-07-14).
+    /// UNLIKE `create_doc` (whose `.requestInFlight` publishes
     /// the pinned "creationInProgress" string — see `callCreateDoc` above),
     /// these publish "opInProgress" per the Task 4 spec's error-string
     /// mapping; every one of these tools shares the same per-docId in-flight
