@@ -394,6 +394,50 @@ public actor MCPAdapter {
     private static let casRejectionSentence =
         "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
 
+    /// A stroke point in EITHER form: the bare `[x, y]` pair (synthesis
+    /// defaults for everything else) or the rich object carrying any subset
+    /// of PencilKit's per-point attributes. `get_strokes` always RETURNS the
+    /// rich form, so a fetch → alter → put-back is lossless; in a
+    /// `reshape_strokes`, attributes the agent omits are resampled from the
+    /// ORIGINAL stroke along the new path. Shared verbatim by
+    /// `draw_strokes`, `render_sketch`'s ephemeral strokes, and
+    /// `reshape_strokes` — ONE definition, so drift between the three call
+    /// sites is structurally impossible; pinned by
+    /// pointSchemaIsSharedAcrossDrawRenderAndReshapeTools.
+    private static let pointSchema: Value = .object([
+        "oneOf": .array([
+            .object([
+                "type": "array",
+                "description": "A bare [x, y] canvas-coordinate pair.",
+                "items": .object(["type": "number"]),
+                "minItems": 2,
+                "maxItems": 2,
+            ]),
+            .object([
+                "type": "object",
+                "description": "A rich point: x and y are required, every attribute is optional.",
+                "properties": .object([
+                    "x": .object(["type": "number"]),
+                    "y": .object(["type": "number"]),
+                    "size": .object([
+                        "type": "array",
+                        "description": "[width, height] of the point's stamp, both > 0.",
+                        "items": .object(["type": "number"]),
+                        "minItems": 2,
+                        "maxItems": 2,
+                    ]),
+                    "opacity": .object(["type": "number"]),
+                    "force": .object(["type": "number"]),
+                    "azimuth": .object(["type": "number"]),
+                    "altitude": .object(["type": "number"]),
+                    "timeOffset": .object(["type": "number"]),
+                    "secondaryScale": .object(["type": "number"]),
+                ]),
+                "required": .array(["x", "y"].map(Value.string)),
+            ]),
+        ]),
+    ])
+
     /// The canonical per-stroke item schema — points/width/color/inkType —
     /// shared verbatim by `draw_strokes`'s `strokes` array and, since Task 5,
     /// `render_sketch`'s EPHEMERAL `strokes` array: both decode app-side into
@@ -408,15 +452,10 @@ public actor MCPAdapter {
             "points": .object([
                 "type": "array",
                 "description": """
-                    The stroke's polyline as [x, y] canvas-coordinate \
-                    pairs; at least 2 points.
+                    The stroke's polyline; at least 2 points. Each point is \
+                    either an [x, y] pair or a rich point object.
                     """,
-                "items": .object([
-                    "type": "array",
-                    "items": .object(["type": "number"]),
-                    "minItems": 2,
-                    "maxItems": 2,
-                ]),
+                "items": pointSchema,
             ]),
             "width": .object([
                 "type": "number",
@@ -722,6 +761,187 @@ public actor MCPAdapter {
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "get_strokes",
+            description: """
+                Reads strokes in full fidelity: every point with its size, opacity, \
+                force, azimuth, altitude, timeOffset and secondaryScale, plus the \
+                stroke's width, colour, inkType and transform. Field names are \
+                symmetric with draw_strokes/reshape_strokes, so a fetch → alter → \
+                put-back needs no translation and loses nothing. Nothing is capped or \
+                decimated by the server — use list_strokes' pointCount to price a \
+                fetch first, and maxPoints if you want a guard of your own; a request \
+                over that guard fails with pointBudgetExceeded(<actual>), naming the \
+                real total. Note: monoline persists as pen — PencilKit's archive \
+                format does not preserve it, so a monoline stroke lists back as pen. \
+                Read-only.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to read strokes from."]),
+                    "keys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "maxPoints": .object([
+                        "type": "integer",
+                        "description": """
+                            YOUR OWN budget guard, not a server limit: fails with \
+                            pointBudgetExceeded(<actual>) if the request's total point \
+                            count exceeds this. Omit for no limit.
+                            """,
+                    ]),
+                ]),
+                "required": .array(["docId", "keys"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "transform_strokes",
+            description: """
+                Moves, scales and/or rotates strokes in place. The strokes keep their \
+                identity (keys), their points and their z-order — only their placement \
+                changes. Scale and rotate act about anchor, which defaults to the \
+                centre of the keys' union bounding box. With snapToGrid, the whole SET \
+                is shifted rigidly (never additionally scaled or rotated) so the anchor \
+                lands on the lattice of the document's ENABLED grids — including \
+                invisible guide grids (visible and enabled are independent; see \
+                render_sketch's metadata for every grid's lattice); with no enabled \
+                grid, snapToGrid is a no-op. snapToGrid alone, with no translate/scale/ \
+                rotate, is a legal request. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "keys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "translate": .object([
+                        "type": "array",
+                        "description": "[dx, dy] in canvas points.",
+                        "items": .object(["type": "number"]),
+                        "minItems": 2, "maxItems": 2,
+                    ]),
+                    "scale": .object([
+                        "type": "array",
+                        "description": "[sx, sy] about the anchor; non-zero.",
+                        "items": .object(["type": "number"]),
+                        "minItems": 2, "maxItems": 2,
+                    ]),
+                    "rotate": .object([
+                        "type": "number",
+                        "description": "Degrees about the anchor; positive = clockwise on screen.",
+                    ]),
+                    "anchor": .object([
+                        "type": "array",
+                        "description": "[x, y]. Defaults to the centre of the keys' union bounding box.",
+                        "items": .object(["type": "number"]),
+                        "minItems": 2, "maxItems": 2,
+                    ]),
+                    "snapToGrid": .object([
+                        "type": "boolean",
+                        "description": """
+                            Land the anchor on the nearest lattice point of the document's \
+                            ENABLED grids, shifting the whole set by that one delta. \
+                            No enabled grid = no-op.
+                            """,
+                    ]),
+                ]),
+                "required": .array(["docId", "keys"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "restyle_strokes",
+            description: """
+                Changes strokes' colour, width and/or ink in place; identity and \
+                geometry survive. width is the TARGET PEAK stroke width — the same \
+                quantity get_strokes/list_strokes report, not a tool-slider value — \
+                and is CLAMPED to what the target ink can express (pen tops out around \
+                peak 6; marker cannot render below roughly 7.5), so a thin pen stroke \
+                necessarily gets thicker when restyled to marker; get_strokes reports \
+                the actual resulting peak. An ink-only restyle (no width) preserves the \
+                stroke's apparent thickness. A colour-only restyle changes nothing \
+                else. Note: monoline persists as pen — PencilKit's archive format does \
+                not preserve it. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "keys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys, as returned by list_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "color": .object([
+                        "type": "string",
+                        "description": "#RRGGBB or #RRGGBBAA.",
+                    ]),
+                    "width": .object([
+                        "type": "number",
+                        "description": """
+                            Target PEAK stroke width (> 0) — the same quantity \
+                            get_strokes/list_strokes report, not a tool-slider value. \
+                            Clamped to what the target ink can express (pen tops out \
+                            around peak 6; marker cannot go below roughly 7.5) — \
+                            get_strokes reports the actual resulting peak.
+                            """,
+                    ]),
+                    "inkType": .object([
+                        "type": "string",
+                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                        "description": """
+                            Note: monoline persists as pen — PencilKit's archive format \
+                            does not preserve it.
+                            """,
+                    ]),
+                ]),
+                "required": .array(["docId", "keys"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "reshape_strokes",
+            description: """
+                Replaces strokes' geometry in place, keeping their identity (key), \
+                ink, z-order and width-edit history. Attributes you OMIT on a point \
+                are resampled from the ORIGINAL stroke along the new path — so \
+                straightening a wobbly line with plain [x, y] pairs keeps its pressure \
+                taper. Supply attributes explicitly to override that. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "strokes": .object([
+                        "type": "array",
+                        "description": "One or more strokes to reshape by key.",
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "key": .object([
+                                    "type": "string",
+                                    "description": "The composite key of the stroke to reshape.",
+                                ]),
+                                "points": .object([
+                                    "type": "array",
+                                    "description": """
+                                        The new polyline; at least 2 points. Each point is \
+                                        either an [x, y] pair or a rich point object.
+                                        """,
+                                    "items": pointSchema,
+                                ]),
+                            ]),
+                            "required": .array(["key", "points"].map(Value.string)),
+                        ]),
+                    ]),
+                ]),
+                "required": .array(["docId", "strokes"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -739,6 +959,10 @@ public actor MCPAdapter {
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
+        case "get_strokes": return await callGetStrokes(arguments)
+        case "transform_strokes": return await callTransformStrokes(arguments)
+        case "restyle_strokes": return await callRestyleStrokes(arguments)
+        case "reshape_strokes": return await callReshapeStrokes(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -1113,15 +1337,218 @@ public actor MCPAdapter {
         "include", "strokeKeys", "strokes", "rect", "padding", "background", "axes", "maxPixels",
     ]
 
+    // MARK: - Stroke-editing tools (spec 2026-07-14):
+    // get/transform/restyle/reshape_strokes
+    //
+    // Same shape as the Task 4 stroke-op tools above: compose a minimal
+    // op-spec envelope containing ONLY the fields the caller actually
+    // supplied (so the envelope's exact key set is deterministic and
+    // pinned by strokeEditingSpecEnvelopesMatchTheCanonicalShape), relay it
+    // plus the document's current bytes through `broker.requestStrokeOp`,
+    // and — for the three writes — tail into `submitAndRespond` with
+    // `expectedBytes: docBytes`, THE EXACT BYTES RELAYED TO THE DEVICE,
+    // never a fresh re-read (Task 2, write CAS: a re-read would re-open the
+    // very race the guard exists to close). `get_strokes` never writes: no
+    // `submitAndRespond`, no seq bump, the device's listing bytes decoded as
+    // UTF-8 and passed straight through, exactly like `list_strokes`.
+
+    /// Read-only, like `list_strokes`/`render_sketch`: the device's listing
+    /// bytes are decoded as UTF-8 and passed straight through. No
+    /// `submitAndRespond`, so no seq bump and no CAS — a read never writes.
+    private func callGetStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("get"),
+                "keys": .array(keys.map(Value.string)),
+            ]
+            if let maxPoints = arguments?["maxPoints"]?.intValue {
+                envelope["maxPoints"] = .int(maxPoints)
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(decoding: out.bytes, as: UTF8.self), annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callTransformStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("transform"),
+                "keys": .array(keys.map(Value.string)),
+            ]
+            // Only the keys the caller actually supplied — deep validation
+            // (finite values, non-zero scale, at-least-one-op) is the
+            // device's job, surfaced verbatim as `deviceFailed: <reason>`.
+            for name in ["translate", "scale", "rotate", "anchor", "snapToGrid"] {
+                if let value = arguments?[name] {
+                    envelope[name] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // expectedBytes is docBytes — the exact bytes relayed to the
+            // device, never a fresh re-read here, which would re-open the
+            // very window this guard exists to close (Task 2, write CAS).
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "transformed \(keys.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callRestyleStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("restyle"),
+                "keys": .array(keys.map(Value.string)),
+            ]
+            for name in ["color", "width", "inkType"] {
+                if let value = arguments?[name] {
+                    envelope[name] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // expectedBytes is docBytes — the exact bytes relayed to the
+            // device (Task 2, write CAS) — never a fresh re-read.
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "restyled \(keys.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callReshapeStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let items = try Self.nonEmptyValueArrayArg(arguments, "strokes")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(
+                    Value.object(["op": .string("reshape"), "strokes": .array(items)]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // expectedBytes is docBytes — the exact bytes relayed to the
+            // device (Task 2, write CAS) — never a fresh re-read.
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "reshaped \(items.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
-    /// tool-error string for all four device-relayed stroke-op tools
-    /// (draw/delete/list_strokes, and — since Task 5 — render_sketch). UNLIKE
-    /// `create_doc` (whose `.requestInFlight` publishes the pinned
-    /// "creationInProgress" string — see `callCreateDoc` above), these
-    /// publish "opInProgress" per the Task 4 spec's error-string mapping;
-    /// `render_sketch` shares the same per-docId in-flight guard (the
-    /// broker's `docIdsInFlight` is keyed by docId alone, not by op kind), so
-    /// a render can also collide with a draw/delete in flight on the same doc.
+    /// tool-error string for every device-relayed stroke-op tool
+    /// (draw/delete/list_strokes; render_sketch since Task 5;
+    /// get/transform/restyle/reshape_strokes since the stroke-editing spec,
+    /// 2026-07-14). UNLIKE `create_doc` (whose `.requestInFlight` publishes
+    /// the pinned "creationInProgress" string — see `callCreateDoc` above),
+    /// these publish "opInProgress" per the Task 4 spec's error-string
+    /// mapping; every one of these tools shares the same per-docId in-flight
+    /// guard (the broker's `docIdsInFlight` is keyed by docId alone, not by
+    /// op kind), so any two can collide on the same doc.
     private static func strokeOpErrorResult(_ error: DeviceCommandBroker.DeviceCommandError) -> CallTool.Result {
         switch error {
         case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
