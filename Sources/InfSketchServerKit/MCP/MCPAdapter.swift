@@ -388,9 +388,11 @@ public actor MCPAdapter {
 
     /// Task 2 (write CAS): appended verbatim to the description of every
     /// tool whose write now carries an `expectedBytes` compare-and-swap
-    /// (add/edit/remove_text, replace_doc, draw/delete_strokes) — NOT
+    /// (add/edit/remove_text, replace_doc, draw/delete_strokes, and the
+    /// stroke-editing writes transform/restyle/reshape_strokes) — NOT
     /// create_doc (nothing to compare — its docExists guard is the race's
-    /// only meaningful shape) or list_strokes (never writes).
+    /// only meaningful shape) and NOT the read-only tools, which never write:
+    /// list_strokes, get_strokes, render_sketch.
     private static let casRejectionSentence =
         "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
 
@@ -404,6 +406,15 @@ public actor MCPAdapter {
     /// `reshape_strokes` — ONE definition, so drift between the three call
     /// sites is structurally impossible; pinned by
     /// pointSchemaIsSharedAcrossDrawRenderAndReshapeTools.
+    ///
+    /// **x and y are CANVAS coordinates in every one of those four directions.**
+    /// A stroke's underlying `PKStrokePath` is stored in a local, pre-transform
+    /// space, and strokes the user has rect-dragged (or `transform_strokes` has
+    /// moved) carry a non-identity transform — so the app maps points OUT through
+    /// that transform in `get_strokes` and BACK through its inverse in
+    /// `reshape_strokes` (`StrokeEditing.canvasPoints(of:)`). The agent never sees
+    /// the local space and never has to apply a matrix; the `transform` array on a
+    /// `get_strokes` result is information, not homework.
     private static let pointSchema: Value = .object([
         "oneOf": .array([
             .object([
@@ -415,7 +426,10 @@ public actor MCPAdapter {
             ]),
             .object([
                 "type": "object",
-                "description": "A rich point: x and y are required, every attribute is optional.",
+                "description": """
+                    A rich point: x and y (canvas coordinates) are required, every \
+                    other attribute is optional.
+                    """,
                 "properties": .object([
                     "x": .object(["type": "number"]),
                     "y": .object(["type": "number"]),
@@ -766,9 +780,18 @@ public actor MCPAdapter {
             description: """
                 Reads strokes in full fidelity: every point with its size, opacity, \
                 force, azimuth, altitude, timeOffset and secondaryScale, plus the \
-                stroke's width, colour, inkType and transform. Field names are \
-                symmetric with draw_strokes/reshape_strokes, so a fetch → alter → \
-                put-back needs no translation and loses nothing. Nothing is capped or \
+                stroke's width, colour, inkType and transform. Point x/y are CANVAS \
+                coordinates — the stroke's transform is ALREADY applied to them, so \
+                they are the coordinates you see in render_sketch, the ones \
+                list_strokes' bbox is quoted in, and the ones transform_strokes moves \
+                in; the returned transform array is informational, never something you \
+                apply yourself. width is the stroke's peak stamp width — the quantity \
+                restyle_strokes' width sets — and is NOT scaled by the transform, so a \
+                scaled stroke renders proportionally wider than its width says (bbox \
+                and render_sketch show its true extent). Field names are symmetric with \
+                draw_strokes/reshape_strokes, so a fetch → alter → put-back needs no \
+                translation and loses nothing: handing the points straight back to \
+                reshape_strokes changes nothing at all. Nothing is capped or \
                 decimated by the server — use list_strokes' pointCount to price a \
                 fetch first, and maxPoints if you want a guard of your own; a request \
                 over that guard fails with pointBudgetExceeded(<actual>), naming the \
@@ -802,7 +825,9 @@ public actor MCPAdapter {
             description: """
                 Moves, scales and/or rotates strokes in place. The strokes keep their \
                 identity (keys), their points and their z-order — only their placement \
-                changes. Scale and rotate act about anchor, which defaults to the \
+                changes. translate and anchor are CANVAS coordinates: the same space \
+                get_strokes' points, list_strokes' bbox and render_sketch are quoted \
+                in. Scale and rotate act about anchor, which defaults to the \
                 centre of the keys' union bounding box. With snapToGrid, the whole SET \
                 is shifted rigidly (never additionally scaled or rotated) so the anchor \
                 lands on the lattice of the document's ENABLED grids — including \
@@ -866,8 +891,13 @@ public actor MCPAdapter {
                 necessarily gets thicker when restyled to marker; get_strokes reports \
                 the actual resulting peak. An ink-only restyle (no width) preserves the \
                 stroke's apparent thickness. A colour-only restyle changes nothing \
-                else. Note: monoline persists as pen — PencilKit's archive format does \
-                not preserve it. \(casRejectionSentence)
+                else. One user-visible cost, worth knowing before you restyle a stroke \
+                the user has never width-edited: the app can afterwards restore that \
+                stroke's original width only APPROXIMATELY, because the tool-slider \
+                value the user drew with is not recorded anywhere and cannot be \
+                recovered from the stroke (a colour-only restyle, and any stroke the \
+                user HAS width-edited, are unaffected). Note: monoline persists as pen \
+                — PencilKit's archive format does not preserve it. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -908,10 +938,16 @@ public actor MCPAdapter {
             name: "reshape_strokes",
             description: """
                 Replaces strokes' geometry in place, keeping their identity (key), \
-                ink, z-order and width-edit history. Attributes you OMIT on a point \
-                are resampled from the ORIGINAL stroke along the new path — so \
-                straightening a wobbly line with plain [x, y] pairs keeps its pressure \
-                taper. Supply attributes explicitly to override that. \(casRejectionSentence)
+                ink, z-order and width-edit history. Points are CANVAS coordinates — \
+                the same space get_strokes returns and render_sketch shows — so you \
+                straighten a stroke by naming the canvas coordinates you can SEE, and \
+                it lands exactly there: the stroke's transform is preserved and \
+                accounted for on your behalf (never re-applied on top of your points). \
+                Handing back the exact points get_strokes gave you changes nothing. \
+                Attributes you OMIT on a point are resampled from the ORIGINAL stroke \
+                along the new path — so straightening a wobbly line with plain [x, y] \
+                pairs keeps its pressure taper. Supply attributes explicitly to \
+                override that. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
