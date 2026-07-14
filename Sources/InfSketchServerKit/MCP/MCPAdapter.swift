@@ -858,8 +858,9 @@ public actor MCPAdapter {
             name: "restyle_strokes",
             description: """
                 Changes strokes' colour, width and/or ink in place; identity and \
-                geometry survive. width is the TARGET PEAK stroke width — the same \
-                quantity get_strokes/list_strokes report, not a tool-slider value — \
+                geometry survive. At least one of color, width, or inkType must be \
+                supplied — omitting all three is rejected. width is the TARGET PEAK \
+                stroke width — the same quantity get_strokes/list_strokes report, not a tool-slider value — \
                 and is CLAMPED to what the target ink can express (pen tops out around \
                 peak 6; marker cannot render below roughly 7.5), so a thin pen stroke \
                 necessarily gets thicker when restyled to marker; get_strokes reports \
@@ -1368,8 +1369,16 @@ public actor MCPAdapter {
                 "op": .string("get"),
                 "keys": .array(keys.map(Value.string)),
             ]
-            if let maxPoints = arguments?["maxPoints"]?.intValue {
-                envelope["maxPoints"] = .int(maxPoints)
+            // Relayed VERBATIM, like every other optional argument in this
+            // file (transform/restyle's field loops, render_sketch's
+            // renderSpecParameterNames) — NOT filtered through `.intValue`,
+            // which returns nil for a `.double` (or a string) and would
+            // silently DROP a non-integer maxPoints instead of letting the
+            // app's `GetSpec.maxPoints: Int?` decode fail LOUDLY
+            // (invalidSpec) on a bad type. Review fix; pinned by
+            // getStrokesRelaysMaxPointsVerbatimWhenNotAnIntToken.
+            if let value = arguments?["maxPoints"] {
+                envelope["maxPoints"] = value
             }
 
             let spec: Data

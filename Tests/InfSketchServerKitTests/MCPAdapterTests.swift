@@ -2028,6 +2028,41 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Review fix (silent-drop finding): `maxPoints` used to be read via
+    /// `Value.intValue`, which returns nil for a `.double` — an agent
+    /// sending a non-integer number (or a string) had the key SILENTLY
+    /// OMITTED from the envelope, vanishing its self-imposed budget guard
+    /// with no error. Every other optional argument in these tools
+    /// (transform/restyle's fields, render_sketch's maxPixels) is relayed
+    /// VERBATIM regardless of its JSON shape — a bad type is the APP's
+    /// decode to reject loudly (`GetSpec.maxPoints: Int?` failing with
+    /// invalidSpec), not this server's to swallow. `500.5` (not a whole
+    /// number) is used deliberately: unlike a whole-number double, it
+    /// cannot re-encode as a bare Int token on the wire, so it survives the
+    /// real HTTP JSON round-trip as a genuine `.double` and exercises the
+    /// exact case `.intValue` used to drop.
+    @Test func getStrokesRelaysMaxPointsVerbatimWhenNotAnIntToken() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "get_strokes",
+            arguments: ["docId": "d", "keys": .array([.string("k1")]), "maxPoints": .double(500.5)])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        // Present — reached the envelope — not silently dropped.
+        #expect(Set(envelope.keys) == ["op", "keys", "maxPoints"])
+        #expect(envelope["maxPoints"] as? Double == 500.5)
+
+        await server.stop()
+    }
+
     @Test func transformStrokesSendsSpecAndWritesReturnedBytes() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -2292,12 +2327,21 @@ private actor FakeStrokeOpDevice {
 
     /// unknownDoc must short-circuit BEFORE any device round trip for all
     /// four tools — mirroring every other tool's unknownDoc path (e.g.
-    /// renderSketchUnknownDocReturnsToolError). No fake device connects.
+    /// renderSketchUnknownDocReturnsToolError). Review fix (test-strength
+    /// finding): a device IS connected here (unlike the earlier version of
+    /// this test, which connected none) so the ordering claim is proven by a
+    /// REQUEST-COUNT assertion, not just the error STRING — a future
+    /// reordering that queried a connected device before the unknownDoc
+    /// guard would still produce the "unknownDoc" text (if the device's
+    /// reply were, say, ignored) but WOULD show up as a non-zero
+    /// `receivedRequests` count.
     @Test func strokeEditingToolsUnknownDocAreRejectedWithoutADeviceRoundTrip() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
 
         let calls: [(String, [String: Value])] = [
             ("get_strokes", ["docId": "ghost", "keys": .array([.string("1-2")])]),
@@ -2315,6 +2359,9 @@ private actor FakeStrokeOpDevice {
             #expect(isError == true, "\(name)")
             #expect(toolResultText(content) == "unknownDoc", "\(name)")
         }
+
+        // The ordering proof: a CONNECTED device that received ZERO requests.
+        #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
     }
