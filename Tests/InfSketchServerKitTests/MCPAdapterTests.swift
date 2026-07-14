@@ -1491,6 +1491,43 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// THE SILENT-FAILURE PIN for `smooth` (drawing-ergonomics spec,
+    /// 2026-07-14): it's a NEW envelope key, and the app decodes with a
+    /// plain `Decodable` that DROPS unknown keys silently — if this server
+    /// ever stopped relaying it, or relayed it under a drifted name, nothing
+    /// would fail; every agent would just keep getting rounded teardrops
+    /// forever (see drawStrokesSpecEnvelopeMatchesCanonicalShape above for
+    /// the same risk on the pre-existing fields). draw_strokes defaults
+    /// `smooth` to false (polyline) — this only pins that an explicit
+    /// `true` relays through untouched, key name and value both.
+    @Test func drawStrokesRelaysTheSmoothFlag() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "points": .array([.array([.double(0), .double(0)]), .array([.double(10), .double(10)])]),
+                "smooth": .bool(true),
+            ])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let strokes = try #require(envelope["strokes"] as? [[String: Any]])
+        let stroke = try #require(strokes.first)
+        #expect(Set(stroke.keys) == ["points", "smooth"])
+        #expect(stroke["smooth"] as? Bool == true)
+
+        await server.stop()
+    }
+
     @Test func deleteStrokesUnknownKeyErrorPropagatesDeviceReason() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -2476,6 +2513,43 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// THE SILENT-FAILURE PIN for `smooth` on reshape_strokes
+    /// (drawing-ergonomics spec, 2026-07-14) — the twin of
+    /// drawStrokesRelaysTheSmoothFlag above. reshape_strokes defaults
+    /// `smooth` the OPPOSITE way (true — points used verbatim), so this
+    /// exercises an explicit `false` to prove the flag relays through
+    /// untouched, key name and value both, alongside the existing key/points
+    /// fields (mirrors strokeEditingSpecEnvelopesMatchTheCanonicalShape's
+    /// per-item key-set style).
+    @Test func reshapeStrokesRelaysTheSmoothFlag() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("{}".utf8)))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "key": .string("1-2"),
+                "points": .array([.array([.double(0), .double(0)]), .array([.double(10), .double(10)])]),
+                "smooth": .bool(false),
+            ])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "reshape_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let items = try #require(envelope["strokes"] as? [[String: Any]])
+        let item = try #require(items.first)
+        #expect(Set(item.keys) == ["key", "points", "smooth"])
+        #expect(item["smooth"] as? Bool == false)
+
+        await server.stop()
+    }
+
     /// Non-negotiable #4 (stroke-editing spec, 2026-07-14): draw_strokes,
     /// render_sketch's ephemeral strokes, and reshape_strokes must all
     /// advertise the IDENTICAL points-item schema — one shared `pointSchema`
@@ -2512,6 +2586,34 @@ private actor FakeStrokeOpDevice {
         #expect(arrayForm.objectValue?["maxItems"] == .int(2))
         let objectForm = try #require(alternatives.first { $0.objectValue?["type"] == .string("object") })
         #expect(objectForm.objectValue?["required"]?.arrayValue == [.string("x"), .string("y")])
+
+        await server.stop()
+    }
+
+    /// Every stroke-accepting tool must ADVERTISE `smooth` in its per-stroke
+    /// item schema (drawing-ergonomics spec, 2026-07-14) — draw_strokes and
+    /// render_sketch's ephemeral strokes get it from the shared
+    /// `strokeItemSchema` (see pointSchemaIsSharedAcrossDrawRenderAndReshapeTools
+    /// above for that sharing), reshape_strokes from its own item schema
+    /// (its default is the OPPOSITE of the other two, so it cannot reuse
+    /// theirs). Schema is the only place a calling agent learns a tool's
+    /// own default, so this is the one place a missing entry would be
+    /// caught before an agent ever hit it in practice.
+    @Test func everyStrokeAcceptingToolAdvertisesSmoothInItsSchema() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        for name in ["draw_strokes", "render_sketch", "reshape_strokes"] {
+            let tool = try #require(tools.first { $0.name == name })
+            var value = tool.inputSchema
+            for key in ["properties", "strokes", "items", "properties", "smooth"] {
+                value = try #require(value.objectValue?[key])
+            }
+            #expect(value.objectValue?["type"] == .string("boolean"))
+        }
 
         await server.stop()
     }
