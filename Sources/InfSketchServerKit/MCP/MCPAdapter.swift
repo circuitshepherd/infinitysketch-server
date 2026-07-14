@@ -497,7 +497,13 @@ public actor MCPAdapter {
                     (useful for a curve given as a few sparse points) — PKStrokePath \
                     splines THROUGH its control points, so a sparse polyline misread as \
                     knots renders as a rounded teardrop, not the shape you asked for. \
-                    Note reshape_strokes defaults the OTHER way.
+                    Note reshape_strokes defaults the OTHER way. A polyline too \
+                    corner-dense to fit the 4000-point canonical budget fails loudly — \
+                    send fewer points, or split the shape into several strokes. \
+                    smooth: true is NOT the escape from that: it skips the budget (the \
+                    verbatim path has no point cap of its own, only the message-size \
+                    limit) precisely BECAUSE it does no corner work at all, so every \
+                    sharp corner then comes out rounded.
                     """,
             ]),
         ]),
@@ -711,7 +717,7 @@ public actor MCPAdapter {
                 visible and enabled are independent, so a grid can be snapped to \
                 without being drawable, or drawn without being snapped to. To ZOOM IN, \
                 shrink the rect: the scale rises to fill the pixel budget, up to 16x. \
-                (A 60x50pt rect comes back around 800x640, not 120x100.) The scale \
+                (A 60x50pt rect comes back 960x800, not 120x100.) The scale \
                 actually used is always reported in the metadata. REQUIRES a \
                 connected device — fails with noDeviceAvailable if none is connected, \
                 deviceTimeout if it doesn't respond in time, and deviceFailed: <reason> \
@@ -747,8 +753,8 @@ public actor MCPAdapter {
                         "description": """
                             EPHEMERAL candidate strokes to render — the exact stroke \
                             shape draw_strokes takes. Synthesized through the same code \
-                            a commit would use, so the preview is byte-identical to \
-                            what draw_strokes would produce, but nothing here is ever \
+                            a commit would use, so the preview has the same geometry and \
+                            style draw_strokes would commit, but nothing here is ever \
                             written to the document.
                             """,
                         // Shared verbatim with draw_strokes's `strokes` schema — see the
@@ -1009,9 +1015,16 @@ public actor MCPAdapter {
                                     "description": """
                                         DEFAULT true here (the OPPOSITE of draw_strokes): the \
                                         points are used verbatim, because a reshape may be \
-                                        round-tripping a stroke a HUMAN drew and re-sampling \
-                                        would flatten it. Pass false to read them as a \
-                                        polyline with sharp corners.
+                                        round-tripping a stroke a HUMAN drew and \
+                                        canonicalizing it would sharpen turns they drew round \
+                                        (and break the exact get_strokes round-trip). Pass \
+                                        false to read them as a polyline with sharp corners — \
+                                        that path canonicalizes, and fails loudly if the \
+                                        polyline is too corner-dense for the 4000-point \
+                                        budget. Dropping back to the verbatim default is not \
+                                        an equivalent escape from that failure: verbatim has \
+                                        no point budget only because it does no corner work, \
+                                        so the corners render rounded.
                                         """,
                                 ]),
                             ]),
