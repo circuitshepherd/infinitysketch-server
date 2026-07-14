@@ -394,6 +394,51 @@ public actor MCPAdapter {
     private static let casRejectionSentence =
         "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
 
+    /// The canonical per-stroke item schema — points/width/color/inkType —
+    /// shared verbatim by `draw_strokes`'s `strokes` array and, since Task 5,
+    /// `render_sketch`'s EPHEMERAL `strokes` array: both decode app-side into
+    /// the same `StrokeAuthoring.StrokeSpec` shape (a draw commits it; a
+    /// render synthesizes it through the identical code and never writes
+    /// it). One schema, one place a drifted field name could be introduced,
+    /// pinned by drawStrokesSpecEnvelopeMatchesCanonicalShape AND
+    /// renderSketchSpecEnvelopeMatchesCanonicalShape.
+    private static let strokeItemSchema: Value = .object([
+        "type": "object",
+        "properties": .object([
+            "points": .object([
+                "type": "array",
+                "description": """
+                    The stroke's polyline as [x, y] canvas-coordinate \
+                    pairs; at least 2 points.
+                    """,
+                "items": .object([
+                    "type": "array",
+                    "items": .object(["type": "number"]),
+                    "minItems": 2,
+                    "maxItems": 2,
+                ]),
+            ]),
+            "width": .object([
+                "type": "number",
+                "description": "Stroke width. Defaults to 4.",
+            ]),
+            "color": .object([
+                "type": "string",
+                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. Defaults to #000000.",
+            ]),
+            "inkType": .object([
+                "type": "string",
+                "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                "description": """
+                    The ink to draw with. Defaults to pen. Note: monoline \
+                    persists as pen — PencilKit's archive format does not \
+                    preserve it, so a monoline stroke lists back as pen.
+                    """,
+            ]),
+        ]),
+        "required": .array(["points"].map(Value.string)),
+    ])
+
     private static let tools: [Tool] = [
         Tool(
             name: "add_text",
@@ -522,43 +567,9 @@ public actor MCPAdapter {
                         // names; a drifted name (e.g. "tool") would not error — the field
                         // would just fall back to its default. Pinned server-side by
                         // drawStrokesSpecEnvelopeMatchesCanonicalShape; change both repos
-                        // in lockstep or not at all.
-                        "items": .object([
-                            "type": "object",
-                            "properties": .object([
-                                "points": .object([
-                                    "type": "array",
-                                    "description": """
-                                        The stroke's polyline as [x, y] canvas-coordinate \
-                                        pairs; at least 2 points.
-                                        """,
-                                    "items": .object([
-                                        "type": "array",
-                                        "items": .object(["type": "number"]),
-                                        "minItems": 2,
-                                        "maxItems": 2,
-                                    ]),
-                                ]),
-                                "width": .object([
-                                    "type": "number",
-                                    "description": "Stroke width. Defaults to 4.",
-                                ]),
-                                "color": .object([
-                                    "type": "string",
-                                    "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. Defaults to #000000.",
-                                ]),
-                                "inkType": .object([
-                                    "type": "string",
-                                    "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
-                                    "description": """
-                                        The ink to draw with. Defaults to pen. Note: monoline \
-                                        persists as pen — PencilKit's archive format does not \
-                                        preserve it, so a monoline stroke lists back as pen.
-                                        """,
-                                ]),
-                            ]),
-                            "required": .array(["points"].map(Value.string)),
-                        ]),
+                        // in lockstep or not at all. Shared verbatim with render_sketch's
+                        // ephemeral `strokes` array via strokeItemSchema.
+                        "items": strokeItemSchema,
                     ]),
                 ]),
                 "required": .array(["docId", "strokes"].map(Value.string)),
@@ -609,6 +620,108 @@ public actor MCPAdapter {
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "render_sketch",
+            description: """
+                Renders a region of a document, specific strokes, and/or ephemeral \
+                candidate strokes that are not written to the document — use it to \
+                preview a stroke before committing it with draw_strokes, optionally \
+                composited over the document's real content to judge fit and alignment. \
+                Authored by a connected InfinitySketch device. Returns a PNG plus \
+                metadata: the covered rect, the scale actually used, the current \
+                appearance, the canvas contentSize, and per-grid line families for both \
+                drawing and snapping. Align new strokes to the lattices of enabled \
+                grids; only visible grids actually appear in the rendered image — \
+                visible and enabled are independent, so a grid can be snapped to \
+                without being drawable, or drawn without being snapped to. REQUIRES a \
+                connected device — fails with noDeviceAvailable if none is connected, \
+                deviceTimeout if it doesn't respond in time, and deviceFailed: <reason> \
+                for a bad spec (e.g. an unknown strokeKey, or nothing to render). \
+                Read-only: it never writes to the document, so there is no seq assigned \
+                and nothing to retry.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to render."]),
+                    "include": .object([
+                        "type": "string",
+                        "enum": .array(["document", "strokes", "none"].map(Value.string)),
+                        "description": """
+                            What document content to render, alongside any ephemeral \
+                            strokes below. "document" (default): every stroke, placed \
+                            image, and placed text. "strokes": only the strokes named \
+                            by strokeKeys — no images or texts. "none": nothing from \
+                            the document.
+                            """,
+                    ]),
+                    "strokeKeys": .object([
+                        "type": "array",
+                        "description": """
+                            With include: "strokes", the composite stroke keys (as \
+                            returned by list_strokes) to show.
+                            """,
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "strokes": .object([
+                        "type": "array",
+                        "description": """
+                            EPHEMERAL candidate strokes to render — the exact stroke \
+                            shape draw_strokes takes. Synthesized through the same code \
+                            a commit would use, so the preview is byte-identical to \
+                            what draw_strokes would produce, but nothing here is ever \
+                            written to the document.
+                            """,
+                        // Shared verbatim with draw_strokes's `strokes` schema — see the
+                        // comment on strokeItemSchema above.
+                        "items": strokeItemSchema,
+                    ]),
+                    "rect": .object([
+                        "type": "array",
+                        "description": """
+                            [x, y, w, h] in canvas coordinates. Omit for auto-fit: the \
+                            tight bounding box of everything rendered, expanded by padding.
+                            """,
+                        "items": .object(["type": "number"]),
+                        "minItems": 4,
+                        "maxItems": 4,
+                    ]),
+                    "padding": .object([
+                        "type": "number",
+                        "description": """
+                            Auto-fit margin in canvas points. Defaults to 10% of the \
+                            fitted box's larger side, minimum 20.
+                            """,
+                    ]),
+                    "background": .object([
+                        "type": "string",
+                        "enum": .array(["transparent", "paper", "paper+grid"].map(Value.string)),
+                        "description": """
+                            "transparent", "paper" (the document's background colour \
+                            for the current appearance), or "paper+grid" (default — \
+                            the grid is what agents align to).
+                            """,
+                    ]),
+                    "axes": .object([
+                        "type": "boolean",
+                        "description": """
+                            Overlay light tick marks and coordinate labels along the \
+                            edges. Defaults to false (a render meant for visual \
+                            judgement stays clean).
+                            """,
+                    ]),
+                    "maxPixels": .object([
+                        "type": "number",
+                        "description": """
+                            Pixel budget. Defaults to 1000000, hard ceiling 4000000. An \
+                            over-large request is downscaled, not rejected, and the \
+                            metadata reports the scale actually used.
+                            """,
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -625,6 +738,7 @@ public actor MCPAdapter {
         case "draw_strokes": return await callDrawStrokes(arguments)
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
+        case "render_sketch": return await callRenderSketch(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -828,7 +942,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -840,8 +954,9 @@ public actor MCPAdapter {
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device — never a fresh re-read here, which would re-open the
             // very window this guard exists to close (Task 2, write CAS).
+            // `.meta` is render-only (nil here) — draw/delete ignore it.
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "drew \(strokes.count) stroke(s) at seq \(seq)"
             }
@@ -869,7 +984,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -880,8 +995,9 @@ public actor MCPAdapter {
 
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device — never a fresh re-read here (Task 2, write CAS).
+            // `.meta` is render-only (nil here) — delete ignores it.
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "deleted \(keys.count) stroke(s) at seq \(seq)"
             }
@@ -910,7 +1026,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
-            let out: Data
+            let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
@@ -919,8 +1035,9 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
+            // `.meta` is render-only (nil here) — list ignores it.
             return CallTool.Result(content: [
-                .text(text: String(data: out, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
             ])
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -929,11 +1046,82 @@ public actor MCPAdapter {
         }
     }
 
+    /// Task 5 (agent render/preview). Like the three stroke-op tools above,
+    /// this composes a minimal op-spec envelope and relays it (plus the
+    /// document's current bytes) through `broker.requestStrokeOp` — but
+    /// UNLIKE every other tool in this file, it is READ-ONLY: no
+    /// `submitAndRespond`, no `submitOpeningSession`, no `expectedBytes`. A
+    /// render never writes, so the write-CAS does not apply (Global
+    /// Constraints: "A test must prove the document is byte-identical
+    /// afterwards"). Every parameter beyond `docId` is OPTIONAL and is
+    /// relayed present-only — an argument the caller omitted is omitted from
+    /// the envelope too, never sent as an explicit null (see
+    /// renderSketchWithOnlyDocIdOmitsEveryOptionalField); deep validation
+    /// (stroke shape, unknown strokeKeys, degenerate rect, pixel budget) is
+    /// the device's job, surfaced verbatim as `deviceFailed: <reason>`.
+    private func callRenderSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var specFields: [String: Value] = ["op": .string("render")]
+            for key in Self.renderSpecParameterNames {
+                if let value = arguments?[key] {
+                    specFields[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(specFields))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // `out.meta` is the device's RenderMetadata JSON — present on
+            // every genuine render reply. A missing/undecodable one degrades
+            // to an empty text block rather than throwing, so a malformed
+            // device reply still surfaces the image content.
+            let metadataText = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            return CallTool.Result(content: [
+                .image(data: out.bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+                .text(text: metadataText, annotations: nil, _meta: nil),
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The Global-Constraints parameter names `render_sketch` relays
+    /// verbatim into the op-spec envelope alongside `"op": "render"` — every
+    /// one of them optional; see `callRenderSketch`.
+    private static let renderSpecParameterNames = [
+        "include", "strokeKeys", "strokes", "rect", "padding", "background", "axes", "maxPixels",
+    ]
+
     /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
-    /// tool-error string for all three stroke-op tools. UNLIKE `create_doc`
-    /// (whose `.requestInFlight` publishes the pinned "creationInProgress"
-    /// string — see `callCreateDoc` above), stroke ops publish "opInProgress"
-    /// per the Task 4 spec's error-string mapping.
+    /// tool-error string for all four device-relayed stroke-op tools
+    /// (draw/delete/list_strokes, and — since Task 5 — render_sketch). UNLIKE
+    /// `create_doc` (whose `.requestInFlight` publishes the pinned
+    /// "creationInProgress" string — see `callCreateDoc` above), these
+    /// publish "opInProgress" per the Task 4 spec's error-string mapping;
+    /// `render_sketch` shares the same per-docId in-flight guard (the
+    /// broker's `docIdsInFlight` is keyed by docId alone, not by op kind), so
+    /// a render can also collide with a draw/delete in flight on the same doc.
     private static func strokeOpErrorResult(_ error: DeviceCommandBroker.DeviceCommandError) -> CallTool.Result {
         switch error {
         case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")

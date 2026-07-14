@@ -29,6 +29,19 @@ public actor DeviceCommandBroker {
         case deviceFailed(String)
     }
 
+    /// `requestStrokeOp`'s result: the reply's bytes (doc bytes for
+    /// draw/delete, listing JSON for list, a PNG for render) plus an optional
+    /// metadata JSON (render only — nil for every other op kind).
+    public struct StrokeOpReply: Equatable, Sendable {
+        public let bytes: Data
+        public let meta: Data?
+
+        public init(bytes: Data, meta: Data?) {
+            self.bytes = bytes
+            self.meta = meta
+        }
+    }
+
     /// A connection registered by `WSAdapter` at hello, tagged with the
     /// capability set it advertised. A connection is only ever selected for
     /// a request kind whose required capability it advertised.
@@ -41,7 +54,7 @@ public actor DeviceCommandBroker {
     private struct PendingRequest {
         let docId: String
         let connectionId: UUID
-        let continuation: CheckedContinuation<Data, Error>
+        let continuation: CheckedContinuation<StrokeOpReply, Error>
         var timeoutTask: Task<Void, Never>?
     }
 
@@ -89,11 +102,13 @@ public actor DeviceCommandBroker {
         try await performRequest(docId: docId, capability: "createDoc", timeout: createTimeout) {
             connection, requestId in
             connection.send(.createDocRequest(requestId: requestId, docId: docId))
-        }
+        }.bytes
     }
 
     /// Agent stroke-authoring entry point (Task 4). Throws DeviceCommandError.
-    public func requestStrokeOp(docId: String, docBytes: Data, spec: Data) async throws -> Data {
+    /// The reply's `meta` is non-nil only for a `render` op spec; every other
+    /// op kind (draw/delete/list) always resolves with `meta == nil`.
+    public func requestStrokeOp(docId: String, docBytes: Data, spec: Data) async throws -> StrokeOpReply {
         try await performRequest(docId: docId, capability: "authorStrokes", timeout: strokeOpTimeout) {
             connection, requestId in
             connection.send(
@@ -103,7 +118,9 @@ public actor DeviceCommandBroker {
 
     /// WSAdapter routes createDocReply/strokeOpReply here — kind-agnostic,
     /// resolved purely by requestId. Unknown/expired requestId → log + drop.
-    public func handleReply(requestId: UInt32, bytes: Data?, failureReason: String?) {
+    /// `meta` is only ever non-nil for a strokeOpReply answering a render op;
+    /// createDocReply routing always passes the default `nil`.
+    public func handleReply(requestId: UInt32, bytes: Data?, meta: Data? = nil, failureReason: String?) {
         guard let entry = completePending(requestId) else {
             print("[DeviceCommandBroker] dropping reply for unknown/expired requestId \(requestId)")
             return
@@ -111,7 +128,7 @@ public actor DeviceCommandBroker {
         if let failureReason {
             entry.continuation.resume(throwing: DeviceCommandError.deviceFailed(failureReason))
         } else {
-            entry.continuation.resume(returning: bytes ?? Data())
+            entry.continuation.resume(returning: StrokeOpReply(bytes: bytes ?? Data(), meta: meta))
         }
     }
 
@@ -125,7 +142,7 @@ public actor DeviceCommandBroker {
     private func performRequest(
         docId: String, capability: String, timeout: Duration,
         send: @escaping (Connection, UInt32) -> Void
-    ) async throws -> Data {
+    ) async throws -> StrokeOpReply {
         guard let connection = connections.last(where: { $0.capabilities.contains(capability) }) else {
             throw DeviceCommandError.noDeviceAvailable
         }

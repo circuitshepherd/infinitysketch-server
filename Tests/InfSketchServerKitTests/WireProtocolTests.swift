@@ -226,16 +226,53 @@ import InfSketchWire
 
     @Test func strokeOpReplySuccessRoundTrips() throws {
         let msg = ClientMessage.strokeOpReply(
-            requestId: 5, docId: "D", payload: .inline(Data("out".utf8)), failureReason: nil)
+            requestId: 5, docId: "D", payload: .inline(Data("out".utf8)), meta: nil, failureReason: nil)
         let data = try JSONEncoder().encode(msg)
         #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
     }
 
     @Test func strokeOpReplyFailureRoundTrips() throws {
         let msg = ClientMessage.strokeOpReply(
-            requestId: 7, docId: "D", payload: nil, failureReason: "strokeNotFound: [k1]")
+            requestId: 7, docId: "D", payload: nil, meta: nil, failureReason: "strokeNotFound: [k1]")
         let data = try JSONEncoder().encode(msg)
         #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    /// Task 4 (render op): `meta` (the render's metadata JSON) rides inline
+    /// alongside an inline PNG `payload` — additive field, so a reply that
+    /// carries it must still round-trip byte-for-byte.
+    @Test func strokeOpReplyWithMetaInlineRoundTrips() throws {
+        let msg = ClientMessage.strokeOpReply(
+            requestId: 5, docId: "D", payload: .inline(Data("png-bytes".utf8)),
+            meta: Data(#"{"pixelSize":[512,512],"scale":2}"#.utf8), failureReason: nil)
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    /// Same as above, but with the PNG payload in its `.transfer` (chunked)
+    /// form — the transfer-descriptor announce frame is where a dropped
+    /// `meta` would most easily hide, since `meta` itself is never chunked.
+    @Test func strokeOpReplyWithMetaTransferFormRoundTrips() throws {
+        let msg = ClientMessage.strokeOpReply(
+            requestId: 9, docId: "D",
+            payload: .transfer(TransferDescriptor(transferId: 3, totalBytes: 1_000_000, chunkSize: 65536)),
+            meta: Data(#"{"pixelSize":[2048,2048],"scale":2}"#.utf8), failureReason: nil)
+        let data = try JSONEncoder().encode(msg)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: data) == msg)
+    }
+
+    @Test func strokeOpReplyChunksThroughSenderAndReassemblerWithMetaIntact() throws {
+        let bytes = Data((0..<100).map { UInt8($0 % 256) })
+        var sender = TransferSender<ClientMessage>(inlineLimit: 16, chunkSize: 8)
+        var reassembler = TransferReassembler<ClientMessage>()
+        var results: [ClientMessage] = []
+        let original = ClientMessage.strokeOpReply(
+            requestId: 9, docId: "D", payload: .inline(bytes),
+            meta: Data(#"{"scale":1}"#.utf8), failureReason: nil)
+        for frame in try sender.frames(for: original) {
+            if let m = try reassembler.consume(frame) { results.append(m) }
+        }
+        #expect(results == [original])
     }
 
     @Test func strokeOpMessagesParticipateInTransferCarrying() throws {
@@ -250,8 +287,11 @@ import InfSketchWire
         #expect(swapped.openingDescriptor == descriptor)
         #expect(swapped.resolvingBulk(with: bigDoc) == request)
 
+        // meta must survive the transfer round trip untouched — a dropped
+        // meta on a chunked reply would silently lose the render metadata.
+        let meta = Data(#"{"pixelSize":[512,512]}"#.utf8)
         let reply = ClientMessage.strokeOpReply(
-            requestId: 1, docId: "D", payload: .inline(bigDoc), failureReason: nil)
+            requestId: 1, docId: "D", payload: .inline(bigDoc), meta: meta, failureReason: nil)
         #expect(reply.bulkBytes == bigDoc)
         let swappedReply = reply.replacingBulk(with: descriptor)
         #expect(swappedReply.openingDescriptor == descriptor)

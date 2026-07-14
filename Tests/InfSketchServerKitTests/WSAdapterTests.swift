@@ -592,7 +592,8 @@ private struct ServerMessageReader {
         #expect(sentBytes == docBytes)
         #expect(sentSpec == spec)
         await broker.handleReply(requestId: requestId, bytes: Data("done".utf8), failureReason: nil)
-        #expect(try await task.value == Data("done".utf8))
+        #expect(try await task.value.bytes == Data("done".utf8))
+        #expect(try await task.value.meta == nil)
 
         // This connection only ever advertised authorStrokes: a createDoc
         // request must find no capable device (the broker's own per-request
@@ -617,14 +618,38 @@ private struct ServerMessageReader {
         // this to broker.handleReply, resolving the pending requestStrokeOp.
         try harness.send(.strokeOpReply(
             requestId: requestId, docId: "d",
-            payload: .inline(Data("bytes".utf8)), failureReason: nil))
-        #expect(try await task.value == Data("bytes".utf8))
+            payload: .inline(Data("bytes".utf8)), meta: nil, failureReason: nil))
+        #expect(try await task.value.bytes == Data("bytes".utf8))
+        #expect(try await task.value.meta == nil)
+    }
+
+    /// Task 4 (render op): a reply carrying `meta` (the render's metadata
+    /// JSON) must resolve the pending `requestStrokeOp` with BOTH the PNG
+    /// bytes and the metadata — draw/delete/list replies (no `meta` on the
+    /// wire) above/below still resolve with `meta == nil`, unaffected.
+    @Test func strokeOpReplyWithMetaResolvesBothBytesAndMeta() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        let metaJSON = Data(#"{"pixelSize":[512,512],"scale":2}"#.utf8)
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "d",
+            payload: .inline(Data("png-bytes".utf8)), meta: metaJSON, failureReason: nil))
+        #expect(try await task.value.bytes == Data("png-bytes".utf8))
+        #expect(try await task.value.meta == metaJSON)
     }
 
     @Test func replyBeforeHelloIsRejected() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
-        try harness.send(.strokeOpReply(requestId: 1, docId: "d", payload: nil, failureReason: "x"))
+        try harness.send(.strokeOpReply(requestId: 1, docId: "d", payload: nil, meta: nil, failureReason: "x"))
         #expect(try await reader.next() == .error(reason: "helloRequired"))
     }
 
@@ -645,7 +670,7 @@ private struct ServerMessageReader {
         guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
-        try harness.send(.strokeOpReply(requestId: requestId, docId: "d", payload: nil, failureReason: nil))
+        try harness.send(.strokeOpReply(requestId: requestId, docId: "d", payload: nil, meta: nil, failureReason: nil))
         await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("unspecified")) {
             _ = try await task.value
         }
@@ -667,8 +692,8 @@ private struct ServerMessageReader {
         }
         try harness.send(.strokeOpReply(
             requestId: requestId, docId: "d",
-            payload: .inline(Data("bytes".utf8)), failureReason: "ignored-because-payload-wins"))
-        #expect(try await task.value == Data("bytes".utf8))
+            payload: .inline(Data("bytes".utf8)), meta: nil, failureReason: "ignored-because-payload-wins"))
+        #expect(try await task.value.bytes == Data("bytes".utf8))
     }
 
     /// Disconnect must fail a pending stroke op FAST (via

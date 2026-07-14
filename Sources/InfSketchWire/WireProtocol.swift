@@ -99,12 +99,16 @@ public enum ClientMessage: Equatable, Sendable {
     case unwatchDoc(docId: String)
     case frame(docId: String, payload: BulkPayload)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
-    case strokeOpReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
+    /// `meta` (additive) rides small JSON inline — never chunked — alongside
+    /// the (possibly chunked) PNG `payload`; see the `render` op (Task 4).
+    /// Base64-ing the PNG into a JSON envelope instead would inflate it ~33%
+    /// over the wire for no benefit, so the two travel as separate fields.
+    case strokeOpReply(requestId: UInt32, docId: String, payload: BulkPayload?, meta: Data?, failureReason: String?)
 }
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason
+        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta
     }
 
     public init(from decoder: any Decoder) throws {
@@ -177,6 +181,7 @@ extension ClientMessage: Codable {
                 requestId: try c.decode(UInt32.self, forKey: .requestId),
                 docId: try c.decode(String.self, forKey: .docId),
                 payload: payload,
+                meta: try c.decodeIfPresent(Data.self, forKey: .meta),
                 failureReason: try c.decodeIfPresent(String.self, forKey: .failureReason))
         case let other:
             throw DecodingError.dataCorruptedError(
@@ -240,7 +245,7 @@ extension ClientMessage: Codable {
             case nil: break
             }
             try c.encodeIfPresent(failureReason, forKey: .failureReason)
-        case .strokeOpReply(let requestId, let docId, let payload, let failureReason):
+        case .strokeOpReply(let requestId, let docId, let payload, let meta, let failureReason):
             try c.encode("strokeOpReply", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
@@ -249,6 +254,7 @@ extension ClientMessage: Codable {
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             case nil: break
             }
+            try c.encodeIfPresent(meta, forKey: .meta)
             try c.encodeIfPresent(failureReason, forKey: .failureReason)
         }
     }
@@ -447,7 +453,7 @@ extension ClientMessage: TransferCarrying {
         case .op(_, _, let payload): return payload.bulk.inlineData
         case .frame(_, let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
-        case .strokeOpReply(_, _, let payload, _): return payload?.inlineData
+        case .strokeOpReply(_, _, let payload, _, _): return payload?.inlineData
         default: return nil
         }
     }
@@ -461,9 +467,12 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .transfer(descriptor), failureReason: failureReason)
-        case .strokeOpReply(let requestId, let docId, _, let failureReason):
+        case .strokeOpReply(let requestId, let docId, _, let meta, let failureReason):
+            // meta is PRESERVED through this swap, exactly like failureReason
+            // — a dropped meta here would silently lose the render metadata
+            // for any reply large enough to chunk.
             return .strokeOpReply(requestId: requestId, docId: docId,
-                                   payload: .transfer(descriptor), failureReason: failureReason)
+                                   payload: .transfer(descriptor), meta: meta, failureReason: failureReason)
         default:
             return self
         }
@@ -478,7 +487,7 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(_, _, let payload, _):
             if case .transfer(let d) = payload { return d }
             return nil
-        case .strokeOpReply(_, _, let payload, _):
+        case .strokeOpReply(_, _, let payload, _, _):
             if case .transfer(let d) = payload { return d }
             return nil
         default: return nil
@@ -493,9 +502,10 @@ extension ClientMessage: TransferCarrying {
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .inline(bytes), failureReason: failureReason)
-        case .strokeOpReply(let requestId, let docId, _, let failureReason):
+        case .strokeOpReply(let requestId, let docId, _, let meta, let failureReason):
+            // meta is PRESERVED through this swap too — see replacingBulk above.
             return .strokeOpReply(requestId: requestId, docId: docId,
-                                   payload: .inline(bytes), failureReason: failureReason)
+                                   payload: .inline(bytes), meta: meta, failureReason: failureReason)
         default:
             return self
         }

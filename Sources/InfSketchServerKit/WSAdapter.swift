@@ -221,7 +221,7 @@ actor Connection {
             }
             await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
 
-        case .strokeOpReply(let requestId, _, let payload, let failureReason):
+        case .strokeOpReply(let requestId, _, let payload, let meta, let failureReason):
             // Same precedence as createDocReply above (kept in exact lockstep
             // on purpose — one broker, one reply-routing contract): an inline
             // payload always wins as a success (even alongside a
@@ -229,10 +229,12 @@ actor Connection {
             // a failureReason rather than ever calling handleReply(bytes:
             // nil, failureReason: nil) — the broker defaults THAT combination
             // to a success with empty Data, which must stay unreachable here.
+            // `meta` (render-op metadata JSON) rides along on the success
+            // path regardless of which precedence branch resolves it.
             guard case .inline(let bytes)? = payload else {
                 if payload == nil {
                     await broker.handleReply(
-                        requestId: requestId, bytes: nil, failureReason: failureReason ?? "unspecified")
+                        requestId: requestId, bytes: nil, meta: meta, failureReason: failureReason ?? "unspecified")
                 } else {
                     // Unreachable in practice: the reassembler resolves
                     // .transfer payloads to .inline before dispatch ever sees
@@ -241,7 +243,7 @@ actor Connection {
                 }
                 return
             }
-            await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
+            await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta, failureReason: nil)
         }
     }
 
