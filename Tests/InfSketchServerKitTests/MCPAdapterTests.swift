@@ -683,10 +683,10 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - Tools (Task 7)
 
-    // Renamed from `listToolsContainsAllEightWriteTools` (Task 5, render_sketch):
-    // a ninth tool joined the surface — read-only, unlike the other eight, so
-    // "WriteTools" was no longer accurate either.
-    @Test func listToolsContainsAllNineTools() async throws {
+    // Renamed from `listToolsContainsAllNineTools` (stroke-editing spec,
+    // 2026-07-14): four more tools joined the surface —
+    // get/transform/restyle/reshape_strokes.
+    @Test func listToolsContainsAllThirteenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -697,6 +697,7 @@ private actor FakeStrokeOpDevice {
         #expect(names == [
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
+            "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1198,10 +1199,14 @@ private actor FakeStrokeOpDevice {
     }
 
     /// Task 2 (write CAS): pins the verbatim rejection sentence onto exactly
-    /// the six CAS-guarded write tools, and its absence from `create_doc` /
+    /// the CAS-guarded write tools, and its absence from `create_doc` /
     /// `list_strokes` (which are unaffected — see createDocIsUnaffected and
-    /// listStrokesReturnsFakeListingVerbatimWithNoWrite) and, since Task 5,
-    /// `render_sketch` (read-only — no write at all, so the CAS does not apply).
+    /// listStrokesReturnsFakeListingVerbatimWithNoWrite), `render_sketch`
+    /// (read-only — no write at all, so the CAS does not apply), and, since
+    /// the stroke-editing spec (2026-07-14), `get_strokes` (also read-only).
+    /// transform/restyle/reshape_strokes join the guarded side — they relay
+    /// through the same `submitAndRespond(expectedBytes: docBytes)` tail as
+    /// draw/delete_strokes.
     @Test func toolDescriptionsCarryTheCASRejectionSentenceOnlyWhereGuarded() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -1210,11 +1215,14 @@ private actor FakeStrokeOpDevice {
 
         let (tools, _) = try await client.listTools()
         let sentence = "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
-        for name in ["add_text", "edit_text", "remove_text", "replace_doc", "draw_strokes", "delete_strokes"] {
+        for name in [
+            "add_text", "edit_text", "remove_text", "replace_doc", "draw_strokes", "delete_strokes",
+            "transform_strokes", "restyle_strokes", "reshape_strokes",
+        ] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
         }
-        for name in ["create_doc", "list_strokes", "render_sketch"] {
+        for name in ["create_doc", "list_strokes", "render_sketch", "get_strokes"] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) != true, "\(name) should not carry the CAS sentence")
         }
@@ -1933,6 +1941,577 @@ private actor FakeStrokeOpDevice {
         #expect(description.contains("visible"))
         #expect(description.contains("enabled"))
         #expect(description.contains("connected device"))
+
+        await server.stop()
+    }
+
+    // MARK: - Stroke-editing tools (spec 2026-07-14):
+    // get/transform/restyle/reshape_strokes
+    //
+    // These four mirror the Task 4 stroke-op tools exactly: a minimal op-spec
+    // envelope (`{"op": "get"|"transform"|"restyle"|"reshape", …}`) relayed
+    // via `broker.requestStrokeOp` alongside the document's current bytes.
+    // `get_strokes` never writes (like `list_strokes`); the other three
+    // write back through the same `submitAndRespond(expectedBytes: docBytes)`
+    // CAS tail as draw/delete_strokes — `docBytes` is the EXACT bytes relayed
+    // to the device, never a fresh re-read (Task 2, write CAS).
+
+    /// A minimal reshape-spec `strokes` argument using the CANONICAL field
+    /// names (key/points) — see strokeEditingSpecEnvelopesMatchTheCanonicalShape.
+    private static let minimalReshapeStrokes: Value = .array([
+        .object([
+            "key": .string("seed123:1.0"),
+            "points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+        ])
+    ])
+
+    @Test func getStrokesReturnsDeviceListingVerbatimAndNeverWrites() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // Establish a known live seq first (as renderSketchIsReadOnlySeqUnchanged
+        // does) so "unchanged" below is a meaningful assertion, not a vacuous
+        // -1 == -1.
+        let (addContent, addIsError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "hi", "x": 1, "y": 2])
+        #expect(addIsError != true)
+        #expect(toolResultText(addContent).contains("seq 1"))
+        let seqBefore = await server.manager.liveInfo()["d"]?.seq
+        #expect(seqBefore == 1)
+        let rawBefore = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlobBefore = try #require(rawBefore[0].blob)
+
+        let listingJSON = Data(#"[{"key":"seed123:1.0","points":[]}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listingJSON))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "get_strokes",
+            arguments: ["docId": "d", "keys": .array([.string("seed123:1.0")])])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        // READ-ONLY: no session-affecting write — the same invariant
+        // render_sketch has (renderSketchIsReadOnlySeqUnchanged).
+        #expect(await server.manager.liveInfo()["d"]?.seq == seqBefore)
+        let rawAfter = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlobAfter = try #require(rawAfter[0].blob)
+        #expect(rawBlobAfter == rawBlobBefore)
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "get")
+
+        await server.stop()
+    }
+
+    @Test func getStrokesWithoutMaxPointsOmitsItFromEnvelope() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "get_strokes", arguments: ["docId": "d", "keys": .array([.string("k1")])])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "keys"])
+        #expect(envelope["op"] as? String == "get")
+
+        await server.stop()
+    }
+
+    /// Review fix (silent-drop finding): `maxPoints` used to be read via
+    /// `Value.intValue`, which returns nil for a `.double` — an agent
+    /// sending a non-integer number (or a string) had the key SILENTLY
+    /// OMITTED from the envelope, vanishing its self-imposed budget guard
+    /// with no error. Every other optional argument in these tools
+    /// (transform/restyle's fields, render_sketch's maxPixels) is relayed
+    /// VERBATIM regardless of its JSON shape — a bad type is the APP's
+    /// decode to reject loudly (`GetSpec.maxPoints: Int?` failing with
+    /// invalidSpec), not this server's to swallow. `500.5` (not a whole
+    /// number) is used deliberately: unlike a whole-number double, it
+    /// cannot re-encode as a bare Int token on the wire, so it survives the
+    /// real HTTP JSON round-trip as a genuine `.double` and exercises the
+    /// exact case `.intValue` used to drop.
+    @Test func getStrokesRelaysMaxPointsVerbatimWhenNotAnIntToken() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "get_strokes",
+            arguments: ["docId": "d", "keys": .array([.string("k1")]), "maxPoints": .double(500.5)])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        // Present — reached the envelope — not silently dropped.
+        #expect(Set(envelope.keys) == ["op", "keys", "maxPoints"])
+        #expect(envelope["maxPoints"] as? Double == 500.5)
+
+        await server.stop()
+    }
+
+    @Test func transformStrokesSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let transformedBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["moved"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(transformedBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "transform_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("seed123:1.0")]),
+            "translate": .array([.double(10), .double(20)]),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "transformed 1 stroke(s) at seq 1")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "transform")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == transformedBytes)
+
+        await server.stop()
+    }
+
+    /// Task 2 (write CAS) pin for transform_strokes, mirroring
+    /// drawStrokesRejectsWhenTheDocumentChangedMidOp: the device is stalled
+    /// until AFTER a competing write lands, so its (stale-computed) reply
+    /// must be rejected rather than clobbering the competing write.
+    @Test func transformStrokesRejectsWhenTheDocumentChangedMidOp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let call = Task { try await client.callTool(name: "transform_strokes", arguments: [
+            "docId": "d", "keys": .array([.string("seed123:1.0")]), "rotate": .double(90),
+        ]) }
+
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes == Fixtures.docBytes)
+
+        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing-transform"}"#.utf8)
+        let competingOutcome = await server.manager.submit(
+            docId: "d", opId: "competing-writer",
+            payload: OpPayload(type: "fullDoc", data: competingBytes))
+        guard case .accepted = competingOutcome else {
+            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
+            return
+        }
+
+        let staleResultBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["moved-stale"]}"#.utf8)
+        try await device.sendReply(
+            requestId: received.requestId, docId: received.docId, bytes: staleResultBytes)
+
+        let (content, isError) = try await call.value
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    @Test func restyleStrokesSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let restyledBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["restyled"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(restyledBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "restyle_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("seed123:1.0")]),
+            "color": .string("#FF0000"),
+            "width": .double(8),
+            "inkType": .string("marker"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "restyled 1 stroke(s) at seq 1")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "restyle")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == restyledBytes)
+
+        await server.stop()
+    }
+
+    /// Task 2 (write CAS) pin for restyle_strokes — see the Task 2 review
+    /// note on transform's twin above: each write call site needs its OWN
+    /// pinning test, because flipping just one handler's `expectedBytes` to
+    /// nil left the rest of a similarly-shaped suite green before.
+    @Test func restyleStrokesRejectsWhenTheDocumentChangedMidOp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let call = Task { try await client.callTool(name: "restyle_strokes", arguments: [
+            "docId": "d", "keys": .array([.string("seed123:1.0")]), "width": .double(9),
+        ]) }
+
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes == Fixtures.docBytes)
+
+        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing-restyle"}"#.utf8)
+        let competingOutcome = await server.manager.submit(
+            docId: "d", opId: "competing-writer",
+            payload: OpPayload(type: "fullDoc", data: competingBytes))
+        guard case .accepted = competingOutcome else {
+            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
+            return
+        }
+
+        let staleResultBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["restyled-stale"]}"#.utf8)
+        try await device.sendReply(
+            requestId: received.requestId, docId: received.docId, bytes: staleResultBytes)
+
+        let (content, isError) = try await call.value
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    /// Also proves the shared point schema's rich-object form (with an
+    /// optional attribute the bare-pair form can't carry) survives the relay
+    /// verbatim, alongside a bare pair in the SAME strokes item.
+    @Test func reshapeStrokesSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reshapedBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["reshaped"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reshapedBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object([
+                "key": .string("seed123:1.0"),
+                "points": .array([
+                    .array([.double(0), .double(0)]),
+                    .object(["x": .double(10), "y": .double(20), "force": .double(0.5)]),
+                ]),
+            ])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "reshape_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "reshaped 1 stroke(s) at seq 1")
+
+        let received = try #require(await device.receivedRequests.first)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "reshape")
+        let strokes = try #require(specJSON["strokes"] as? [[String: Any]])
+        #expect(strokes.count == 1)
+        #expect(strokes[0]["key"] as? String == "seed123:1.0")
+        let points = try #require(strokes[0]["points"] as? [Any])
+        #expect(points.count == 2)
+        // The bare-pair form survives as a plain 2-element array…
+        #expect(points[0] as? [Double] == [0, 0])
+        // …and the rich-object form survives with its extra attribute intact.
+        let richPoint = try #require(points[1] as? [String: Any])
+        #expect(richPoint["x"] as? Double == 10)
+        #expect(richPoint["y"] as? Double == 20)
+        #expect(richPoint["force"] as? Double == 0.5)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == reshapedBytes)
+
+        await server.stop()
+    }
+
+    /// Task 2 (write CAS) pin for reshape_strokes — see the note on
+    /// restyle's twin above.
+    @Test func reshapeStrokesRejectsWhenTheDocumentChangedMidOp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let sub = try await server.manager.subscribe(docId: "d")
+        defer { Task { await server.manager.unsubscribe(docId: "d", token: sub.token) } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil)
+        defer { Task { await device.close() } }
+
+        let call = Task { try await client.callTool(
+            name: "reshape_strokes",
+            arguments: ["docId": "d", "strokes": Self.minimalReshapeStrokes]) }
+
+        var inFlight = false
+        for _ in 0..<100 {
+            if await device.receivedRequests.count == 1 { inFlight = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(inFlight)
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes == Fixtures.docBytes)
+
+        let competingBytes = Data(#"{"aaa001_thumbnailData":"","marker":"competing-reshape"}"#.utf8)
+        let competingOutcome = await server.manager.submit(
+            docId: "d", opId: "competing-writer",
+            payload: OpPayload(type: "fullDoc", data: competingBytes))
+        guard case .accepted = competingOutcome else {
+            Issue.record("expected the competing write to be accepted, got \(competingOutcome)")
+            return
+        }
+
+        let staleResultBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["reshaped-stale"]}"#.utf8)
+        try await device.sendReply(
+            requestId: received.requestId, docId: received.docId, bytes: staleResultBytes)
+
+        let (content, isError) = try await call.value
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docChangedDuringOp")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == competingBytes)
+
+        await server.stop()
+    }
+
+    /// unknownDoc must short-circuit BEFORE any device round trip for all
+    /// four tools — mirroring every other tool's unknownDoc path (e.g.
+    /// renderSketchUnknownDocReturnsToolError). Review fix (test-strength
+    /// finding): a device IS connected here (unlike the earlier version of
+    /// this test, which connected none) so the ordering claim is proven by a
+    /// REQUEST-COUNT assertion, not just the error STRING — a future
+    /// reordering that queried a connected device before the unknownDoc
+    /// guard would still produce the "unknownDoc" text (if the device's
+    /// reply were, say, ignored) but WOULD show up as a non-zero
+    /// `receivedRequests` count.
+    @Test func strokeEditingToolsUnknownDocAreRejectedWithoutADeviceRoundTrip() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
+
+        let calls: [(String, [String: Value])] = [
+            ("get_strokes", ["docId": "ghost", "keys": .array([.string("1-2")])]),
+            ("transform_strokes", [
+                "docId": "ghost", "keys": .array([.string("1-2")]),
+                "translate": .array([.double(1), .double(1)]),
+            ]),
+            ("restyle_strokes", [
+                "docId": "ghost", "keys": .array([.string("1-2")]), "width": .double(3),
+            ]),
+            ("reshape_strokes", ["docId": "ghost", "strokes": Self.minimalReshapeStrokes]),
+        ]
+        for (name, args) in calls {
+            let (content, isError) = try await client.callTool(name: name, arguments: args)
+            #expect(isError == true, "\(name)")
+            #expect(toolResultText(content) == "unknownDoc", "\(name)")
+        }
+
+        // The ordering proof: a CONNECTED device that received ZERO requests.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Device failures pass through VERBATIM as `deviceFailed: <reason>` for
+    /// all four tools — the shared `strokeOpErrorResult` mapping, exercised
+    /// here per call site rather than assumed from draw/delete's coverage.
+    @Test func strokeEditingToolsPropagateDeviceFailureVerbatim() async throws {
+        for name in ["get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes"] {
+            let (server, port, task) = try await startServer()  // seeds doc "d"
+            defer { task.cancel() }
+            let client = try await connectedClient(port: port)
+            defer { Task { await client.disconnect() } }
+            let device = try await FakeStrokeOpDevice(
+                port: port, autoReply: .failure("strokeNotFound: [ghost]"))
+            defer { Task { await device.close() } }
+
+            let args: [String: Value]
+            switch name {
+            case "get_strokes":
+                args = ["docId": "d", "keys": .array([.string("ghost")])]
+            case "transform_strokes":
+                args = [
+                    "docId": "d", "keys": .array([.string("ghost")]),
+                    "translate": .array([.double(1), .double(1)]),
+                ]
+            case "restyle_strokes":
+                args = ["docId": "d", "keys": .array([.string("ghost")]), "width": .double(9)]
+            default:
+                args = ["docId": "d", "strokes": Self.minimalReshapeStrokes]
+            }
+
+            let (content, isError) = try await client.callTool(name: name, arguments: args)
+            #expect(isError == true, "\(name)")
+            #expect(toolResultText(content) == "deviceFailed: strokeNotFound: [ghost]", "\(name)")
+
+            await server.stop()
+        }
+    }
+
+    /// THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN for the stroke-editing tools
+    /// (mirrors drawStrokesSpecEnvelopeMatchesCanonicalShape /
+    /// renderSketchSpecEnvelopeMatchesCanonicalShape): the app decodes these
+    /// EXACT key names via a plain `Decodable` that silently drops unknown
+    /// keys, so a field-name drift here would never fail loudly — the value
+    /// would just silently fall back to a default, forever. Pins every op
+    /// envelope's exact top-level key set (built with ONLY the fields the
+    /// caller actually supplied) plus reshape's per-item key set.
+    @Test func strokeEditingSpecEnvelopesMatchTheCanonicalShape() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("{}".utf8)))
+        defer { Task { await device.close() } }
+
+        _ = try await client.callTool(name: "transform_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("1-2")]),
+            "translate": .array([.double(1), .double(2)]),
+            "scale": .array([.double(2), .double(2)]),
+            "rotate": .double(45),
+            "anchor": .array([.double(0), .double(0)]),
+            "snapToGrid": .bool(true),
+        ])
+        var received = try #require(await device.receivedRequests.last)
+        var envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == [
+            "op", "keys", "translate", "scale", "rotate", "anchor", "snapToGrid",
+        ])
+        #expect(envelope["op"] as? String == "transform")
+
+        _ = try await client.callTool(name: "restyle_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("1-2")]),
+            "color": .string("#FF0000"),
+            "width": .double(8),
+            "inkType": .string("marker"),
+        ])
+        received = try #require(await device.receivedRequests.last)
+        envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "keys", "color", "width", "inkType"])
+        #expect(envelope["op"] as? String == "restyle")
+
+        _ = try await client.callTool(name: "reshape_strokes", arguments: [
+            "docId": "d",
+            "strokes": .array([.object([
+                "key": .string("1-2"),
+                "points": .array([
+                    .array([.double(0), .double(0)]),
+                    .object(["x": .double(1), "y": .double(2), "force": .double(0.5)]),
+                ]),
+            ])]),
+        ])
+        received = try #require(await device.receivedRequests.last)
+        envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "strokes"])
+        #expect(envelope["op"] as? String == "reshape")
+        let items = try #require(envelope["strokes"] as? [[String: Any]])
+        #expect(Set(items[0].keys) == ["key", "points"])  // the app decodes exactly these
+
+        _ = try await client.callTool(name: "get_strokes", arguments: [
+            "docId": "d",
+            "keys": .array([.string("1-2")]),
+            "maxPoints": .int(500),
+        ])
+        received = try #require(await device.receivedRequests.last)
+        envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "keys", "maxPoints"])
+        #expect(envelope["op"] as? String == "get")
+
+        await server.stop()
+    }
+
+    /// Non-negotiable #4 (stroke-editing spec, 2026-07-14): draw_strokes,
+    /// render_sketch's ephemeral strokes, and reshape_strokes must all
+    /// advertise the IDENTICAL points-item schema — one shared `pointSchema`
+    /// value, so drift between the three call sites is structurally
+    /// impossible. Also proves it accepts BOTH the bare-pair and rich-object
+    /// forms.
+    @Test func pointSchemaIsSharedAcrossDrawRenderAndReshapeTools() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        func pointsItemsSchema(forToolNamed name: String) throws -> Value {
+            let tool = try #require(tools.first { $0.name == name })
+            var value = tool.inputSchema
+            for key in ["properties", "strokes", "items", "properties", "points", "items"] {
+                value = try #require(value.objectValue?[key])
+            }
+            return value
+        }
+
+        let drawPoints = try pointsItemsSchema(forToolNamed: "draw_strokes")
+        let renderPoints = try pointsItemsSchema(forToolNamed: "render_sketch")
+        let reshapePoints = try pointsItemsSchema(forToolNamed: "reshape_strokes")
+
+        #expect(drawPoints == renderPoints)
+        #expect(drawPoints == reshapePoints)
+
+        let alternatives = try #require(drawPoints.objectValue?["oneOf"]?.arrayValue)
+        #expect(alternatives.count == 2)
+        let arrayForm = try #require(alternatives.first { $0.objectValue?["type"] == .string("array") })
+        #expect(arrayForm.objectValue?["minItems"] == .int(2))
+        #expect(arrayForm.objectValue?["maxItems"] == .int(2))
+        let objectForm = try #require(alternatives.first { $0.objectValue?["type"] == .string("object") })
+        #expect(objectForm.objectValue?["required"]?.arrayValue == [.string("x"), .string("y")])
 
         await server.stop()
     }
