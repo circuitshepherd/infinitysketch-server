@@ -942,20 +942,21 @@ public actor MCPAdapter {
                 changes. translate and anchor are CANVAS coordinates: the same space \
                 get_strokes' points, list_strokes' bbox and render_sketch are quoted \
                 in. Scale and rotate act about anchor, which defaults to the \
-                centre of the keys' union bounding box. With snapToGrid, the whole SET \
-                is shifted rigidly (never additionally scaled or rotated) so the anchor \
-                lands on a lattice point. WITHOUT snapTo, that lattice is the nearest \
-                line across ALL of the document's ENABLED grids — so the FINEST enabled \
-                grid wins, and that grid is usually INVISIBLE (see render_sketch's \
-                metadata for every grid's visible/enabled flags and lattice); this stays \
-                the default because it's the app's own pen behaviour, but it is easy to \
-                land a schematic between the lines a human can see. Use snap_points \
-                first to see what's actually near your anchor, then pass snapTo to name \
-                the grid (and optionally which of its line families — one family \
-                constrains a single direction, e.g. a wire's y while its x stays put) \
-                you actually mean; with no enabled grid (and no snapTo match), \
-                snapToGrid is a no-op. snapToGrid alone, with no translate/scale/ \
-                rotate, is a legal request. \(casRejectionSentence)
+                centre of the keys' union bounding box. TO SNAP, pass snapToGrid: true, \
+                or snapTo, or both — EITHER ONE alone means "snap" (naming a target IS \
+                asking to snap), and the whole SET is then shifted rigidly (never \
+                additionally scaled or rotated) so the anchor lands on a lattice point. \
+                WITHOUT snapTo, that lattice is the nearest line across ALL of the \
+                document's ENABLED grids — so the FINEST enabled grid wins, and that grid \
+                is usually INVISIBLE (see render_sketch's metadata for every grid's \
+                visible/enabled flags and lattice); this stays the default because it's \
+                the app's own pen behaviour, but it is easy to land a schematic between \
+                the lines a human can see. Use snap_points first to see what's actually \
+                near your anchor, then pass snapTo to name the grid (and optionally which \
+                of its line families — one family constrains a single direction, e.g. a \
+                wire's y while its x stays put) you actually mean; with no enabled grid \
+                (and no snapTo), snapToGrid is a no-op. A snap alone, with no translate/ \
+                scale/rotate, is a legal request. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -991,20 +992,24 @@ public actor MCPAdapter {
                     "snapToGrid": .object([
                         "type": "boolean",
                         "description": """
-                            Land the anchor on the nearest lattice point of the document's \
-                            ENABLED grids, shifting the whole set by that one delta. \
-                            No enabled grid = no-op.
+                            Land the anchor on the nearest lattice point, shifting the whole \
+                            set by that one delta. Without snapTo the lattice is ALL of the \
+                            document's ENABLED grids (the finest, usually invisible, one wins); \
+                            no enabled grid = no-op. NOT required when you pass snapTo — a \
+                            snapTo alone already snaps.
                             """,
                     ]),
                     "snapTo": .object([
                         "type": "object",
                         "description": """
-                            Which grid to snap to. WITHOUT this, snapToGrid takes the nearest \
-                            line across ALL enabled grids — so the FINEST grid wins, and that \
-                            grid is usually INVISIBLE, which will pull your drawing between \
-                            the lines a human sees. Name a grid (ids from render_sketch's \
-                            metadata, or snap_points' candidate parents), and optionally only \
-                            some of its families, to snap to what you mean.
+                            Which grid to snap to — AND, on its own, a request TO snap: \
+                            snapToGrid need not also be set (passing snapTo without it snaps \
+                            to this target; it is not ignored). WITHOUT snapTo, snapToGrid \
+                            takes the nearest line across ALL enabled grids — so the FINEST \
+                            grid wins, and that grid is usually INVISIBLE, which will pull \
+                            your drawing between the lines a human sees. Name a grid (ids from \
+                            render_sketch's metadata, or snap_points' candidate parents), and \
+                            optionally only some of its families, to snap to what you mean.
                             """,
                         "properties": .object([
                             "gridId": .object(["type": "integer"]),
