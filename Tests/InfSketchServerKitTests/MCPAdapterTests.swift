@@ -347,12 +347,18 @@ private actor FakeStrokeOpDevice {
     private(set) var receivedRequests: [ReceivedRequest] = []
     private let autoReply: AutoReply?
 
-    init(port: UInt16, autoReply: AutoReply?) async throws {
+    /// - Parameter capabilities: defaults to `["authorStrokes"]` (every
+    ///   pre-existing stroke-op test). The styled-text contract tests
+    ///   (styled_text branch) pass `["authorText"]` instead, to prove
+    ///   `DeviceCommandBroker.requestStrokeOp`'s `capability:` argument
+    ///   actually gates connection selection — not just that SOME device
+    ///   answers.
+    init(port: UInt16, autoReply: AutoReply?, capabilities: Set<String> = ["authorStrokes"]) async throws {
         self.autoReply = autoReply
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
         ws.resume()
-        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["authorStrokes"]).jsonText()))
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: Array(capabilities)).jsonText()))
         let ack = try await Self.receiveOne(ws)
         guard ack == .helloAck(protocolVersion: 1) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
@@ -683,10 +689,9 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - Tools (Task 7)
 
-    // Renamed from `listToolsContainsAllNineTools` (stroke-editing spec,
-    // 2026-07-14): four more tools joined the surface —
-    // get/transform/restyle/reshape_strokes.
-    @Test func listToolsContainsAllFourteenTools() async throws {
+    // Renamed from `listToolsContainsAllFourteenTools` (styled_text branch):
+    // `list_fonts` joined the surface alongside styled add_text/edit_text.
+    @Test func listToolsContainsAllFifteenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -698,7 +703,7 @@ private actor FakeStrokeOpDevice {
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
-            "snap_points",
+            "snap_points", "list_fonts",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -893,6 +898,230 @@ private actor FakeStrokeOpDevice {
         #expect(envelope.summary.texts.first?.text == "after")
         #expect(envelope.summary.texts.first?.x == 5)
         #expect(envelope.summary.texts.first?.y == 6)
+
+        await server.stop()
+    }
+
+    // MARK: - Styled text (styled_text branch): list_fonts + styled add_text/edit_text
+    //
+    // add_text/edit_text decide plain-vs-styled FROM THE ARGUMENTS: none of
+    // color/fontSize/bold/italic/family/spans present → the existing
+    // server-side DocJSON path (byte-identical, see
+    // plainAddTextStillUsesTheServerSidePathAndDoesNotRelay below); any of
+    // them present → relay a device op via requestStrokeOp, exactly like the
+    // Task 4 stroke-op tools, but gated on the "authorText" capability
+    // instead of "authorStrokes" (DeviceCommandBroker.requestStrokeOp's new
+    // `capability:` parameter). list_fonts always relays, is always
+    // read-only.
+    //
+    // THE CROSS-REPO SPEC-ENVELOPE CONTRACT PIN for the new style keys
+    // (silent-drop risk): the app decodes these envelopes with a plain
+    // `Decodable` (`TextAuthoring.AddSpec`/`EditSpec`/`SpanSpec`, app repo)
+    // that DROPS unknown keys silently — if this server ever stopped
+    // relaying one of color/fontSize/bold/italic/family/spans, or relayed it
+    // under a drifted name, nothing would fail: every agent would just keep
+    // getting default-styled text forever. These tests assert the exact
+    // relayed envelope key sets, string-literally, mirroring
+    // drawStrokesSpecEnvelopeMatchesCanonicalShape's pattern for the
+    // pre-existing stroke tools.
+
+    @Test func listFontsIsReadOnlyAndRelaysListFonts() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let familiesJSON = Data(#"{"families":["Helvetica Neue","Menlo"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(familiesJSON), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "list_fonts", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: familiesJSON, as: UTF8.self))
+        #expect(toolResultText(content).contains("Helvetica Neue"))
+
+        // No write: list_fonts never opens a session, so the doc's live seq
+        // stays unset (-1) — same pattern as listStrokesReturnsFakeListingVerbatimWithNoWrite.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        let received = try #require(await device.receivedRequests.first)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "listFonts")
+        #expect(Set(specJSON.keys) == ["op"])
+
+        await server.stop()
+    }
+
+    @Test func styledAddTextRelaysTheStyleEnvelopeThroughTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedTextsData":["new-text"]}"#.utf8)
+        let metaBytes = Data(#"{"id":"ID-1"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes),
+            capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: [
+                "docId": "d", "text": "i_load", "x": 1, "y": 2,
+                "color": "#FF453A", "fontSize": 12, "bold": true, "italic": false, "family": "Menlo",
+            ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("ID-1"), "add_text must surface the new text's id")
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addText")
+        // Exact envelope: the canonical field names TextAuthoring.AddSpec
+        // decodes, string-literally, no extras.
+        #expect(Set(spec.keys) == ["op", "text", "x", "y", "color", "fontSize", "bold", "italic", "family"])
+        #expect(spec["text"] as? String == "i_load")
+        #expect(spec["x"] as? Double == 1)
+        #expect(spec["y"] as? Double == 2)
+        #expect(spec["color"] as? String == "#FF453A")
+        #expect(spec["fontSize"] as? Double == 12)
+        #expect(spec["bold"] as? Bool == true)
+        #expect(spec["italic"] as? Bool == false)
+        #expect(spec["family"] as? String == "Menlo")
+
+        // The raw resource now reflects the fake's returned bytes.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modifiedBytes)
+
+        await server.stop()
+    }
+
+    @Test func addTextSpansRelaysThroughTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let spansArg: Value = .array([
+            .object(["text": .string("R")]),
+            .object(["text": .string("set"), "color": .string("#FF0000")]),
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "x": 0, "y": 0, "spans": spansArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addText")
+        #expect(Set(spec.keys) == ["op", "x", "y", "spans"])
+        let spans = try #require(spec["spans"] as? [[String: Any]])
+        #expect(spans.count == 2)
+        #expect(spans[0]["text"] as? String == "R")
+        #expect(spans[0]["color"] == nil)
+        #expect(spans[1]["text"] as? String == "set")
+        #expect(spans[1]["color"] as? String == "#FF0000")
+
+        await server.stop()
+    }
+
+    /// THE BYTE-IDENTICAL GUARANTEE: no style/spans argument present must
+    /// take the unchanged server-side DocJSON path — no device round trip at
+    /// all — exactly as before this branch existed. Asserted by the fake
+    /// device's request count staying at zero, not merely by success.
+    @Test func plainAddTextStillUsesTheServerSidePathAndDoesNotRelay() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // A capable device IS connected, so a wrongly-relayed plain call
+        // would still "work" — the point is that it must never even ask.
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "plain", "x": 0, "y": 0])
+        #expect(isError != true)
+        #expect(toolResultText(content).hasPrefix("added "))
+        #expect(await device.receivedRequests.isEmpty, "plain add_text must not relay to any device")
+
+        await server.stop()
+    }
+
+    @Test func styledEditTextRelaysThroughTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": "T-1", "color": "#FF453A"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "editText")
+        #expect(Set(spec.keys) == ["op", "textId", "color"])
+        #expect(spec["textId"] as? String == "T-1")
+        #expect(spec["color"] as? String == "#FF453A")
+
+        await server.stop()
+    }
+
+    /// THE BYTE-IDENTICAL GUARANTEE for edit_text, mirroring
+    /// plainAddTextStillUsesTheServerSidePathAndDoesNotRelay.
+    @Test func plainEditTextStillUsesTheServerSidePathAndDoesNotRelay() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (addContent, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "before", "x": 1, "y": 2])
+        let id = addedId(from: toolResultText(addContent))
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(id), "text": "after"])
+        #expect(isError != true)
+        #expect(await device.receivedRequests.isEmpty, "plain edit_text must not relay to any device")
+
+        await server.stop()
+    }
+
+    /// Pins `requestStrokeOp`'s `capability: "authorText"` argument actually
+    /// gates selection: a device that advertises ONLY "authorStrokes" (every
+    /// existing stroke-op device) must NOT be picked for a styled text op —
+    /// otherwise this whole capability split would be decorative.
+    @Test func styledAddTextWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "authorText".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "x": 0, "y": 0, "color": "#FF0000"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
     }
@@ -1223,7 +1452,7 @@ private actor FakeStrokeOpDevice {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
         }
-        for name in ["create_doc", "list_strokes", "render_sketch", "get_strokes", "snap_points"] {
+        for name in ["create_doc", "list_strokes", "render_sketch", "get_strokes", "snap_points", "list_fonts"] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) != true, "\(name) should not carry the CAS sentence")
         }

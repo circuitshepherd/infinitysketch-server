@@ -108,8 +108,18 @@ public actor DeviceCommandBroker {
     /// Agent stroke-authoring entry point (Task 4). Throws DeviceCommandError.
     /// The reply's `meta` is non-nil only for a `render` op spec; every other
     /// op kind (draw/delete/list) always resolves with `meta == nil`.
-    public func requestStrokeOp(docId: String, docBytes: Data, spec: Data) async throws -> StrokeOpReply {
-        try await performRequest(docId: docId, capability: "authorStrokes", timeout: strokeOpTimeout) {
+    ///
+    /// `capability` defaults to "authorStrokes" (every stroke-op tool). The
+    /// styled `add_text`/`edit_text`/`list_fonts` text-authoring tools (Task
+    /// 4, styled_text branch) pass "authorText" instead — a device that only
+    /// advertises stroke authoring must not be selected for a text-styling
+    /// request, and vice versa. Both ride the same `strokeOpRequest`/
+    /// `strokeOpReply` wire messages and the same per-docId in-flight guard;
+    /// only the capability used to pick a connection differs.
+    public func requestStrokeOp(
+        docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes"
+    ) async throws -> StrokeOpReply {
+        try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout) {
             connection, requestId in
             connection.send(
                 .strokeOpRequest(requestId: requestId, docId: docId, payload: .inline(docBytes), spec: spec))

@@ -100,12 +100,16 @@ actor Connection {
             }
             helloed = true
             // Register with the broker whenever the connection advertises
-            // either capability the broker brokers requests for — the broker
+            // any capability the broker brokers requests for — the broker
             // itself filters per-request by capability (see
             // DeviceCommandBroker.performRequest), so this gate only needs to
             // recognize "some device command capability", not which one.
+            // "authorText" (styled_text branch) joined "createDoc"/
+            // "authorStrokes" here — a device that advertises only
+            // "authorText" must still be registered, or requestStrokeOp's
+            // capability: "authorText" calls would always see noDeviceAvailable.
             let caps = Set(capabilities)
-            if !caps.isDisjoint(with: ["createDoc", "authorStrokes"]) {
+            if !caps.isDisjoint(with: ["createDoc", "authorStrokes", "authorText"]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }

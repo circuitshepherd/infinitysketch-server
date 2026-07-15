@@ -392,9 +392,57 @@ public actor MCPAdapter {
     /// stroke-editing writes transform/restyle/reshape_strokes) — NOT
     /// create_doc (nothing to compare — its docExists guard is the race's
     /// only meaningful shape) and NOT the read-only tools, which never write:
-    /// list_strokes, get_strokes, render_sketch, snap_points.
+    /// list_strokes, get_strokes, render_sketch, snap_points, list_fonts.
     private static let casRejectionSentence =
         "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
+
+    // MARK: - Styled text (styled_text branch)
+    //
+    // add_text/edit_text decide plain-vs-styled FROM THE ARGUMENTS: none of
+    // color/fontSize/bold/italic/family/spans present → the unchanged
+    // server-side DocJSON path (byte-identical); any present → relay a
+    // device op (addText/editText), gated on the "authorText" capability
+    // (DeviceCommandBroker.requestStrokeOp's capability: parameter) rather
+    // than "authorStrokes". list_fonts always relays listFonts, read-only.
+    // These are the exact NEW envelope keys the app-side TextAuthoring
+    // decodes (`AddSpec`/`EditSpec`/`SpanSpec`, `Server/TextAuthoring.swift`)
+    // — a plain `Decodable` that silently drops unknown keys, so a
+    // field-name drift here would never fail loudly; every agent would just
+    // keep getting default-styled text. Pinned by the styled add/edit_text
+    // envelope-contract tests (mirroring drawStrokesSpecEnvelopeMatchesCanonicalShape).
+    private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "spans"]
+
+    /// True iff any style/spans argument is present (and not an explicit
+    /// JSON null) — the plain-vs-styled routing decision for
+    /// `callAddText`/`callEditText`.
+    private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
+        styleArgKeys.contains { key in
+            guard let value = arguments?[key] else { return false }
+            return !value.isNull
+        }
+    }
+
+    /// Shared style properties for add_text/edit_text (whole-field). Colours
+    /// are #RRGGBB(AA). A whole-field style is the base a `spans` entry
+    /// overrides.
+    private static let textStyleProperties: [String: Value] = [
+        "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour."]),
+        "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
+        "bold": .object(["type": "boolean"]),
+        "italic": .object(["type": "boolean"]),
+        "family": .object(["type": "string", "description": "A font family name from list_fonts. An unknown family fails with unknownFont."]),
+    ]
+
+    /// One `spans` array entry: required `text`, plus every whole-field
+    /// style property as an optional per-span override.
+    private static let textSpanItemSchema: Value = .object([
+        "type": "object",
+        "properties": .object(
+            ["text": .object(["type": "string", "description": "This span's text."])]
+                .merging(textStyleProperties) { current, _ in current }
+        ),
+        "required": .array(["text"].map(Value.string)),
+    ])
 
     /// A stroke point in EITHER form: the bare `[x, y]` pair (synthesis
     /// defaults for everything else) or the rich object carrying any subset
@@ -514,50 +562,103 @@ public actor MCPAdapter {
         Tool(
             name: "add_text",
             description: """
-                Appends a minimal-attribute placed-text entry to a document: a new id, \
-                plain unformatted text (the app backfills body-style font/colour on load), \
-                the document's current colour scheme, and an identity transform/opacity. \
-                (x, y) is the text box's top-left corner, in canvas coordinates. \
-                \(casRejectionSentence)
+                Appends a placed-text entry to a document: a new id, the document's current \
+                colour scheme, and an identity transform/opacity. (x, y) is the text box's \
+                top-left corner, in canvas coordinates. Give color/fontSize/bold/italic/family \
+                to style the WHOLE label, or a `spans` array to style parts of it independently \
+                (e.g. a subscript). A whole-field style is the base each span overrides. Styling \
+                needs a connected device; plain text does not. Returns the new text's id so you \
+                can edit it. Colours: #RRGGBB(AA). Font families come from list_fonts — call it \
+                before setting a `family`. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
-                "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
-                    "text": .object(["type": "string", "description": "The text to place."]),
-                    "x": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
-                    "y": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
-                    "pinned": .object([
-                        "type": "boolean",
-                        "description": "Excludes the text from selection transforms. Defaults to false.",
-                    ]),
-                ]),
+                "properties": .object(
+                    [
+                        "docId": .object(["type": "string", "description": "The document id to modify."]),
+                        "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
+                        "x": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
+                        "y": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "pinned": .object([
+                            "type": "boolean",
+                            "description": "Excludes the text from selection transforms. Defaults to false.",
+                        ]),
+                        "spans": .object([
+                            "type": "array",
+                            "description": """
+                                Style parts of the text independently instead of a single \
+                                `text` string. Each span is {text, color?, fontSize?, bold?, \
+                                italic?, family?}; any whole-field color/fontSize/bold/italic/ \
+                                family above is the base a span's own value overrides. Supply \
+                                `text` OR `spans`, not both. Requires a connected device.
+                                """,
+                            "items": textSpanItemSchema,
+                        ]),
+                    ].merging(textStyleProperties) { current, _ in current }
+                ),
                 "required": .array(["docId", "text", "x", "y"].map(Value.string)),
             ])
         ),
         Tool(
             name: "edit_text",
             description: """
-                Mutates an existing placed text by id: replace its string and/or move it. \
-                WARNING: replacing the text resets that entry's rich formatting to plain \
-                defaults — the attributed run's bold/italic/font/colour attributes are \
-                UIKit-archived data no server-side code can synthesize, so a new text run \
-                always replaces the old ones wholesale. Position-only edits (x and/or y with \
-                no text) do not touch formatting. \(casRejectionSentence)
+                Mutates an existing placed text by id: replace its string and/or move it, or \
+                restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` \
+                array (parts of it independently — a whole-field style is the base each span \
+                overrides). WARNING: replacing the text via PLAIN `text` (no style/spans) \
+                resets that entry's rich formatting to plain defaults — the attributed run's \
+                bold/italic/font/colour attributes are UIKit-archived data no server-side code \
+                can synthesize, so a new plain text run always replaces the old ones wholesale. \
+                A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles \
+                the EXISTING characters (or replaces them with `text`/`spans` if given) and \
+                needs a connected device — plain edits do not. Position-only edits (x and/or y \
+                with no text/style) do not touch formatting. Colours: #RRGGBB(AA). Font \
+                families come from list_fonts. \(casRejectionSentence)
                 """,
             inputSchema: .object([
                 "type": "object",
-                "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
-                    "textId": .object(["type": "string", "description": "The id of the text entry to edit."]),
-                    "text": .object([
-                        "type": "string",
-                        "description": "Replacement text. Resets formatting to plain defaults — see the tool description.",
-                    ]),
-                    "x": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
-                    "y": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
-                ]),
+                "properties": .object(
+                    [
+                        "docId": .object(["type": "string", "description": "The document id to modify."]),
+                        "textId": .object(["type": "string", "description": "The id of the text entry to edit."]),
+                        "text": .object([
+                            "type": "string",
+                            "description": """
+                                Replacement text. Plain (no style/spans), this resets \
+                                formatting to plain defaults — see the tool description. \
+                                Styled (with color/fontSize/bold/italic/family/spans), it \
+                                replaces the characters with the new style instead.
+                                """,
+                        ]),
+                        "x": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
+                        "y": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "spans": .object([
+                            "type": "array",
+                            "description": """
+                                Replace the text with independently-styled parts instead of a \
+                                single `text` string. Same shape as add_text's `spans`. \
+                                Requires a connected device.
+                                """,
+                            "items": textSpanItemSchema,
+                        ]),
+                    ].merging(textStyleProperties) { current, _ in current }
+                ),
                 "required": .array(["docId", "textId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_fonts",
+            description: """
+                The font families installed on the connected device, sorted. Call this before \
+                setting a `family` on add_text/edit_text — an unknown family is rejected with \
+                unknownFont. REQUIRES a connected device — fails with noDeviceAvailable if none \
+                is connected and deviceTimeout if it doesn't respond in time. Read-only: it \
+                never writes to the document, so there is no seq assigned and nothing to retry.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(["docId": .object(["type": "string", "description": "The document id to query."])]),
+                "required": .array(["docId"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1171,12 +1272,27 @@ public actor MCPAdapter {
         case "transform_strokes": return await callTransformStrokes(arguments)
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
+        case "list_fonts": return await callListFonts(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
     }
 
+    /// Plain-vs-styled routing (styled_text branch): no style/spans argument
+    /// → the unchanged server-side `DocJSON` path, byte-identical to before
+    /// this branch existed (`callAddTextServerSide`, extracted verbatim).
+    /// Any of color/fontSize/bold/italic/family/spans → relay an `addText`
+    /// device op instead (`callAddTextStyled`).
     private func callAddText(_ arguments: [String: Value]?) async -> CallTool.Result {
+        if Self.hasStyleArgs(arguments) {
+            return await callAddTextStyled(arguments)
+        }
+        return await callAddTextServerSide(arguments)
+    }
+
+    /// The pre-styled_text `add_text` body, extracted verbatim — same
+    /// behaviour, same tests (see plainAddTextStillUsesTheServerSidePathAndDoesNotRelay).
+    private func callAddTextServerSide(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let text = try Self.stringArg(arguments, "text")
@@ -1206,7 +1322,77 @@ public actor MCPAdapter {
         }
     }
 
+    /// Styled `add_text` (styled_text branch): relays an `addText` device op
+    /// carrying ONLY the arguments the caller actually supplied — the exact
+    /// envelope key set app-side `TextAuthoring.AddSpec` decodes — through
+    /// `broker.requestStrokeOp`, gated on "authorText" (not "authorStrokes":
+    /// a device that only authors strokes must not be picked for this).
+    /// `expectedBytes` is the exact bytes relayed to the device (Task 2,
+    /// write CAS) — never a fresh re-read. Surfaces the new text's id (from
+    /// the device reply's `meta`, `{"id": …}` — `TextAuthoring.add`, app
+    /// repo) in the result text so an agent can `edit_text` exactly what it
+    /// just added.
+    private func callAddTextStyled(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("addText")]
+            for key in ["text", "x", "y", "pinned", "color", "fontSize", "bold", "italic", "family", "spans"] {
+                if let value = arguments?[key], !value.isNull {
+                    envelope[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "added styled text at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
+                   let id = decoded["id"] {
+                    summary += "\nid: \(id)"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Plain-vs-styled routing for `edit_text`, mirroring `callAddText`.
     private func callEditText(_ arguments: [String: Value]?) async -> CallTool.Result {
+        if Self.hasStyleArgs(arguments) {
+            return await callEditTextStyled(arguments)
+        }
+        return await callEditTextServerSide(arguments)
+    }
+
+    /// The pre-styled_text `edit_text` body, extracted verbatim — same
+    /// behaviour, same tests (see plainEditTextStillUsesTheServerSidePathAndDoesNotRelay).
+    private func callEditTextServerSide(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
@@ -1228,6 +1414,96 @@ public actor MCPAdapter {
             ) { seq in
                 "edited \(textId) at seq \(seq)"
             }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Styled `edit_text` (styled_text branch): relays an `editText` device
+    /// op carrying ONLY the arguments the caller actually supplied, through
+    /// `broker.requestStrokeOp` gated on "authorText". `expectedBytes` is
+    /// the exact bytes relayed to the device (Task 2, write CAS) — never a
+    /// fresh re-read.
+    private func callEditTextStyled(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let textId = try Self.stringArg(arguments, "textId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
+            for key in ["text", "x", "y", "color", "fontSize", "bold", "italic", "family", "spans"] {
+                if let value = arguments?[key], !value.isNull {
+                    envelope[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "edited \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `list_fonts` (styled_text branch): relays `{"op": "listFonts"}` and
+    /// passes the device's reply bytes through as text — modeled on
+    /// `callListStrokes`, not `callDrawStrokes`: READ-ONLY, no
+    /// `submitAndRespond`, no seq bump. Gated on "authorText".
+    private func callListFonts(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("listFonts")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // `.meta` is render-only (nil here) — list_fonts ignores it.
+            return CallTool.Result(content: [
+                .text(text: String(decoding: out.bytes, as: UTF8.self), annotations: nil, _meta: nil)
+            ])
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -1843,8 +2119,8 @@ public actor MCPAdapter {
         }
     }
 
-    /// Shared submit tail for every write tool (add/edit/remove_text,
-    /// replace_doc, create_doc, draw/delete_strokes): opens a session on demand,
+    /// Shared submit tail for every write tool (add/edit/remove_text — plain
+    /// AND styled, replace_doc, create_doc, draw/delete_strokes): opens a session on demand,
     /// writes the composed full-document bytes, and shapes the MCP result —
     /// success names the assigned seq (carried back by the write itself in
     /// `SubmitOutcome.accepted` — NEVER read back via a separate
