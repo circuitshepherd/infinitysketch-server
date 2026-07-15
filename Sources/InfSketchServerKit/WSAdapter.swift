@@ -108,8 +108,11 @@ actor Connection {
             // "authorStrokes" here — a device that advertises only
             // "authorText" must still be registered, or requestStrokeOp's
             // capability: "authorText" calls would always see noDeviceAvailable.
+            // "controlSelection" (agent-selection-control spec) joined the
+            // same way, for get_selection/transform_selection's
+            // capability: "controlSelection" relay.
             let caps = Set(capabilities)
-            if !caps.isDisjoint(with: ["createDoc", "authorStrokes", "authorText"]) {
+            if !caps.isDisjoint(with: ["createDoc", "authorStrokes", "authorText", "controlSelection"]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }

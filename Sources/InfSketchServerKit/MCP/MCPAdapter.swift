@@ -1250,6 +1250,49 @@ public actor MCPAdapter {
                 "required": .array(["docId", "strokes"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "get_selection",
+            description: """
+                Read the user's CURRENT live rect-select selection on a connected device: which \
+                strokes/texts/images are selected (by id/key), the reference point they placed, the \
+                selection bounds, and an opaque `signature` to pass back as transform_selection's \
+                `expect`. REQUIRES a connected device with an active selection.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "transform_selection",
+            description: """
+                Transform the user's live selection exactly as a manual rect-select transform would \
+                (one undoable step). `ops` is a list of ONE operation (batch comes later): rotate \
+                {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), \
+                translate {op:"translate",dx,dy} (canvas points, no reference point), flipHorizontal / \
+                flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none \
+                is set the op fails (noReferencePoint); placing it yourself is not supported yet. Pass \
+                `expect` = a prior get_selection's `signature` to be rejected if the user changed the \
+                selection since (selectionChanged). REQUIRES a connected device with an active \
+                selection.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "ops": .object([
+                        "type": "array",
+                        "description": "Exactly one operation.",
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "expect": .object(["type": "string", "description": "signature from get_selection."]),
+                ]),
+                "required": .array(["docId", "ops"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1273,6 +1316,8 @@ public actor MCPAdapter {
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
         case "list_fonts": return await callListFonts(arguments)
+        case "get_selection": return await callGetSelection(arguments)
+        case "transform_selection": return await callTransformSelection(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2099,11 +2144,116 @@ public actor MCPAdapter {
         }
     }
 
+    // MARK: - Selection-control tools (agent-selection-control spec)
+    //
+    // Same shape as every other stroke-op tool above: compose a minimal
+    // op-spec envelope, relay it plus the document's current bytes through
+    // `broker.requestStrokeOp`, but with `capability: "controlSelection"` —
+    // a device only registers for these two ops via the `controlSelection`
+    // hello capability (WSAdapter's gate). UNLIKE the write tools
+    // (draw/transform/restyle/reshape_strokes), neither call tails into
+    // `submitAndRespond`: the device applies the transform to its own live
+    // selection in-session (the same undoable step a manual drag would
+    // produce) and the doc mirror push syncs the server on its own schedule
+    // — there is no document write for this tool to CAS-guard. There is
+    // also no image: `out.bytes` is empty for both ops, and the device's
+    // JSON answer travels in `out.meta`, decoded straight through as the
+    // tool's text result (falling back to "{}" for a missing/undecodable
+    // meta, matching `render_sketch`'s degrade-don't-throw handling of the
+    // same field).
+
+    /// Read-only: reports the user's current live selection (or the
+    /// device-side "no selection" error) without touching the document.
+    private func callGetSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("getSelection")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays a transform to the device's live selection — one undoable
+    /// step on-device, exactly as a manual rect-select drag would produce.
+    /// `expect`, when supplied, is relayed verbatim so the device can reject
+    /// a stale caller with `selectionChanged`; deep validation of `ops`
+    /// (shape, exactly-one-op, `noReferencePoint`) is the device's job,
+    /// surfaced verbatim as `deviceFailed: <reason>`.
+    private func callTransformSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
+            let expect = try Self.optionalStringArg(arguments, "expect")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("transformSelection"),
+                "ops": .array(ops),
+            ]
+            if let expect {
+                envelope["expect"] = .string(expect)
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
     /// tool-error string for every device-relayed stroke-op tool
     /// (draw/delete/list_strokes; render_sketch since Task 5;
     /// get/transform/restyle/reshape_strokes since the stroke-editing spec,
-    /// 2026-07-14; snap_points since the grid-snapping spec, 2026-07-14).
+    /// 2026-07-14; snap_points since the grid-snapping spec, 2026-07-14;
+    /// get/transform_selection since the agent-selection-control spec).
     /// UNLIKE `create_doc` (whose `.requestInFlight` publishes
     /// the pinned "creationInProgress" string — see `callCreateDoc` above),
     /// these publish "opInProgress" per the Task 4 spec's error-string
