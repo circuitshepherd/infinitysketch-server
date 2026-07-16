@@ -692,8 +692,9 @@ private actor FakeStrokeOpDevice {
     // Renamed from `listToolsContainsAllSeventeenTools` (Task 3,
     // agent-selection-control spec): select_all/select_elements/
     // set_reference_point/clear_selection joined the surface alongside M1's
-    // get_selection/transform_selection.
-    @Test func listToolsContainsAllTwentyOneTools() async throws {
+    // get_selection/transform_selection. Milestone 2 (Task 3/Task 4) added
+    // preview_selection.
+    @Test func listToolsContainsAllTwentyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -707,6 +708,7 @@ private actor FakeStrokeOpDevice {
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
+            "preview_selection",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -3346,6 +3348,144 @@ private actor FakeStrokeOpDevice {
             JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(Set(envelope.keys) == ["op"])
         #expect(envelope["op"] as? String == "clearSelection")
+
+        await server.stop()
+    }
+
+    // MARK: - preview_selection (Milestone 2 Task 4)
+    //
+    // A pure relay modeled on render_sketch's result shape (.image + .text)
+    // but gated on "controlSelection" like the rest of the selection tools
+    // above — same FakeStrokeOpDevice harness, same envelope-pinning idiom.
+
+    /// Pins the exact op-spec envelope `preview_selection` relays when every
+    /// optional is supplied, and that the result carries the device's PNG +
+    /// meta exactly like `render_sketch` (renderSketchReturnsImageAndMetadataContent).
+    @Test func previewSelectionRelaysOpsAndOptionalsAndReturnsImageAndMeta() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF])
+        let metaBytes = Data(#"{"elements":[],"grids":[]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([
+            .object(["op": .string("rotate"), "degrees": .double(90)])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "preview_selection",
+            arguments: [
+                "docId": "d", "ops": opsArg,
+                "include": .string("selectionOnly"),
+                "rect": .array([.double(0), .double(0), .double(100), .double(100)]),
+                "includePoints": .bool(true),
+            ])
+        #expect(isError != true)
+
+        let image = try #require(toolResultImage(content))
+        #expect(image.mimeType == "image/png")
+        #expect(Data(base64Encoded: image.data) == pngBytes)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "ops", "include", "rect", "includePoints"])
+        #expect(envelope["op"] as? String == "previewSelection")
+        let ops = try #require(envelope["ops"] as? [[String: Any]])
+        #expect(ops.count == 1)
+        #expect(ops.first?["op"] as? String == "rotate")
+        #expect(ops.first?["degrees"] as? Double == 90)
+        #expect(envelope["include"] as? String == "selectionOnly")
+        #expect(envelope["rect"] as? [Double] == [0, 0, 100, 100])
+        #expect(envelope["includePoints"] as? Bool == true)
+
+        await server.stop()
+    }
+
+    /// A call that omits every optional (the common case) must omit them
+    /// from the envelope rather than sending explicit nulls, mirroring
+    /// `transformSelectionOmitsExpectWhenNotSupplied` /
+    /// `renderSketchWithOnlyDocIdOmitsEveryOptionalField`.
+    @Test func previewSelectionWithOnlyRequiredArgumentsOmitsOptionalKeys() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1, 2, 3]), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([.object(["op": .string("flipHorizontal")])])
+        let (_, isError) = try await client.callTool(
+            name: "preview_selection", arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "ops"])
+
+        await server.stop()
+    }
+
+    /// Only a `controlSelection`-capable device is picked — mirrors
+    /// `getSelectionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable`.
+    @Test func previewSelectionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "controlSelection".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data()))
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([.object(["op": .string("flipVertical")])])
+        let (content, isError) = try await client.callTool(
+            name: "preview_selection", arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func previewSelectionUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device needs to connect — unknownDoc short-circuits before
+        // any device round trip, mirroring every other tool's unknownDoc path.
+
+        let opsArg: Value = .array([.object(["op": .string("flipVertical")])])
+        let (content, isError) = try await client.callTool(
+            name: "preview_selection", arguments: ["docId": "ghost", "ops": opsArg])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func previewSelectionDeviceFailurePropagatesReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("noReferencePoint"), capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([.object(["op": .string("scale"), "factor": .double(2)])])
+        let (content, isError) = try await client.callTool(
+            name: "preview_selection", arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: noReferencePoint")
 
         await server.stop()
     }
