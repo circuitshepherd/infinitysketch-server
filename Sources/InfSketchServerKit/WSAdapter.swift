@@ -240,8 +240,14 @@ actor Connection {
             // path regardless of which precedence branch resolves it.
             guard case .inline(let bytes)? = payload else {
                 if payload == nil {
+                    // A no-bytes reply is a SUCCESS when it carries `meta` — the selection ops
+                    // (get_selection / transform_selection / select_*) return their descriptor JSON
+                    // in `meta` with nil bytes. Only a reply with nothing at all (no bytes, no meta,
+                    // no failureReason) is malformed and gets the "unspecified" substitution; a
+                    // meta-only, no-failure reply passes through as a success (nil failureReason).
+                    let resolvedFailure = (failureReason == nil && meta == nil) ? "unspecified" : failureReason
                     await broker.handleReply(
-                        requestId: requestId, bytes: nil, meta: meta, failureReason: failureReason ?? "unspecified")
+                        requestId: requestId, bytes: nil, meta: meta, failureReason: resolvedFailure)
                 } else {
                     // Unreachable in practice: the reassembler resolves
                     // .transfer payloads to .inline before dispatch ever sees

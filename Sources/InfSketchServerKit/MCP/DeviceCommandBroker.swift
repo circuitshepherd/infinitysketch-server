@@ -31,7 +31,10 @@ public actor DeviceCommandBroker {
 
     /// `requestStrokeOp`'s result: the reply's bytes (doc bytes for
     /// draw/delete, listing JSON for list, a PNG for render) plus an optional
-    /// metadata JSON (render only — nil for every other op kind).
+    /// metadata JSON. `meta` carries render metadata AND the selection ops'
+    /// descriptor JSON (get_selection / transform_selection / select_*), which
+    /// reply with `meta` and NO bytes — a success WSAdapter must not misread as
+    /// a failure (see WSAdapterTests.strokeOpReplyWithMetaAndNoBytesIsSuccess).
     public struct StrokeOpReply: Equatable, Sendable {
         public let bytes: Data
         public let meta: Data?
@@ -106,8 +109,10 @@ public actor DeviceCommandBroker {
     }
 
     /// Agent stroke-authoring entry point (Task 4). Throws DeviceCommandError.
-    /// The reply's `meta` is non-nil only for a `render` op spec; every other
-    /// op kind (draw/delete/list) always resolves with `meta == nil`.
+    /// The reply's `meta` carries `render`'s metadata JSON AND the selection
+    /// ops' descriptor JSON (get_selection / transform_selection / select_*),
+    /// which reply with `meta` and NO bytes; the byte-returning ops
+    /// (draw/delete/list) resolve with `meta == nil`.
     ///
     /// `capability` defaults to "authorStrokes" (every stroke-op tool). The
     /// styled `add_text`/`edit_text`/`list_fonts` text-authoring tools (Task
