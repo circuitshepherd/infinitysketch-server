@@ -689,9 +689,11 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - Tools (Task 7)
 
-    // Renamed from `listToolsContainsAllFourteenTools` (styled_text branch):
-    // `list_fonts` joined the surface alongside styled add_text/edit_text.
-    @Test func listToolsContainsAllSeventeenTools() async throws {
+    // Renamed from `listToolsContainsAllSeventeenTools` (Task 3,
+    // agent-selection-control spec): select_all/select_elements/
+    // set_reference_point/clear_selection joined the surface alongside M1's
+    // get_selection/transform_selection.
+    @Test func listToolsContainsAllTwentyOneTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -704,6 +706,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "get_selection", "transform_selection",
+            "select_all", "select_elements", "set_reference_point", "clear_selection",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -3199,6 +3202,150 @@ private actor FakeStrokeOpDevice {
             name: "transform_selection", arguments: ["docId": "d", "ops": opsArg])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceFailed: noReferencePoint")
+
+        await server.stop()
+    }
+
+    // MARK: - select_all / select_elements / set_reference_point / clear_selection (Task 3)
+    //
+    // Same shape as get_selection/transform_selection's tests above: a
+    // `controlSelection`-capable `FakeStrokeOpDevice` stands in for the
+    // connected device, `.bytesWithMeta` supplies the reply's `meta` JSON,
+    // and `device.receivedRequests[0].spec` is decoded to pin the exact
+    // op-spec envelope shape relayed to the device.
+
+    @Test func selectAllRelaysToControlSelectionCapableDeviceAndReturnsMeta() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "select_all", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+        #expect(envelope["op"] as? String == "selectAll")
+
+        await server.stop()
+    }
+
+    /// Pins the exact op-spec envelope `select_elements` relays: each of
+    /// `strokeKeys`/`textIds`/`imageIds` supplied by the caller rides through
+    /// verbatim; `imageIds` is omitted here to also prove an unsupplied
+    /// array is left out of the envelope entirely.
+    @Test func selectElementsRelaysProvidedArraysAndOmitsUnsuppliedOnes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "select_elements",
+            arguments: [
+                "docId": "d",
+                "strokeKeys": .array([.string("seed1:1.0")]),
+                "textIds": .array([.string("text-1"), .string("text-2")]),
+            ])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "strokeKeys", "textIds"])
+        #expect(envelope["op"] as? String == "selectElements")
+        #expect(envelope["strokeKeys"] as? [String] == ["seed1:1.0"])
+        #expect(envelope["textIds"] as? [String] == ["text-1", "text-2"])
+
+        await server.stop()
+    }
+
+    /// Pins the exact op-spec envelope `set_reference_point` relays — `x`/`y`
+    /// ride through as numbers — and that a missing `y` fails with the
+    /// combined invalidArguments message rather than a per-field one, before
+    /// any device round trip.
+    @Test func setReferencePointRelaysXAndY() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let metaBytes = Data(#"{"referencePoint":[10,20]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_reference_point", arguments: ["docId": "d", "x": 10, "y": 20])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "x", "y"])
+        #expect(envelope["op"] as? String == "setReferencePoint")
+        #expect(envelope["x"] as? Double == 10)
+        #expect(envelope["y"] as? Double == 20)
+
+        await server.stop()
+    }
+
+    @Test func setReferencePointMissingYFailsBeforeAnyDeviceRoundTrip() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_reference_point", arguments: ["docId": "d", "x": 10])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments: x and y are required")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func clearSelectionRelaysToControlSelectionCapableDeviceAndReturnsMeta() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let metaBytes = Data(#"{"selectedKeys":[]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "clear_selection", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+        #expect(envelope["op"] as? String == "clearSelection")
 
         await server.stop()
     }

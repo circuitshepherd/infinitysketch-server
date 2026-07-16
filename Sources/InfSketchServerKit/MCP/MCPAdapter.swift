@@ -1293,6 +1293,87 @@ public actor MCPAdapter {
                 "required": .array(["docId", "ops"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "select_all",
+            description: """
+                Select every stroke, placed text, and placed image in the document on a connected \
+                device's live rect-select, replacing any existing selection — the agent equivalent \
+                of the user's Select All. REQUIRES a connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "select_elements",
+            description: """
+                Select specific elements by id on a connected device's live rect-select, replacing \
+                any existing selection. Pass `strokeKeys` (composite stroke keys, from \
+                `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
+                `get_selection` or the document summary) — at least one id across the three arrays \
+                is required (enforced device-side). REQUIRES a connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "strokeKeys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys to select.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "textIds": .object([
+                        "type": "array",
+                        "description": "Placed-text ids to select.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "imageIds": .object([
+                        "type": "array",
+                        "description": "Placed-image ids to select.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "set_reference_point",
+            description: """
+                Place the reference point the user's live selection pivots/rotates/scales around, \
+                at the given CANVAS coordinates — the same point a manual rect-select drag drops. \
+                This does NOT snap to the grid; call `snap_points` first and pass one of its \
+                candidates if you want a lattice point. REQUIRES a connected `controlSelection` \
+                device with an active selection.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "x": .object(["type": "number", "description": "Canvas-space x. Not snapped."]),
+                    "y": .object(["type": "number", "description": "Canvas-space y. Not snapped."]),
+                ]),
+                "required": .array(["docId", "x", "y"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "clear_selection",
+            description: """
+                Clear the user's live rect-select selection on a connected device, returning it to \
+                idle — the agent equivalent of tapping outside the selection or hitting Escape. \
+                REQUIRES a connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1318,6 +1399,10 @@ public actor MCPAdapter {
         case "list_fonts": return await callListFonts(arguments)
         case "get_selection": return await callGetSelection(arguments)
         case "transform_selection": return await callTransformSelection(arguments)
+        case "select_all": return await callSelectAll(arguments)
+        case "select_elements": return await callSelectElements(arguments)
+        case "set_reference_point": return await callSetReferencePoint(arguments)
+        case "clear_selection": return await callClearSelection(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2149,14 +2234,16 @@ public actor MCPAdapter {
     // Same shape as every other stroke-op tool above: compose a minimal
     // op-spec envelope, relay it plus the document's current bytes through
     // `broker.requestStrokeOp`, but with `capability: "controlSelection"` —
-    // a device only registers for these two ops via the `controlSelection`
+    // a device only registers for these ops via the `controlSelection`
     // hello capability (WSAdapter's gate). UNLIKE the write tools
-    // (draw/transform/restyle/reshape_strokes), neither call tails into
-    // `submitAndRespond`: the device applies the transform to its own live
+    // (draw/transform/restyle/reshape_strokes), none of these six calls
+    // (get/transform_selection from M1, plus select_all/select_elements/
+    // set_reference_point/clear_selection below) tail into
+    // `submitAndRespond`: the device applies the op to its own live
     // selection in-session (the same undoable step a manual drag would
     // produce) and the doc mirror push syncs the server on its own schedule
     // — there is no document write for this tool to CAS-guard. There is
-    // also no image: `out.bytes` is empty for both ops, and the device's
+    // also no image: `out.bytes` is empty for every op, and the device's
     // JSON answer travels in `out.meta`, decoded straight through as the
     // tool's text result (falling back to "{}" for a missing/undecodable
     // meta, matching `render_sketch`'s degrade-don't-throw handling of the
@@ -2248,13 +2335,188 @@ public actor MCPAdapter {
         }
     }
 
+    /// Selects everything in the document on the device's live rect-select
+    /// — a docId-only relay, same skeleton as `callGetSelection` above but
+    /// a write op (`selectAll`) rather than a read.
+    private func callSelectAll(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("selectAll")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Selects specific elements by id, replacing any existing selection.
+    /// Each of `strokeKeys`/`textIds`/`imageIds` rides into the envelope
+    /// only when the caller actually supplied it — mirrors
+    /// `callTransformSelection`'s conditional `expect`. Deep validation
+    /// ("at least one id across the three arrays") is the device's job,
+    /// surfaced verbatim as `deviceFailed: <reason>`.
+    private func callSelectElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys")
+            let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
+            let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("selectElements")]
+            if let strokeKeys {
+                envelope["strokeKeys"] = .array(strokeKeys.map(Value.string))
+            }
+            if let textIds {
+                envelope["textIds"] = .array(textIds.map(Value.string))
+            }
+            if let imageIds {
+                envelope["imageIds"] = .array(imageIds.map(Value.string))
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Places the reference point the user's live selection
+    /// pivots/rotates/scales around, at the given CANVAS coordinates — no
+    /// snapping (an agent that wants a lattice point calls `snap_points`
+    /// first and passes one of its candidates). `x`/`y` are read as a pair:
+    /// either both parse as numbers or the call fails with one combined
+    /// message rather than surfacing which single field was bad, since a
+    /// caller passing neither or garbling one typically garbled both.
+    private func callSetReferencePoint(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let x = try? Self.doubleArg(arguments, "x"),
+                let y = try? Self.doubleArg(arguments, "y")
+            else {
+                return Self.errorResult("invalidArguments: x and y are required")
+            }
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(
+                    Value.object(["op": .string("setReferencePoint"), "x": .double(x), "y": .double(y)]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Clears the user's live selection, returning it to idle — a
+    /// docId-only relay, same skeleton as `callSelectAll` but `clearSelection`.
+    private func callClearSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("clearSelection")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
     /// tool-error string for every device-relayed stroke-op tool
     /// (draw/delete/list_strokes; render_sketch since Task 5;
     /// get/transform/restyle/reshape_strokes since the stroke-editing spec,
     /// 2026-07-14; snap_points since the grid-snapping spec, 2026-07-14;
-    /// get/transform_selection since the agent-selection-control spec).
-    /// UNLIKE `create_doc` (whose `.requestInFlight` publishes
+    /// get/transform_selection and select_all/select_elements/
+    /// set_reference_point/clear_selection since the agent-selection-control
+    /// spec). UNLIKE `create_doc` (whose `.requestInFlight` publishes
     /// the pinned "creationInProgress" string — see `callCreateDoc` above),
     /// these publish "opInProgress" per the Task 4 spec's error-string
     /// mapping; every one of these tools shares the same per-docId in-flight
@@ -2399,6 +2661,25 @@ public actor MCPAdapter {
     /// (`delete_strokes`'s `keys`).
     private static func nonEmptyStringArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [String] {
         let items = try nonEmptyValueArrayArg(arguments, key)
+        var strings: [String] = []
+        strings.reserveCapacity(items.count)
+        for item in items {
+            guard case .string(let s) = item else { throw ArgumentError.invalidType(key) }
+            strings.append(s)
+        }
+        return strings
+    }
+
+    /// An optional JSON array argument whose elements must all be strings,
+    /// returning `nil` when the key is absent/null — mirrors
+    /// `optionalStringArg`, but for arrays. Used by `select_elements`'s
+    /// `strokeKeys`/`textIds`/`imageIds`: each rides into the op-spec
+    /// envelope only when the caller actually supplied it (unlike
+    /// `nonEmptyStringArrayArg`, an empty array is not rejected here — the
+    /// device enforces "at least one id across all three arrays").
+    private static func optionalStringArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [String]? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
+        guard case .array(let items) = value else { throw ArgumentError.invalidType(key) }
         var strings: [String] = []
         strings.reserveCapacity(items.count)
         for item in items {
