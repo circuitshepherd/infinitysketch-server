@@ -1374,6 +1374,68 @@ public actor MCPAdapter {
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "preview_selection",
+            description: """
+                Preview a proposed transform of the user's live selection WITHOUT committing \
+                anything — the agent's scratchpad for a selection edit, the same role \
+                render_sketch's ephemeral strokes play for stroke authoring: synthesize → \
+                render → refine → only then commit via transform_selection. `ops` is exactly \
+                one operation, the same shape as transform_selection: rotate \
+                {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} \
+                (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — \
+                pivoting on the reference point the USER placed (noReferencePoint if none is \
+                set). Returns a PNG plus metadata: canvas-space bounds for each transformed \
+                selected element (and, with includePoints, each stroke's transformed points), \
+                the overall selection bounds/referencePoint, and — per grid — the same line \
+                families render_sketch reports, so you can align the proposed transform before \
+                committing it. `include`: "withContext" (default) renders the grid and the \
+                rest of the document's content behind the moved selection; "selectionOnly" \
+                renders just the transformed selection, transparent background, no grid pixels \
+                (grid metadata is still reported). `rect` bounds the render like \
+                render_sketch's; omit for auto-fit. Nothing here is ever written to the \
+                document or the live selection. REQUIRES a connected `controlSelection` device \
+                with an active selection.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "ops": .object([
+                        "type": "array",
+                        "description": "Exactly one operation, same shape as transform_selection's ops.",
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "include": .object([
+                        "type": "string",
+                        "enum": .array(["withContext", "selectionOnly"].map(Value.string)),
+                        "description": """
+                            "withContext" (default): the grid plus the rest of the document's \
+                            content behind the moved selection. "selectionOnly": just the \
+                            transformed selection, transparent background, no grid pixels (grid \
+                            metadata is still reported).
+                            """,
+                    ]),
+                    "rect": .object([
+                        "type": "array",
+                        "description": """
+                            [x, y, w, h] in canvas coordinates. Omit for auto-fit.
+                            """,
+                        "items": .object(["type": "number"]),
+                        "minItems": 4,
+                        "maxItems": 4,
+                    ]),
+                    "includePoints": .object([
+                        "type": "boolean",
+                        "description": """
+                            Include each transformed stroke's canvas-space points alongside its \
+                            bounds. Defaults to false.
+                            """,
+                    ]),
+                ]),
+                "required": .array(["docId", "ops"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1403,6 +1465,7 @@ public actor MCPAdapter {
         case "select_elements": return await callSelectElements(arguments)
         case "set_reference_point": return await callSetReferencePoint(arguments)
         case "clear_selection": return await callClearSelection(arguments)
+        case "preview_selection": return await callPreviewSelection(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2502,6 +2565,68 @@ public actor MCPAdapter {
 
             let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
             return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Renders a proposed transform of the live selection WITHOUT committing
+    /// anything — modeled EXACTLY on `callRenderSketch` (same two-content
+    /// `.image` + `.text` result shape), but gated on `controlSelection`
+    /// like every other selection tool. A pure relay: this tool does zero
+    /// geometry itself — it collects args, builds the `previewSelection`
+    /// op-spec envelope, and hands it to the device, which does the actual
+    /// transform + render (`RectSelect_Ex_AgentSelection.previewSelectionForAgent`,
+    /// app repo). Optional args (`include`/`rect`/`includePoints`) ride into
+    /// the envelope only when the caller actually supplied them — never as
+    /// an explicit null — mirroring `callTransformSelection`'s conditional
+    /// `expect` and `callRenderSketch`'s parameter loop.
+    private func callPreviewSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
+            let include = try Self.optionalStringArg(arguments, "include")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("previewSelection"),
+                "ops": .array(ops),
+            ]
+            if let include {
+                envelope["include"] = .string(include)
+            }
+            for key in ["rect", "includePoints"] {
+                if let value = arguments?[key], !value.isNull {
+                    envelope[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return CallTool.Result(content: [
+                .image(data: out.bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+                .text(text: out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}", annotations: nil, _meta: nil),
+            ])
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
