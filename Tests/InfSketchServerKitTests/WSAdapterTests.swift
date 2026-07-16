@@ -542,6 +542,58 @@ private struct ServerMessageReader {
             payload: .inline(Data("bytes".utf8)), failureReason: "ignored-because-payload-wins"))
         #expect(try await task.value == Data("bytes".utf8))
     }
+
+    /// REGRESSION (found by the live sim↔server E2E, 2026-07-16): a `strokeOpReply` with NO
+    /// bytes but a `meta` payload and no `failureReason` is a SUCCESS. The selection ops
+    /// (get_selection / transform_selection / select_all / select_elements /
+    /// set_reference_point / clear_selection) return their descriptor JSON in `meta` with nil
+    /// bytes; WSAdapter previously substituted "unspecified" for ANY nil-payload reply, so it
+    /// misrouted every selection op as `deviceFailed: unspecified` over the real wire. The
+    /// existing MCP-level selection tests missed it because their `FakeStrokeOpDevice` always
+    /// replies with an INLINE payload (even empty `Data()`), so they take the inline-success
+    /// arm and never reach this `payload == nil` branch — this is the first test to send a
+    /// literal `payload: nil` with `meta` present, the shape a real device actually sends.
+    @Test func strokeOpReplyWithMetaAndNoBytesIsSuccess() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task {
+            try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
+        }
+        guard case .strokeOpRequest(let requestId, _, _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        let meta = Data(#"{"active":false,"elements":[]}"#.utf8)
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "d", payload: nil, meta: meta, failureReason: nil))
+        let reply = try await task.value
+        #expect(reply.meta == meta)   // success carrying the descriptor JSON, not deviceFailed
+    }
+
+    /// The truly-empty reply (no bytes, no meta, no failureReason) stays malformed → the
+    /// "unspecified" substitution still applies (the meta-only fix must not weaken this).
+    @Test func strokeOpReplyWithNothingIsDeviceFailed() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        let task = Task {
+            try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
+        }
+        guard case .strokeOpRequest(let requestId, _, _, _) = try await reader.next() else {
+            Issue.record("expected strokeOpRequest frame"); return
+        }
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "d", payload: nil, meta: nil, failureReason: nil))
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("unspecified")) {
+            _ = try await task.value
+        }
+    }
 }
 
 @Suite struct WSAdapterListDocsTests {
