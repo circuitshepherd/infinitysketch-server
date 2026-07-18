@@ -1270,7 +1270,8 @@ public actor MCPAdapter {
             name: "transform_selection",
             description: """
                 Transform the user's live selection exactly as a manual rect-select transform would \
-                (one undoable step). `ops` is a list of ONE operation (batch comes later): rotate \
+                (one undoable step). `ops` is a list of 1 to 16 operations, composed left-to-right \
+                into one undo step (single fixed reference point): rotate \
                 {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), \
                 translate {op:"translate",dx,dy} (canvas points, no reference point), flipHorizontal / \
                 flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none \
@@ -1285,7 +1286,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id."]),
                     "ops": .object([
                         "type": "array",
-                        "description": "Exactly one operation.",
+                        "description": "1 to 16 operations, composed left-to-right into one undo step.",
                         "items": .object(["type": "object"]),
                     ]),
                     "expect": .object(["type": "string", "description": "signature from get_selection."]),
@@ -1380,8 +1381,9 @@ public actor MCPAdapter {
                 Preview a proposed transform of the user's live selection WITHOUT committing \
                 anything — the agent's scratchpad for a selection edit, the same role \
                 render_sketch's ephemeral strokes play for stroke authoring: synthesize → \
-                render → refine → only then commit via transform_selection. `ops` is exactly \
-                one operation, the same shape as transform_selection: rotate \
+                render → refine → only then commit via transform_selection. `ops` is 1 to 16 \
+                operations, composed left-to-right into one undo step (single fixed reference \
+                point), the same shape as transform_selection: rotate \
                 {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} \
                 (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — \
                 pivoting on the reference point the USER placed (noReferencePoint if none is \
@@ -1403,8 +1405,18 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id."]),
                     "ops": .object([
                         "type": "array",
-                        "description": "Exactly one operation, same shape as transform_selection's ops.",
+                        "description": """
+                            1 to 16 operations, composed left-to-right into one undo step \
+                            (single fixed reference point), same shape as transform_selection's ops.
+                            """,
                         "items": .object(["type": "object"]),
+                    ]),
+                    "duplicate": .object([
+                        "type": "boolean",
+                        "description": """
+                            Preview a stamp: render the originals plus a transformed copy together \
+                            (requires ops).
+                            """,
                     ]),
                     "include": .object([
                         "type": "string",
@@ -1434,6 +1446,36 @@ public actor MCPAdapter {
                     ]),
                 ]),
                 "required": .array(["docId", "ops"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "duplicate_selection",
+            description: """
+                Duplicate the user's live selection on a connected device. With no `ops`: a \
+                provisional copy in place — like the toolbar's duplicate, it commits on a later \
+                edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as \
+                transform_selection's, composed left-to-right around the single reference \
+                point): clone + transform as one "stamp" undo step. Returns the new elements' \
+                keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if \
+                the user changed the selection since (selectionChanged). REQUIRES a connected \
+                `controlSelection` device with an active selection.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "ops": .object([
+                        "type": "array",
+                        "description": """
+                            1 to 16 operations, composed left-to-right into one undo step \
+                            (single fixed reference point), same shape as transform_selection's \
+                            ops. Omit for a provisional in-place copy.
+                            """,
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "expect": .object(["type": "string", "description": "signature from get_selection."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
             ])
         ),
     ]
@@ -1466,6 +1508,7 @@ public actor MCPAdapter {
         case "set_reference_point": return await callSetReferencePoint(arguments)
         case "clear_selection": return await callClearSelection(arguments)
         case "preview_selection": return await callPreviewSelection(arguments)
+        case "duplicate_selection": return await callDuplicateSelection(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2579,10 +2622,12 @@ public actor MCPAdapter {
     /// geometry itself — it collects args, builds the `previewSelection`
     /// op-spec envelope, and hands it to the device, which does the actual
     /// transform + render (`RectSelect_Ex_AgentSelection.previewSelectionForAgent`,
-    /// app repo). Optional args (`include`/`rect`/`includePoints`) ride into
+    /// app repo). Optional args (`include`/`rect`/`includePoints`/`duplicate`) ride into
     /// the envelope only when the caller actually supplied them — never as
     /// an explicit null — mirroring `callTransformSelection`'s conditional
-    /// `expect` and `callRenderSketch`'s parameter loop.
+    /// `expect` and `callRenderSketch`'s parameter loop. `duplicate` (Task 7,
+    /// Milestone 3) previews a stamp: originals plus a transformed copy,
+    /// rendered together — requires `ops`.
     private func callPreviewSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -2600,7 +2645,7 @@ public actor MCPAdapter {
             if let include {
                 envelope["include"] = .string(include)
             }
-            for key in ["rect", "includePoints"] {
+            for key in ["rect", "includePoints", "duplicate"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -2627,6 +2672,59 @@ public actor MCPAdapter {
                 .image(data: out.bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
                 .text(text: out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}", annotations: nil, _meta: nil),
             ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Duplicates the user's live selection on a connected device (Task 7,
+    /// Milestone 3) — same relay skeleton as `callTransformSelection`, but
+    /// `ops` is OPTIONAL here: omitted, the device makes a provisional
+    /// in-place copy (toolbar-duplicate semantics); supplied, it clones then
+    /// transforms as one "stamp" undo step. `expect`, when supplied, rides
+    /// along verbatim so the device can reject a stale caller with
+    /// `selectionChanged`, exactly like `transform_selection`. Deep
+    /// validation (op-count 1–16, shape) is the device's job, surfaced
+    /// verbatim as `deviceFailed: <reason>`.
+    private func callDuplicateSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ops = try Self.optionalValueArrayArg(arguments, "ops")
+            let expect = try Self.optionalStringArg(arguments, "expect")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("duplicateSelection")]
+            if let ops {
+                envelope["ops"] = .array(ops)
+            }
+            if let expect {
+                envelope["expect"] = .string(expect)
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -2779,6 +2877,18 @@ public actor MCPAdapter {
     private static func nonEmptyValueArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [Value] {
         guard let value = arguments?[key] else { throw ArgumentError.missing(key) }
         guard case .array(let items) = value, !items.isEmpty else { throw ArgumentError.invalidType(key) }
+        return items
+    }
+
+    /// An optional JSON array argument, returned as raw `Value`s — mirrors
+    /// `nonEmptyValueArrayArg`, but `nil` when the key is absent/null rather
+    /// than an error, and an empty array is not rejected. Used by
+    /// `duplicate_selection`'s `ops`: omitted means a provisional in-place
+    /// copy (device-side), so unlike `transform_selection`/`preview_selection`
+    /// there is no required, non-empty `ops`.
+    private static func optionalValueArrayArg(_ arguments: [String: Value]?, _ key: String) throws -> [Value]? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
+        guard case .array(let items) = value else { throw ArgumentError.invalidType(key) }
         return items
     }
 
