@@ -693,8 +693,8 @@ private actor FakeStrokeOpDevice {
     // agent-selection-control spec): select_all/select_elements/
     // set_reference_point/clear_selection joined the surface alongside M1's
     // get_selection/transform_selection. Milestone 2 (Task 3/Task 4) added
-    // preview_selection.
-    @Test func listToolsContainsAllTwentyTwoTools() async throws {
+    // preview_selection. Milestone 3 (Task 7) added duplicate_selection.
+    @Test func listToolsContainsAllTwentyThreeTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -708,7 +708,7 @@ private actor FakeStrokeOpDevice {
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
-            "preview_selection",
+            "preview_selection", "duplicate_selection",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -3486,6 +3486,187 @@ private actor FakeStrokeOpDevice {
             name: "preview_selection", arguments: ["docId": "d", "ops": opsArg])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceFailed: noReferencePoint")
+
+        await server.stop()
+    }
+
+    /// `duplicate` (Task 7, Milestone 3) rides into the envelope only when
+    /// supplied, same conditional splicing as `rect`/`includePoints` — pins
+    /// that it comes through as a plain JSON bool alongside `ops`.
+    @Test func previewSelectionWithDuplicateRelaysDuplicateInEnvelope() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1, 2, 3]), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([
+            .object(["op": .string("translate"), "dx": .double(20), "dy": .double(0)])
+        ])
+        let (_, isError) = try await client.callTool(
+            name: "preview_selection",
+            arguments: ["docId": "d", "ops": opsArg, "duplicate": .bool(true)])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "ops", "duplicate"])
+        #expect(envelope["op"] as? String == "previewSelection")
+        #expect(envelope["duplicate"] as? Bool == true)
+
+        await server.stop()
+    }
+
+    // MARK: - duplicate_selection (Task 7, Milestone 3)
+    //
+    // Same relay skeleton as transform_selection's tests above: a
+    // `controlSelection`-capable `FakeStrokeOpDevice` stands in for the
+    // connected device, `.bytesWithMeta` supplies the reply's `meta` JSON,
+    // and `device.receivedRequests[0].spec` is decoded to pin the exact
+    // op-spec envelope shape relayed to the device. Unlike
+    // `transform_selection`, `ops` is OPTIONAL: omitted, the device makes a
+    // provisional in-place copy; supplied, it clones + transforms as one
+    // "stamp" undo step.
+
+    /// Pins the exact op-spec envelope `duplicate_selection` relays when
+    /// `ops` is supplied.
+    @Test func duplicateSelectionWithOpsRelaysOpsInEnvelope() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let metaBytes = Data(#"{"newStrokeKeys":["clone1:1.0"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([
+            .object(["op": .string("translate"), "dx": .double(40), "dy": .double(0)])
+        ])
+        let (content, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "ops"])
+        #expect(envelope["op"] as? String == "duplicateSelection")
+        let ops = try #require(envelope["ops"] as? [[String: Any]])
+        #expect(ops.count == 1)
+        #expect(ops.first?["op"] as? String == "translate")
+        #expect(ops.first?["dx"] as? Double == 40)
+
+        await server.stop()
+    }
+
+    /// A call that omits `ops` (a provisional in-place copy, like the
+    /// toolbar's duplicate) must omit the field from the envelope rather
+    /// than sending an explicit null, mirroring
+    /// `transformSelectionOmitsExpectWhenNotSupplied`.
+    @Test func duplicateSelectionWithoutOpsOmitsOpsFromEnvelope() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "d"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+        #expect(envelope["op"] as? String == "duplicateSelection")
+
+        await server.stop()
+    }
+
+    /// `expect`, when supplied, rides along verbatim — mirrors
+    /// `transformSelectionRelaysOpsAndExpectInEnvelope`.
+    @Test func duplicateSelectionRelaysExpectWhenSupplied() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "d", "expect": .string("sig-456")])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "expect"])
+        #expect(envelope["expect"] as? String == "sig-456")
+
+        await server.stop()
+    }
+
+    /// Only a `controlSelection`-capable device is picked — mirrors
+    /// `previewSelectionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable`.
+    @Test func duplicateSelectionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "controlSelection".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data()))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func duplicateSelectionUnknownDocReturnsToolError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // No fake device needs to connect — unknownDoc short-circuits before
+        // any device round trip, mirroring every other tool's unknownDoc path.
+
+        let (content, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func duplicateSelectionDeviceFailurePropagatesReason() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("noSelectionActive"), capabilities: ["controlSelection"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "duplicate_selection", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: noSelectionActive")
 
         await server.stop()
     }
