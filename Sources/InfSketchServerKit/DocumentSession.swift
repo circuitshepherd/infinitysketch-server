@@ -182,7 +182,7 @@ actor DocumentSession {
     /// broadcast echo remains the subscriber-facing ack; the returned seq is
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
-    func submit(opId: String, payload: OpPayload, expectedBytes: Data? = nil) -> SubmitOutcome {
+    func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none) -> SubmitOutcome {
         guard payload.type == "fullDoc" else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
         }
@@ -209,8 +209,27 @@ actor DocumentSession {
         // same actor turn as the write below, so nothing can interleave
         // between the compare and the store.save — and it must stay ABOVE
         // that save: below it, a rejected write would already have hit disk.
-        if let expectedBytes, bytes != expectedBytes {
-            return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
+        //
+        // `.absent` is the creation-side twin: "this document must not
+        // already exist". The STORE is the durable truth for that check —
+        // never `bytes` (a `createIfMissing` session starts `bytes = Data()`,
+        // indistinguishable in-memory from a genuinely-empty saved doc) and
+        // never `seq` (resets to 0 on recycle). Same actor turn, directly
+        // above `store.save`, single writer per docId -> atomic: a second
+        // `.absent` submit racing the first sees the first's write only
+        // after this turn completes, so it correctly loses.
+        switch expectation {
+        case .none:
+            break
+        case .matchBytes(let expected):
+            if bytes != expected {
+                return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
+            }
+        case .absent:
+            let alreadyExists = (try? store.exists(docId: docId)) ?? false
+            if alreadyExists {
+                return .rejected(.reject(docId: docId, opId: opId, reason: "docExists", seq: seq))
+            }
         }
         do {
             try store.save(docId: docId, bytes: newBytes)

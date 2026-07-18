@@ -109,12 +109,12 @@ public actor SessionManager {
     }
 
     public func submit(
-        docId: String, opId: String, payload: OpPayload, expectedBytes: Data? = nil
+        docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation = .none
     ) async -> SubmitOutcome {
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
-        let outcome = await session.submit(opId: opId, payload: payload, expectedBytes: expectedBytes)
+        let outcome = await session.submit(opId: opId, payload: payload, expectation: expectation)
         // The status event uses the seq the write itself returned — a
         // separate `await session.seq` read here could observe a LATER
         // racing write's seq (see SubmitOutcome).
@@ -133,7 +133,8 @@ public actor SessionManager {
     /// A session that was already live (has real subscribers/watchers) is
     /// left completely alone; only the absent-session branch runs.
     public func submitOpeningSession(
-        docId: String, createIfMissing: Bool, opId: String, payload: OpPayload, expectedBytes: Data? = nil
+        docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
+        expectation: WriteExpectation = .none
     ) async -> SubmitOutcome {
         if sessions[docId] == nil {
             let session: DocumentSession
@@ -150,10 +151,12 @@ public actor SessionManager {
             scheduleGraceTeardown(docId: docId)
         }
         // The freshly-opened session's `bytes` are the store's current
-        // content (loaded synchronously above), so `expectedBytes` still
+        // content (loaded synchronously above), so `.matchBytes` still
         // compares against live content at write time here — no separate
-        // pre-check needed.
-        return await submit(docId: docId, opId: opId, payload: payload, expectedBytes: expectedBytes)
+        // pre-check needed. `.absent` reads the store directly (see
+        // `DocumentSession.submit`), so it's equally correct on this
+        // just-opened session.
+        return await submit(docId: docId, opId: opId, payload: payload, expectation: expectation)
     }
 
     /// Live session bytes when a session is open, else the store's on-disk

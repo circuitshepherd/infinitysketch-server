@@ -2777,15 +2777,38 @@ public actor MCPAdapter {
     /// ship, and write unconditionally — silently reopening this plan's data
     /// loss. Required means the compiler, not a test, is the guard; every
     /// call site must state its expectation, `nil` included.
+    ///
+    /// This `expectedBytes:` form is a convenience wrapper over the general
+    /// `expectation:` form below (`nil` -> `.none`, `some` -> `.matchBytes`)
+    /// kept so the existing write tools (draw_strokes/add_text/replace_doc/
+    /// etc.) compile unchanged and stay behavior-identical — flipping
+    /// `create_doc`/`replace_doc` to `.absent` is later task scope, not this one.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
         expectedBytes: Data?, successText: (Int) -> String
+    ) async -> CallTool.Result {
+        await submitAndRespond(
+            docId: docId, createIfMissing: createIfMissing, fullDoc: bytes,
+            expectation: expectedBytes.map(WriteExpectation.matchBytes) ?? .none,
+            successText: successText
+        )
+    }
+
+    /// General form: any `WriteExpectation` (`.none` / `.matchBytes` /
+    /// `.absent`). `.absent` is what lets a create-path tool assert "this
+    /// document must not already exist" atomically (Task 2) instead of the
+    /// read-then-check-then-write race a manual `docExists` pre-check leaves
+    /// open — see `DocumentSession.submit`'s `.absent` branch for where the
+    /// guard actually lives (same actor turn as `store.save`).
+    private func submitAndRespond(
+        docId: String, createIfMissing: Bool, fullDoc bytes: Data,
+        expectation: WriteExpectation, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
         switch await manager.submitOpeningSession(
             docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload,
-            expectedBytes: expectedBytes
+            expectation: expectation
         ) {
         case .accepted(let seq):
             return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])

@@ -121,6 +121,10 @@ private final class StaleReadStore: DocumentStore, @unchecked Sendable {
         defer { lock.unlock() }
         savedBytes.append(bytes)
     }
+
+    func exists(docId: String) throws -> Bool {
+        docId == self.docId
+    }
 }
 
 /// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK

@@ -214,7 +214,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         _ = try await manager.subscribe(docId: "D")
         let outcome = await manager.submit(docId: "D", opId: "op1",
                                            payload: OpPayload(type: "fullDoc", data: Data("v2".utf8)),
-                                           expectedBytes: original)
+                                           expectation: .matchBytes(original))
         guard case .accepted = outcome else { Issue.record("expected accepted, got \(outcome)"); return }
         #expect(await manager.currentBytes(docId: "D") == Data("v2".utf8))
     }
@@ -231,7 +231,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         // Now the stale-based write (the agent's) must be refused.
         let outcome = await manager.submit(docId: "D", opId: "agent",
                                            payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
-                                           expectedBytes: stale)
+                                           expectation: .matchBytes(stale))
         guard case .rejected(let message) = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
         guard case .reject(_, _, let reason, _) = message else { Issue.record("expected .reject, got \(message)"); return }
         #expect(reason == "docChangedDuringOp")
@@ -269,7 +269,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         // Then a stale-expectation write, which must be rejected without broadcasting.
         let outcome = await manager.submit(docId: "D", opId: "agent",
                                            payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
-                                           expectedBytes: stale)
+                                           expectation: .matchBytes(stale))
         guard case .rejected = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
 
         await manager.unsubscribe(docId: "D", token: sub.token)
@@ -301,7 +301,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let outcome = await manager.submitOpeningSession(
             docId: "D", createIfMissing: false, opId: "agent",
             payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
-            expectedBytes: stale)
+            expectation: .matchBytes(stale))
         guard case .rejected(let message) = outcome else { Issue.record("expected rejected, got \(outcome)"); return }
         guard case .reject(_, _, let reason, _) = message else { Issue.record("expected .reject, got \(message)"); return }
         #expect(reason == "docChangedDuringOp")
@@ -317,7 +317,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         let outcome = await manager.submitOpeningSession(
             docId: "D", createIfMissing: false, opId: "agent",
             payload: OpPayload(type: "fullDoc", data: Data("v2-agent".utf8)),
-            expectedBytes: current)
+            expectation: .matchBytes(current))
         guard case .accepted = outcome else { Issue.record("expected accepted, got \(outcome)"); return }
         #expect(try store.load(docId: "D") == Data("v2-agent".utf8))
     }
