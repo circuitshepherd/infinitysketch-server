@@ -1229,9 +1229,11 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// Task 2 (write CAS): the missing-doc branch must stay `expectedBytes:
-    /// nil` (there is nothing to compare against) with `createIfMissing:
-    /// true` unchanged — a fresh docId must still create successfully.
+    /// Task 2 origin, updated for Task 3: the missing-doc branch is no
+    /// longer unconditional (`expectedBytes: nil`) — it now expects
+    /// `.absent` (there's nothing to compare BYTES against, but the doc
+    /// genuinely must not already exist), with `createIfMissing: true`
+    /// unchanged. A fresh docId must still create successfully.
     @Test func replaceDocOnMissingDocStillCreates() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -1248,6 +1250,42 @@ private actor FakeStrokeOpDevice {
         let rawContents = try await client.readResource(uri: "infsketch://doc/totally-new/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == freshBytes)
+
+        await server.stop()
+    }
+
+    /// Task 3: proves `replace_doc`'s missing-doc branch genuinely landed
+    /// via `.absent` (not silently still unconditional) — a doc it just
+    /// created is visible to a SUBSEQUENT `create_doc` call for the same
+    /// docId, which must see it exists and reject before ever contacting a
+    /// device (no fake device is even connected in this test, so a call
+    /// that reached the device would hang/fail loudly rather than produce
+    /// `docExists`). This is the cross-tool twin of
+    /// `createDocTwiceOnSameFreshIdSecondSeesDocExists` above, and — like
+    /// that test — is a deterministic SEQUENTIAL check; the atomicity of
+    /// `.absent` under genuine concurrency is proven independently by
+    /// `AbsentCreateRaceTests.concurrentAbsentCreatesOnlyOneWins`
+    /// (`WriteExpectationEnforcementTests.swift`, Task 2), which races two
+    /// `SessionManager.submitOpeningSession(..., expectation: .absent)`
+    /// calls directly — the exact code path both `replace_doc`'s
+    /// missing-doc branch and `create_doc` now share.
+    @Test func replaceDocCreatesAbsentDocThenCreateDocSeesItExists() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let freshBytes = Data(#"{"aaa001_thumbnailData":"","marker":"via-replace"}"#.utf8)
+        let (createContent, createIsError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "replace-then-create", "bytes": .string(freshBytes.base64EncodedString())])
+        #expect(createIsError != true)
+        #expect(toolResultText(createContent).contains("seq 1"))
+
+        let (raceContent, raceIsError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "replace-then-create"])
+        #expect(raceIsError == true)
+        #expect(toolResultText(raceContent) == "docExists")
 
         await server.stop()
     }
@@ -1409,11 +1447,15 @@ private actor FakeStrokeOpDevice {
 
     // MARK: - create_doc (Task 4)
 
-    /// Task 2 (write CAS): `create_doc` is deliberately UNCHANGED — there is
-    /// no prior content to compare against, so its `docExists` guard remains
-    /// the race's only meaningful shape here. Pin both halves: no
-    /// `docChangedDuringOp` sentence in its description (unlike the six
-    /// CAS-guarded tools), and creation still succeeds normally.
+    /// Task 2 (write CAS) origin, still true after Task 3's `.absent` flip:
+    /// `create_doc`'s PUBLISHED shape is unaffected — there is no prior
+    /// content to compare BYTES against, so `docExists` (now the atomic
+    /// `.absent` guard, not just the fast pre-check) remains the race's only
+    /// meaningful shape here. Pin both halves: no `docChangedDuringOp`
+    /// sentence in its description (unlike the six CAS-guarded tools), and
+    /// creation still succeeds normally. See
+    /// `createDocTwiceOnSameFreshIdSecondSeesDocExists` below for the new
+    /// half of the contract Task 3 adds on top of this.
     @Test func createDocIsUnaffected() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -1508,6 +1550,46 @@ private actor FakeStrokeOpDevice {
         // The existence check must short-circuit BEFORE ever contacting the
         // device — no createDocRequest should have been sent.
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Task 3: end-to-end proof that `create_doc`'s write genuinely uses
+    /// `.absent` now, not just the fast `manager.currentBytes(docId:) != nil`
+    /// pre-check above — this exercises the FULL lifecycle on a brand-new
+    /// docId (unlike `createDocOnExistingDocErrors`, which reuses the
+    /// server's pre-seeded "d"): first call creates it via a real device
+    /// round trip; the second sees it already exists and is rejected before
+    /// ever contacting the device again. The docExists here could in
+    /// principle be produced by the pre-check alone (both calls are
+    /// sequential, not concurrent) — the atomicity of the underlying
+    /// `.absent` guard under GENUINE concurrency is proven independently, at
+    /// the `SessionManager` layer, by
+    /// `AbsentCreateRaceTests.concurrentAbsentCreatesOnlyOneWins`
+    /// (`WriteExpectationEnforcementTests.swift`, Task 2) — the same
+    /// `submitOpeningSession(..., expectation: .absent)` call this tool's
+    /// `submitAndRespond` now makes.
+    @Test func createDocTwiceOnSameFreshIdSecondSeesDocExists() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (firstContent, firstIsError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "twice-fresh"])
+        #expect(firstIsError != true)
+        #expect(toolResultText(firstContent).contains("seq 1"))
+
+        let (secondContent, secondIsError) = try await client.callTool(
+            name: "create_doc", arguments: ["docId": "twice-fresh"])
+        #expect(secondIsError == true)
+        #expect(toolResultText(secondContent) == "docExists")
+
+        // Only the first create ever reached the device — the second was
+        // rejected by the fast pre-check before any second createDocRequest.
+        #expect(await device.receivedRequests.count == 1)
 
         await server.stop()
     }

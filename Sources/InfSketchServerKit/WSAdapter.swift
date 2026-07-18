@@ -142,17 +142,16 @@ actor Connection {
                 await manager.unsubscribe(docId: docId, token: sub.token)
             }
 
-        case .op(let docId, let opId, let payload, _):
-            // `expectation` isn't consulted yet — that's the CAS-enforcement
-            // work of a later task; Task 1 only threads the field through
-            // the wire shape without changing submit behavior.
+        case .op(let docId, let opId, let payload, let expectation):
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
             // WS submitters take their ack from the broadcast echo (which
             // carries the assigned seq), so only a rejection needs
             // forwarding here.
-            if let reject = await manager.submit(docId: docId, opId: opId, payload: payload).rejectMessage {
+            if let reject = await manager.submit(
+                docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none
+            ).rejectMessage {
                 emit(reject)
             }
 
