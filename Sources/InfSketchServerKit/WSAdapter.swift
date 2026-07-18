@@ -142,7 +142,10 @@ actor Connection {
                 await manager.unsubscribe(docId: docId, token: sub.token)
             }
 
-        case .op(let docId, let opId, let payload):
+        case .op(let docId, let opId, let payload, _):
+            // `expectation` isn't consulted yet — that's the CAS-enforcement
+            // work of a later task; Task 1 only threads the field through
+            // the wire shape without changing submit behavior.
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }

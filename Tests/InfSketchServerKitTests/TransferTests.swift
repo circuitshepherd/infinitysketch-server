@@ -118,7 +118,7 @@ import InfSketchWire
         var sender = TransferSender<ClientMessage>(inlineLimit: 0, chunkSize: 8)
         func announcedId(_ frames: [WireFrame]) throws -> UInt32? {
             guard case .text(let json) = frames.first,
-                  case .op(_, _, let payload) = try ClientMessage(jsonText: json),
+                  case .op(_, _, let payload, _) = try ClientMessage(jsonText: json),
                   case .transfer(let d) = payload.bulk else { return nil }
             return d.transferId
         }
