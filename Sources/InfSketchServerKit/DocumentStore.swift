@@ -16,6 +16,11 @@ public protocol DocumentStore: Sendable {
     func list() throws -> [StoredDocInfo]
     func load(docId: String) throws -> Data
     func save(docId: String, bytes: Data) throws
+    /// Durable existence check — the source of truth for `WriteExpectation
+    /// .absent` (Task 2): a `DocumentSession`'s in-memory `bytes` can't tell
+    /// a fresh `createIfMissing` empty doc from a genuinely-empty saved one,
+    /// and `seq` resets on session recycle, so neither can stand in for this.
+    func exists(docId: String) throws -> Bool
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -56,6 +61,10 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func save(docId: String, bytes: Data) throws {
         try bytes.write(to: try fileURL(for: docId), options: .atomic)
+    }
+
+    public func exists(docId: String) throws -> Bool {
+        FileManager.default.fileExists(atPath: try fileURL(for: docId).path)
     }
 
     private func fileURL(for docId: String) throws -> URL {

@@ -128,6 +128,63 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .error(reason: "notSubscribed"))
     }
 
+    /// Task 3: the `.op` case used to bind the wire `expectation` field and
+    /// throw it away (`case .op(let docId, let opId, let payload, _):`),
+    /// always submitting with the default `.none`. This proves the field now
+    /// reaches `manager.submit` for real: a `.absent` write on a
+    /// freshly-subscribed (never-saved) doc is accepted, and a SECOND
+    /// `.absent` write to the same docId is rejected `docExists` — the exact
+    /// atomic guard `DocumentSession.submit` enforces (pinned in isolation by
+    /// `WriteExpectationEnforcementTests`/`AbsentCreateRaceTests`), now
+    /// reachable from a genuine WS client message instead of only from the
+    /// MCP tool call path.
+    @Test func opWithAbsentExpectationEnforcesCreateCAS() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        try harness.send(.subscribe(docId: "wsAbsent", fromSeq: nil, createIfMissing: true))
+        #expect(try await reader.next() == .subscribed(docId: "wsAbsent", seq: 0, snapshot: .inline(Data())))
+
+        let firstPayload = OpPayload(type: "fullDoc", data: Data([1, 2, 3]))
+        try harness.send(.op(docId: "wsAbsent", opId: "create-1", payload: firstPayload, expectation: .absent))
+        #expect(
+            try await reader.next()
+                == .event(docId: "wsAbsent", seq: 1, kind: "op", opId: "create-1", payload: firstPayload))
+
+        let secondPayload = OpPayload(type: "fullDoc", data: Data([4, 5, 6]))
+        try harness.send(.op(docId: "wsAbsent", opId: "create-2", payload: secondPayload, expectation: .absent))
+        #expect(try await reader.next() == .reject(docId: "wsAbsent", opId: "create-2", reason: "docExists", seq: 1))
+    }
+
+    /// The `.matchBytes` twin of the above, on the same forwarding path: a
+    /// stale expectation is rejected `docChangedDuringOp` and a current one
+    /// is accepted — confirming the `expectation ?? .none` forwarding didn't
+    /// regress the pre-existing (already-wired-since-Task-1) matchBytes/none
+    /// shapes while adding `.absent`.
+    @Test func opWithMatchBytesExpectationEnforcesWriteCAS() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: []))
+        _ = try await reader.next()
+
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
+
+        let stalePayload = OpPayload(type: "fullDoc", data: Data([9, 9, 9]))
+        try harness.send(.op(
+            docId: "d", opId: "stale-1", payload: stalePayload, expectation: .matchBytes(Data("not-current".utf8))))
+        #expect(try await reader.next() == .reject(docId: "d", opId: "stale-1", reason: "docChangedDuringOp", seq: 0))
+
+        let currentPayload = OpPayload(type: "fullDoc", data: Data([1, 1, 1]))
+        try harness.send(.op(
+            docId: "d", opId: "current-1", payload: currentPayload, expectation: .matchBytes(Fixtures.docBytes)))
+        #expect(
+            try await reader.next()
+                == .event(docId: "d", seq: 1, kind: "op", opId: "current-1", payload: currentPayload))
+    }
+
     @Test func disconnectReleasesSubscriptions() async throws {
         let manager = try makeManager()
         let harness = try await Harness(manager: manager)

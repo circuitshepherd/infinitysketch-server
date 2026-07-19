@@ -1775,14 +1775,18 @@ public actor MCPAdapter {
 
     /// Unlike the other three text tools, this never reads/parses the
     /// current bytes to compute the replacement — the bytes are opaque by
-    /// design (spec: "the agent owns their validity"). It still gets a CAS
-    /// (Task 2, write CAS): read the doc's current bytes first and pass them
-    /// as the expectation when it exists; `nil` when it doesn't, which also
-    /// selects the create path via `createIfMissing: true` (unchanged). A
-    /// blind overwrite of a doc that changed under the agent's feet is
-    /// exactly the loss this plan exists to prevent — on rejection, the
+    /// design (spec: "the agent owns their validity"). It gets a CAS on both
+    /// branches (Task 2 write CAS + Task 3 expect-absent create CAS): read
+    /// the doc's current bytes first and pass `.matchBytes(currentBytes)`
+    /// when it exists, `.absent` when it doesn't — the latter also selects
+    /// the create path via `createIfMissing: true` (unchanged) and, being
+    /// enforced against the store in the same actor turn as the write
+    /// (`DocumentSession.submit`), closes the same create-vs-create race
+    /// `create_doc` closes. A blind overwrite of a doc that changed under the
+    /// agent's feet, or a blind create over one a racing caller just created,
+    /// is exactly the loss this plan exists to prevent — on rejection, the
     /// agent can re-read and re-decide instead of clobbering someone else's
-    /// edit. `createIfMissing: true` is harmless in the existing-doc branch
+    /// write. `createIfMissing: true` is harmless in the existing-doc branch
     /// too (it only matters when no session and no stored doc exist), so one
     /// call covers both branches.
     private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
@@ -1791,7 +1795,8 @@ public actor MCPAdapter {
             let bytes = try Self.base64DataArg(arguments, "bytes")
             let currentBytes = await manager.currentBytes(docId: docId)
             return await submitAndRespond(
-                docId: docId, createIfMissing: true, fullDoc: bytes, expectedBytes: currentBytes
+                docId: docId, createIfMissing: true, fullDoc: bytes,
+                expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
             ) { seq in
                 "replaced \(docId) at seq \(seq)"
             }
@@ -1834,12 +1839,14 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            // expectedBytes: nil — nothing to compare against (the doc did not
-            // exist when `docExists` was checked above), so this write is
-            // deliberately unconditional. Stated explicitly, not defaulted,
-            // per the review's M1.
+            // expectation: .absent — the fast-fail `docExists` check above is
+            // a pre-device-round-trip convenience only (never wake a device
+            // for a docId that's already taken); the ATOMIC guard against a
+            // racing create for the same docId is this `.absent` expectation,
+            // enforced in the same actor turn as the write itself
+            // (`DocumentSession.submit`, Task 2).
             return await submitAndRespond(
-                docId: docId, createIfMissing: true, fullDoc: bytes, expectedBytes: nil
+                docId: docId, createIfMissing: true, fullDoc: bytes, expectation: .absent
             ) { seq in
                 "created \(docId) at seq \(seq)"
             }
@@ -2763,29 +2770,58 @@ public actor MCPAdapter {
     /// could have bumped past this write's own seq before the read ran),
     /// `.rejected` becomes a tool error carrying the server's reason
     /// verbatim — this is also how a stale `expectedBytes` (Task 2, write
-    /// CAS) surfaces: `docChangedDuringOp` flows through unchanged, no
-    /// separate mapping needed.
+    /// CAS) or an expect-absent violation (Task 3, create CAS) surfaces:
+    /// `docChangedDuringOp` / `docExists` flow through unchanged, no separate
+    /// mapping needed.
     ///
     /// `expectedBytes` MUST be the exact bytes the caller already
     /// read/relayed for this write — never a fresh re-read taken here, which
     /// would just re-open the very race window this guard exists to close.
-    /// `nil` means unconditional (`create_doc`, and the missing-doc branch of
-    /// `replace_doc`).
+    /// `nil` means unconditional. As of Task 3, no call site actually passes
+    /// `nil` here any more — `create_doc` and the missing-doc branch of
+    /// `replace_doc` call the `expectation:` overload below directly with
+    /// `.absent` instead, so `nil`/unconditional stays reachable through this
+    /// overload only in principle, for any future caller that has a genuine
+    /// reason to skip the guard.
     ///
     /// DELIBERATELY NOT DEFAULTED (Task 2 review, M1): a write tool added
     /// tomorrow that simply forgets the parameter would otherwise compile,
     /// ship, and write unconditionally — silently reopening this plan's data
     /// loss. Required means the compiler, not a test, is the guard; every
     /// call site must state its expectation, `nil` included.
+    ///
+    /// This `expectedBytes:` form is a convenience wrapper over the general
+    /// `expectation:` form below (`nil` -> `.none`, `some` -> `.matchBytes`)
+    /// kept so the existing write tools (draw_strokes/add_text/etc.) compile
+    /// unchanged and stay behavior-identical. `create_doc`/`replace_doc` were
+    /// flipped to call the `expectation:` overload directly with `.absent`
+    /// (Task 3) — see `callCreateDoc`/`callReplaceDoc` above.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
         expectedBytes: Data?, successText: (Int) -> String
+    ) async -> CallTool.Result {
+        await submitAndRespond(
+            docId: docId, createIfMissing: createIfMissing, fullDoc: bytes,
+            expectation: expectedBytes.map(WriteExpectation.matchBytes) ?? .none,
+            successText: successText
+        )
+    }
+
+    /// General form: any `WriteExpectation` (`.none` / `.matchBytes` /
+    /// `.absent`). `.absent` is what lets a create-path tool assert "this
+    /// document must not already exist" atomically (Task 2) instead of the
+    /// read-then-check-then-write race a manual `docExists` pre-check leaves
+    /// open — see `DocumentSession.submit`'s `.absent` branch for where the
+    /// guard actually lives (same actor turn as `store.save`).
+    private func submitAndRespond(
+        docId: String, createIfMissing: Bool, fullDoc bytes: Data,
+        expectation: WriteExpectation, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
         switch await manager.submitOpeningSession(
             docId: docId, createIfMissing: createIfMissing, opId: opId, payload: payload,
-            expectedBytes: expectedBytes
+            expectation: expectation
         ) {
         case .accepted(let seq):
             return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])

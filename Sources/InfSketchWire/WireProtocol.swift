@@ -18,6 +18,51 @@ public enum BulkPayload: Equatable, Sendable {
     }
 }
 
+/// A compare-and-swap expectation a client attaches to a write `op`. Every
+/// write to an EXISTING document already goes through an expected-bytes CAS
+/// (`matchBytes`, the shape `expectedBytes` already uses); the two *creation*
+/// paths (`create_doc`, `replace_doc`'s create branch) have no such guard yet
+/// — `absent` is what lets a create op assert "this document must not already
+/// exist" instead of silently overwriting one that raced into existence
+/// between read and write. `none` is today's unconditional-write behavior.
+public enum WriteExpectation: Equatable, Sendable {
+    case none
+    case matchBytes(Data)
+    case absent
+}
+
+extension WriteExpectation: Codable {
+    private enum CodingKeys: String, CodingKey { case kind, bytes }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "none":
+            self = .none
+        case "absent":
+            self = .absent
+        case "match":
+            self = .matchBytes(try c.decode(Data.self, forKey: .bytes))
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "unknown WriteExpectation kind: \(other)")
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .none:
+            try c.encode("none", forKey: .kind)
+        case .absent:
+            try c.encode("absent", forKey: .kind)
+        case .matchBytes(let bytes):
+            try c.encode("match", forKey: .kind)
+            try c.encode(bytes, forKey: .bytes)
+        }
+    }
+}
+
 public struct OpPayload: Equatable, Sendable {
     public var type: String
     public var bulk: BulkPayload
@@ -89,7 +134,7 @@ public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String])
     case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
     case unsubscribe(docId: String)
-    case op(docId: String, opId: String, payload: OpPayload)
+    case op(docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation? = nil)
     case subscribeStatus
     case unsubscribeStatus
     case listDocs
@@ -108,7 +153,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta
+        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation
     }
 
     public init(from decoder: any Decoder) throws {
@@ -129,7 +174,8 @@ extension ClientMessage: Codable {
             self = .op(
                 docId: try c.decode(String.self, forKey: .docId),
                 opId: try c.decode(String.self, forKey: .opId),
-                payload: try c.decode(OpPayload.self, forKey: .payload))
+                payload: try c.decode(OpPayload.self, forKey: .payload),
+                expectation: try c.decodeIfPresent(WriteExpectation.self, forKey: .expectation))
         case "subscribeStatus":
             self = .subscribeStatus
         case "unsubscribeStatus":
@@ -204,11 +250,12 @@ extension ClientMessage: Codable {
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
-        case .op(let docId, let opId, let payload):
+        case .op(let docId, let opId, let payload, let expectation):
             try c.encode("op", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(opId, forKey: .opId)
             try c.encode(payload, forKey: .payload)
+            try c.encodeIfPresent(expectation, forKey: .expectation)
         case .subscribeStatus:
             try c.encode("subscribeStatus", forKey: .type)
         case .unsubscribeStatus:
@@ -450,7 +497,7 @@ public extension ServerMessage {
 extension ClientMessage: TransferCarrying {
     public var bulkBytes: Data? {
         switch self {
-        case .op(_, _, let payload): return payload.bulk.inlineData
+        case .op(_, _, let payload, _): return payload.bulk.inlineData
         case .frame(_, let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
         case .strokeOpReply(_, _, let payload, _, _): return payload?.inlineData
@@ -459,9 +506,10 @@ extension ClientMessage: TransferCarrying {
     }
     public func replacingBulk(with descriptor: TransferDescriptor) -> ClientMessage {
         switch self {
-        case .op(let docId, let opId, let payload):
+        case .op(let docId, let opId, let payload, let expectation):
             return .op(docId: docId, opId: opId,
-                       payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
+                       payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)),
+                       expectation: expectation)
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .transfer(descriptor))
         case .createDocReply(let requestId, let docId, _, let failureReason):
@@ -479,7 +527,7 @@ extension ClientMessage: TransferCarrying {
     }
     public var openingDescriptor: TransferDescriptor? {
         switch self {
-        case .op(_, _, let payload):
+        case .op(_, _, let payload, _):
             if case .transfer(let d) = payload.bulk { return d }
             return nil
         case .frame(_, .transfer(let d)):
@@ -495,8 +543,9 @@ extension ClientMessage: TransferCarrying {
     }
     public func resolvingBulk(with bytes: Data) -> ClientMessage {
         switch self {
-        case .op(let docId, let opId, let payload):
-            return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes))
+        case .op(let docId, let opId, let payload, let expectation):
+            return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes),
+                       expectation: expectation)
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .inline(bytes))
         case .createDocReply(let requestId, let docId, _, let failureReason):
