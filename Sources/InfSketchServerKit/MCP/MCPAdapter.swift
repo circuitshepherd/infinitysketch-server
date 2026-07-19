@@ -1570,6 +1570,32 @@ public actor MCPAdapter {
                 "required": .array(["docId", "action"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "merge_docs",
+            description: """
+                Merges document `source` INTO document `target` by element identity (strokes \
+                by their composite key, texts/images by id): every element of both docs \
+                survives, shared elements dedupe, and a same-key clash is broken by `prefer` \
+                (default "target"). `target` becomes the union; `source` is left untouched. \
+                REQUIRES a connected device with the mergeDocs capability — fails with \
+                noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
+                either document is absent, and deviceFailed: <reason> if the device rejects \
+                the merge. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "source": .object(["type": "string", "description": "The document to merge FROM (left unchanged)."]),
+                    "target": .object(["type": "string", "description": "The document to merge INTO (becomes the union)."]),
+                    "prefer": .object([
+                        "type": "string",
+                        "enum": .array(["source", "target"].map(Value.string)),
+                        "description": "Which side wins a same-key clash. Default target.",
+                    ]),
+                ]),
+                "required": .array(["source", "target"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1604,6 +1630,7 @@ public actor MCPAdapter {
         case "list_collisions": return await callListCollisions()
         case "render_collision": return await callRenderCollision(arguments)
         case "resolve_collision": return await callResolveCollision(arguments)
+        case "merge_docs": return await callMergeDocs(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2970,6 +2997,77 @@ public actor MCPAdapter {
         }
     }
 
+    // MARK: - merge_docs (agent-merge-docs spec, Task 1: server relay)
+    //
+    // The server has no PencilKit, so an identity merge can't be computed
+    // here — it ships BOTH docs' bytes to a connected device (`target`'s as
+    // the relay's `docBytes`, `source`'s base64'd INSIDE the op-spec
+    // envelope) and the device runs the merge, replying with the merged
+    // bytes. The server then writes those bytes back to `target` under the
+    // same byte-CAS every other write tool uses (`target` changing during
+    // the device round-trip rejects docChangedDuringOp, exactly like
+    // draw_strokes/delete_strokes above). `source` is read but NEVER
+    // written — the merge leaves it untouched by construction, since only
+    // `target`'s bytes are relayed as `docBytes` and only `target` is the
+    // `submitAndRespond` target.
+
+    /// See the MARK above. `source == target` is rejected before either
+    /// doc's bytes are read (an in-place "merge into itself" is never a
+    /// meaningful request). `prefer` defaults to "target" — unlike
+    /// `resolve_collision`'s merge action (which defaults to "mine", the
+    /// local/device side), this tool has no inherent "mine" — the server
+    /// always sends a concrete `prefer` to the device rather than letting
+    /// the device pick its own default.
+    private func callMergeDocs(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let source = try Self.nonEmptyStringArg(arguments, "source")
+            let target = try Self.nonEmptyStringArg(arguments, "target")
+            guard source != target else { return Self.errorResult("invalidArguments") }
+            let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
+
+            guard let sourceBytes = await manager.currentBytes(docId: source) else {
+                return Self.errorResult("sourceNotFound")
+            }
+            guard let targetBytes = await manager.currentBytes(docId: target) else {
+                return Self.errorResult("targetNotFound")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("mergeDocs"),
+                    "prefer": .string(prefer),
+                    "sourceBytes": .string(sourceBytes.base64EncodedString()),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "mergeDocs")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // expectedBytes is targetBytes — the exact bytes relayed to the
+            // device — never a fresh re-read here, which would re-open the
+            // very race window this guard exists to close (Task 2, write CAS).
+            return await submitAndRespond(
+                docId: target, createIfMissing: false, fullDoc: out.bytes, expectedBytes: targetBytes
+            ) { seq in
+                "merged \(source) into \(target) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// Maps `DeviceCommandBroker.DeviceCommandError` to the published
     /// tool-error string for every device-relayed stroke-op tool
     /// (draw/delete/list_strokes; render_sketch since Task 5;
@@ -2977,7 +3075,8 @@ public actor MCPAdapter {
     /// 2026-07-14; snap_points since the grid-snapping spec, 2026-07-14;
     /// get/transform_selection and select_all/select_elements/
     /// set_reference_point/clear_selection since the agent-selection-control
-    /// spec). UNLIKE `create_doc` (whose `.requestInFlight` publishes
+    /// spec; merge_docs since the agent-merge-docs spec). UNLIKE `create_doc`
+    /// (whose `.requestInFlight` publishes
     /// the pinned "creationInProgress" string — see `callCreateDoc` above),
     /// these publish "opInProgress" per the Task 4 spec's error-string
     /// mapping; every one of these tools shares the same per-docId in-flight
