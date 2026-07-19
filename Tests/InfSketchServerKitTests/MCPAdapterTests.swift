@@ -712,8 +712,9 @@ private actor FakeStrokeOpDevice {
     // preview_selection. Milestone 3 (Task 7) added duplicate_selection.
     // agent-collision-resolution (Task 1) added list_collisions/
     // render_collision/resolve_collision, renaming this from
-    // `listToolsContainsAllTwentyThreeTools`.
-    @Test func listToolsContainsAllTwentySevenTools() async throws {
+    // `listToolsContainsAllTwentyThreeTools`. add_image (Task 2) added
+    // one more, renaming this from `listToolsContainsAllTwentySevenTools`.
+    @Test func listToolsContainsAllTwentyEightTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -729,6 +730,7 @@ private actor FakeStrokeOpDevice {
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
+            "add_image",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -4306,6 +4308,84 @@ private actor FakeStrokeOpDevice {
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "T"])
         #expect(isErrorIntoTarget == true)
         #expect(toolResultText(contentIntoTarget) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    // MARK: - add_image (Task 2)
+    //
+    // Places an image into a document, authored by a connected device
+    // (`ImageAuthoring`, app repo, Task 1). Relays a `{"op":"addImage",
+    // "imageBytes": <base64>, "x", "y", "width"?, "height"?, "opacity"?}`
+    // envelope through `broker.requestStrokeOp`, gated on the "authorImage"
+    // capability (not "authorStrokes"/"authorText" — a device that only
+    // authors strokes/text must not be picked for this), and surfaces the
+    // new image's id from the reply's `meta` — same shape as
+    // `styledAddTextRelaysTheStyleEnvelopeThroughTheDevice` above.
+
+    /// The exact relayed envelope key set, string-literally (mirroring the
+    /// styled add_text contract test): present-only optional keys, `bytes`
+    /// relayed verbatim as the base64 string under `imageBytes`, and the
+    /// new image's id (from `meta`) surfaced in the result text.
+    @Test func addImageRelaysEnvelopeAndSurfacesId() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let imageBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
+        let metaBytes = Data(#"{"id":"IMG-1"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes),
+            capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_image",
+            arguments: [
+                "docId": "d", "bytes": .string(imageBytes.base64EncodedString()),
+                "x": 10, "y": 20, "width": 50,
+            ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("IMG-1"), "add_image must surface the new image's id")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addImage")
+        // Exact envelope: present-only optionals — no height/opacity when omitted.
+        #expect(Set(spec.keys) == ["op", "imageBytes", "x", "y", "width"])
+        let relayedImageBytesB64 = try #require(spec["imageBytes"] as? String)
+        #expect(Data(base64Encoded: relayedImageBytesB64) == imageBytes)
+        #expect(spec["x"] as? Double == 10)
+        #expect(spec["y"] as? Double == 20)
+        #expect(spec["width"] as? Double == 50)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip — mirroring `mergeDocsIntoRejectsExistingNameWithoutWakingDevice`.
+    @Test func addImageUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_image",
+            arguments: ["docId": "ghost", "bytes": .string(Data([0x01, 0x02]).base64EncodedString()), "x": 0, "y": 0])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
     }
