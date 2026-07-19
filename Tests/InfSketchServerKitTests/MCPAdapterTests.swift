@@ -3991,6 +3991,66 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// (agent-collision-merge, Task 1) `action:"merge"` with `prefer` relays
+    /// both fields verbatim; `prefer` follows the same present-only
+    /// convention as `newName` — omitted when not supplied.
+    @Test func resolveCollisionRelaysMergeAndPrefer() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let metaBytes = Data(
+            #"{"docId":"Collision1","action":"merge","prefer":"theirs","recoveryAutosave":"x"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "resolve_collision",
+            arguments: ["docId": "Collision1", "action": "merge", "prefer": "theirs"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId", "action", "prefer"])
+        #expect(envelope["op"] as? String == "resolveCollision")
+        #expect(envelope["docId"] as? String == "Collision1")
+        #expect(envelope["action"] as? String == "merge")
+        #expect(envelope["prefer"] as? String == "theirs")
+
+        await server.stop()
+    }
+
+    /// A merge call that omits `prefer` (the default-to-"mine" case) must
+    /// omit the field from the envelope entirely, mirroring
+    /// `resolveCollisionRelaysNewNameWhenSupplied`'s omission check for
+    /// `newName`.
+    @Test func resolveCollisionOmitsPreferWhenNotSupplied() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "resolve_collision", arguments: ["docId": "Collision1", "action": "merge"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId", "action"])
+        #expect(envelope["prefer"] == nil)
+
+        await server.stop()
+    }
+
     @Test func resolveCollisionDeviceFailurePropagatesReason() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
