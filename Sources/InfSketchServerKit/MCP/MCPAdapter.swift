@@ -1577,6 +1577,8 @@ public actor MCPAdapter {
                 by their composite key, texts/images by id): every element of both docs \
                 survives, shared elements dedupe, and a same-key clash is broken by `prefer` \
                 (default "target"). `target` becomes the union; `source` is left untouched. \
+                With `into`, the union is written to a new document and both inputs are left \
+                untouched (docExists if `into` is taken). \
                 REQUIRES a connected device with the mergeDocs capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: <reason> if the device rejects \
@@ -1591,6 +1593,10 @@ public actor MCPAdapter {
                         "type": "string",
                         "enum": .array(["source", "target"].map(Value.string)),
                         "description": "Which side wins a same-key clash. Default target.",
+                    ]),
+                    "into": .object([
+                        "type": "string",
+                        "description": "Optional: write the union to a NEW document with this id, leaving both source and target untouched. docExists if the name is already taken.",
                     ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
@@ -2997,32 +3003,41 @@ public actor MCPAdapter {
         }
     }
 
-    // MARK: - merge_docs (agent-merge-docs spec, Task 1: server relay)
+    // MARK: - merge_docs (agent-merge-docs spec, Task 1: server relay;
+    // agent-merge-docs-into: optional `into` for a non-destructive merge)
     //
     // The server has no PencilKit, so an identity merge can't be computed
     // here — it ships BOTH docs' bytes to a connected device (`target`'s as
     // the relay's `docBytes`, `source`'s base64'd INSIDE the op-spec
     // envelope) and the device runs the merge, replying with the merged
-    // bytes. The server then writes those bytes back to `target` under the
-    // same byte-CAS every other write tool uses (`target` changing during
-    // the device round-trip rejects docChangedDuringOp, exactly like
-    // draw_strokes/delete_strokes above). `source` is read but NEVER
-    // written — the merge leaves it untouched by construction, since only
-    // `target`'s bytes are relayed as `docBytes` and only `target` is the
-    // `submitAndRespond` target.
+    // bytes. The relay itself never changes with `into` — `target`'s bytes
+    // are always what's sent as `docBytes`. Only the WRITE of the device's
+    // reply branches: with no `into`, the server writes those bytes back to
+    // `target` under the same byte-CAS every other write tool uses (`target`
+    // changing during the device round-trip rejects docChangedDuringOp,
+    // exactly like draw_strokes/delete_strokes above) and `source` is read
+    // but NEVER written. With `into`, the reply is instead written to a NEW
+    // document under `into`, guarded by the same expect-absent CAS
+    // `create_doc` uses (Task 3) — so BOTH `source` and `target` are left
+    // untouched.
 
     /// See the MARK above. `source == target` is rejected before either
     /// doc's bytes are read (an in-place "merge into itself" is never a
-    /// meaningful request). `prefer` defaults to "target" — unlike
-    /// `resolve_collision`'s merge action (which defaults to "mine", the
-    /// local/device side), this tool has no inherent "mine" — the server
-    /// always sends a concrete `prefer` to the device rather than letting
-    /// the device pick its own default.
+    /// meaningful request); likewise `into == source` / `into == target` (an
+    /// optional `into` compares unequal to a concrete `source`/`target` when
+    /// `into` is nil, so an absent `into` correctly passes this guard).
+    /// `prefer` defaults to "target" — unlike `resolve_collision`'s merge
+    /// action (which defaults to "mine", the local/device side), this tool
+    /// has no inherent "mine" — the server always sends a concrete `prefer`
+    /// to the device rather than letting the device pick its own default.
     private func callMergeDocs(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let source = try Self.nonEmptyStringArg(arguments, "source")
             let target = try Self.nonEmptyStringArg(arguments, "target")
-            guard source != target else { return Self.errorResult("invalidArguments") }
+            let into = try Self.optionalStringArg(arguments, "into")
+            guard source != target, into != source, into != target else {
+                return Self.errorResult("invalidArguments")
+            }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
 
             guard let sourceBytes = await manager.currentBytes(docId: source) else {
@@ -3030,6 +3045,11 @@ public actor MCPAdapter {
             }
             guard let targetBytes = await manager.currentBytes(docId: target) else {
                 return Self.errorResult("targetNotFound")
+            }
+            if let into {
+                if await manager.currentBytes(docId: into) != nil {
+                    return Self.errorResult("docExists")
+                }
             }
 
             let spec: Data
@@ -3053,13 +3073,30 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            // expectedBytes is targetBytes — the exact bytes relayed to the
-            // device — never a fresh re-read here, which would re-open the
-            // very race window this guard exists to close (Task 2, write CAS).
-            return await submitAndRespond(
-                docId: target, createIfMissing: false, fullDoc: out.bytes, expectedBytes: targetBytes
-            ) { seq in
-                "merged \(source) into \(target) at seq \(seq)"
+            // Two write shapes, branching on `into`:
+            //  - `into` present: the union is a NEW document, guarded by the
+            //    same expect-absent CAS `create_doc` uses (Task 3) — the
+            //    fast-fail check above is a convenience only; this is the
+            //    atomic guard against a racing create under the same `into`.
+            //    `source`/`target` are never written in this branch.
+            //  - `into` absent: unchanged — write in place into `target`
+            //    under the byte-CAS every other write tool uses.
+            if let into {
+                return await submitAndRespond(
+                    docId: into, createIfMissing: true, fullDoc: out.bytes, expectation: .absent
+                ) { seq in
+                    "merged \(source) and \(target) into \(into) at seq \(seq)"
+                }
+            } else {
+                // expectedBytes is targetBytes — the exact bytes relayed to
+                // the device — never a fresh re-read here, which would
+                // re-open the very race window this guard exists to close
+                // (Task 2, write CAS).
+                return await submitAndRespond(
+                    docId: target, createIfMissing: false, fullDoc: out.bytes, expectedBytes: targetBytes
+                ) { seq in
+                    "merged \(source) into \(target) at seq \(seq)"
+                }
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

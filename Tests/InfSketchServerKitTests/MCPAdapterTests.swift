@@ -4206,6 +4206,109 @@ private actor FakeStrokeOpDevice {
 
         await server.stop()
     }
+
+    // MARK: - merge_docs `into:` (agent-merge-docs-into, Task 1)
+    //
+    // `mergeDocsRelaysSourceBytesAndPrefer` above already pins the absent-`into`
+    // in-place behavior end-to-end (relay envelope, reply text "merged S into
+    // T", and `target`'s raw bytes becoming the merged blob) — no separate
+    // regression test is added here for that case.
+
+    /// `into` present + a free name: the union is written to a NEW document
+    /// under `into`; `source` and `target` are both left byte-unchanged. The
+    /// device relay itself is unchanged from the in-place case — still
+    /// `docId: target`/`docBytes: targetBytes` — only the final WRITE target
+    /// differs.
+    @Test func mergeDocsIntoWritesUnionToNewDocLeavingBothOriginals() async throws {
+        let targetBytes = Fixtures.docBytes
+        let sourceBytes = Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: targetBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "S", bytes: sourceBytes)
+
+        let mergedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(mergedBytes), capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("merged S and T into C"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "T")
+        #expect(received.docBytes == targetBytes)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "prefer", "sourceBytes"])
+
+        let cRaw = try await client.readResource(uri: "infsketch://doc/C/raw")
+        #expect(Data(base64Encoded: try #require(cRaw[0].blob)) == mergedBytes)
+
+        let sRaw = try await client.readResource(uri: "infsketch://doc/S/raw")
+        #expect(Data(base64Encoded: try #require(sRaw[0].blob)) == sourceBytes)
+
+        let tRaw = try await client.readResource(uri: "infsketch://doc/T/raw")
+        #expect(Data(base64Encoded: try #require(tRaw[0].blob)) == targetBytes)
+
+        await server.stop()
+    }
+
+    /// `into` names an already-existing doc: fast-fail `docExists`, mirroring
+    /// `createDocOnExistingDocErrors`'s pre-device-round-trip convenience
+    /// check — the device must never be woken for an `into` that's already
+    /// taken.
+    @Test func mergeDocsIntoRejectsExistingNameWithoutWakingDevice() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(
+            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        try await seedDocViaReplaceDoc(
+            client, docId: "C", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"existing"}"#.utf8))
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)),
+            capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "docExists")
+
+        // Fast-fail: the device must never be contacted for an already-taken `into`.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `into` equal to `source` or `target` is rejected up front as
+    /// `invalidArguments`, alongside `source == target` above.
+    @Test func mergeDocsIntoEqualToSourceOrTargetIsInvalid() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(
+            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+
+        let (contentIntoSource, isErrorIntoSource) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "S"])
+        #expect(isErrorIntoSource == true)
+        #expect(toolResultText(contentIntoSource) == "invalidArguments")
+
+        let (contentIntoTarget, isErrorIntoTarget) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "T"])
+        #expect(isErrorIntoTarget == true)
+        #expect(toolResultText(contentIntoTarget) == "invalidArguments")
+
+        await server.stop()
+    }
 }
 
 @Suite struct ResourceURITests {
