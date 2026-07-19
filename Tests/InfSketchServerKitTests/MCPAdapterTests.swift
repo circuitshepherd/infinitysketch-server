@@ -698,7 +698,10 @@ private actor FakeStrokeOpDevice {
     // set_reference_point/clear_selection joined the surface alongside M1's
     // get_selection/transform_selection. Milestone 2 (Task 3/Task 4) added
     // preview_selection. Milestone 3 (Task 7) added duplicate_selection.
-    @Test func listToolsContainsAllTwentyThreeTools() async throws {
+    // agent-collision-resolution (Task 1) added list_collisions/
+    // render_collision/resolve_collision, renaming this from
+    // `listToolsContainsAllTwentyThreeTools`.
+    @Test func listToolsContainsAllTwentySixTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -713,6 +716,7 @@ private actor FakeStrokeOpDevice {
             "snap_points", "list_fonts", "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
+            "list_collisions", "render_collision", "resolve_collision",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -3753,6 +3757,249 @@ private actor FakeStrokeOpDevice {
             name: "duplicate_selection", arguments: ["docId": "d"])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceFailed: noSelectionActive")
+
+        await server.stop()
+    }
+
+    // MARK: - list_collisions / render_collision / resolve_collision (agent-collision-resolution spec, Task 1)
+    //
+    // Same relay skeleton as the selection-control tools above: a
+    // `FakeStrokeOpDevice` stands in for the connected device,
+    // `.bytesWithMeta` supplies the reply's `meta` JSON, and
+    // `device.receivedRequests[0].spec` is decoded to pin the exact op-spec
+    // envelope shape relayed to the device. The capability is
+    // "resolveCollision" (not "controlSelection" or the default
+    // "authorStrokes") — a device hello'd with ONLY "resolveCollision"
+    // successfully answering proves both halves at once: WSAdapter's
+    // registration gate actually admits a resolveCollision-only device to
+    // the broker, and `requestStrokeOp`'s `capability: "resolveCollision"`
+    // argument actually selects it. Unlike every other stroke-op tool,
+    // `docBytes` is always `Data()` (the device reads its own local files,
+    // not bytes the server necessarily has) and there is no `unknownDoc`
+    // pre-check — a colliding docId need not be one the server's document
+    // store already knows about.
+
+    @Test func listCollisionsRelaysToResolveCollisionDeviceAndReturnsMeta() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let metaJSON = Data(
+            #"{"collisions":[{"docId":"Foo","local":{"strokes":3,"texts":0,"images":0,"pathBounds":[0,0,10,10]},"server":{"present":true}}]}"#
+                .utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaJSON),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "list_collisions", arguments: [:])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaJSON, as: UTF8.self))
+        #expect(toolResultText(content).contains("\"docId\":\"Foo\""))
+
+        // Device-wide: no per-doc bytes to relay, sentinel docId "".
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "")
+        #expect(received.docBytes.isEmpty)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+        #expect(envelope["op"] as? String == "listCollisions")
+
+        await server.stop()
+    }
+
+    /// Mirrors `getSelectionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable`:
+    /// a device that only advertises "authorStrokes" must NOT be picked for
+    /// a collision-resolution op.
+    @Test func listCollisionsWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        // Default capabilities: ["authorStrokes"] only — no "resolveCollision".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data()))
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "list_collisions", arguments: [:])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func renderCollisionReturnsImageContent() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD])
+        let metaBytes = Data(#"{"rect":[0,0,100,100],"scale":1.0}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: metaBytes),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // "Collision1" is deliberately NOT the seeded doc "d" — proving there
+        // is no manager.currentBytes/unknownDoc pre-check for this tool.
+        let (content, isError) = try await client.callTool(
+            name: "render_collision", arguments: ["docId": "Collision1"])
+        #expect(isError != true)
+
+        let image = try #require(toolResultImage(content))
+        #expect(image.mimeType == "image/png")
+        #expect(Data(base64Encoded: image.data) == pngBytes)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes.isEmpty)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId"])
+        #expect(envelope["op"] as? String == "renderCollision")
+        #expect(envelope["docId"] as? String == "Collision1")
+
+        await server.stop()
+    }
+
+    /// Pins that `rect`/`scale` are relayed present-only (omitted when not
+    /// supplied, carried verbatim when they are), mirroring
+    /// `renderSketchWithOnlyDocIdOmitsEveryOptionalField`.
+    @Test func renderCollisionRelaysRectAndScaleWhenSupplied() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{}"#.utf8)),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let rectArg: Value = .array([.double(1), .double(2), .double(30), .double(40)])
+        let (_, isError) = try await client.callTool(
+            name: "render_collision",
+            arguments: ["docId": "Collision1", "rect": rectArg, "scale": .double(2.5)])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId", "rect", "scale"])
+        #expect(envelope["scale"] as? Double == 2.5)
+        #expect(envelope["rect"] as? [Double] == [1, 2, 30, 40])
+
+        await server.stop()
+    }
+
+    @Test func renderCollisionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data()))
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_collision", arguments: ["docId": "Collision1"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Step 6's `resolveCollisionReturnsMetaAndGatesOnCapability`, split
+    /// like the rest of the suite's capability-gate tests: a device without
+    /// "resolveCollision" must fail noDeviceAvailable and never see the
+    /// request at all.
+    @Test func resolveCollisionWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        // Default capabilities: ["authorStrokes"] only — no "resolveCollision".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data()))
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "resolve_collision", arguments: ["docId": "Collision1", "action": "overwriteServer"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func resolveCollisionRelaysActionAndReturnsMeta() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let metaBytes = Data(#"{"docId":"Collision1","action":"overwriteServer"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "resolve_collision", arguments: ["docId": "Collision1", "action": "overwriteServer"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: metaBytes, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docBytes.isEmpty)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId", "action"])
+        #expect(envelope["op"] as? String == "resolveCollision")
+        #expect(envelope["docId"] as? String == "Collision1")
+        #expect(envelope["action"] as? String == "overwriteServer")
+
+        await server.stop()
+    }
+
+    /// A call that omits `newName` (the common case for
+    /// overwriteServer/adoptServer) must omit the field from the envelope
+    /// rather than sending an explicit null; `keepBoth` with `newName`
+    /// supplied must carry it verbatim.
+    @Test func resolveCollisionRelaysNewNameWhenSupplied() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "resolve_collision",
+            arguments: ["docId": "Collision1", "action": "keepBoth", "newName": "Collision1 copy"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "docId", "action", "newName"])
+        #expect(envelope["newName"] as? String == "Collision1 copy")
+
+        await server.stop()
+    }
+
+    @Test func resolveCollisionDeviceFailurePropagatesReason() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("collisionNotFound"), capabilities: ["resolveCollision"])
+        defer { Task { await device.close() } }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "resolve_collision", arguments: ["docId": "Collision1", "action": "adoptServer"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "deviceFailed: collisionNotFound")
 
         await server.stop()
     }

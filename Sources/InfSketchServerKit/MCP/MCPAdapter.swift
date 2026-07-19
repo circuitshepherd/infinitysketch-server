@@ -1478,6 +1478,84 @@ public actor MCPAdapter {
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "list_collisions",
+            description: """
+                Lists documents where the connected device's local copy and the server's copy \
+                have diverged — e.g. an offline edit, or a same-name document created on both \
+                sides. Device-wide (no docId — a collision can affect any document the device \
+                knows about, not just the one you're currently working on). For each colliding \
+                document, reports its local content summary (stroke/text/image counts and \
+                pathBounds) and whether the server has a copy at all. Nothing here is written or \
+                resolved — call render_collision to see either side, then resolve_collision to \
+                pick keepBoth/overwriteServer/adoptServer. REQUIRES a connected device with the \
+                resolveCollision capability — fails with noDeviceAvailable if none is connected.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([:]),
+            ])
+        ),
+        Tool(
+            name: "render_collision",
+            description: """
+                Renders a colliding document (named by list_collisions) so you can compare its \
+                local content against the server's before deciding how to resolve it. `rect`/ \
+                `scale` behave like render_sketch's: omit `rect` for auto-fit, `scale` raises \
+                resolution up to the 16x cap, and an over-large request is downscaled rather \
+                than refused. Returns a PNG plus the same render metadata render_sketch reports \
+                (grid line families, contentSize, appearance, the scale actually used). \
+                Read-only: nothing is written or resolved. REQUIRES a connected device with the \
+                resolveCollision capability — fails with noDeviceAvailable if none is connected.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The colliding document's id, from list_collisions."]),
+                    "rect": .object([
+                        "type": "array",
+                        "description": "[x, y, w, h] in canvas coordinates. Omit for auto-fit.",
+                        "items": .object(["type": "number"]),
+                        "minItems": 4,
+                        "maxItems": 4,
+                    ]),
+                    "scale": .object([
+                        "type": "number",
+                        "description": "Render scale, up to the 16x cap. Omit to let the device choose.",
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "resolve_collision",
+            description: """
+                Resolves a document collision reported by list_collisions with the named \
+                `action`: "keepBoth" (keeps both copies — the local one renamed to `newName`), \
+                "overwriteServer" (the local copy replaces the server's), or "adoptServer" (the \
+                server's copy replaces the local one). Nothing auto-resolves: this is the only \
+                one of the three collision tools that writes anything, and only the action you \
+                name. The side a destructive action (overwriteServer/adoptServer) discards is \
+                autosaved first, so it stays recoverable. REQUIRES a connected device with the \
+                resolveCollision capability — fails with noDeviceAvailable if none is connected.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The colliding document's id, from list_collisions."]),
+                    "action": .object([
+                        "type": "string",
+                        "enum": .array(["keepBoth", "overwriteServer", "adoptServer"].map(Value.string)),
+                        "description": "How to resolve the collision.",
+                    ]),
+                    "newName": .object([
+                        "type": "string",
+                        "description": "New name for the local copy, when action is \"keepBoth\".",
+                    ]),
+                ]),
+                "required": .array(["docId", "action"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1509,6 +1587,9 @@ public actor MCPAdapter {
         case "clear_selection": return await callClearSelection(arguments)
         case "preview_selection": return await callPreviewSelection(arguments)
         case "duplicate_selection": return await callDuplicateSelection(arguments)
+        case "list_collisions": return await callListCollisions()
+        case "render_collision": return await callRenderCollision(arguments)
+        case "resolve_collision": return await callResolveCollision(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2724,6 +2805,138 @@ public actor MCPAdapter {
             do {
                 out = try await broker.requestStrokeOp(
                     docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    // MARK: - Collision-resolution tools (agent-collision-resolution spec, Task 1)
+    //
+    // Same shape as the selection-control tools above: compose a minimal
+    // op-spec envelope, relay it plus `docBytes` through
+    // `broker.requestStrokeOp`, capability "resolveCollision". Unlike every
+    // other stroke-op tool, `docBytes` is always `Data()` here — a collision
+    // means the server's `manager` and the device's local file can genuinely
+    // disagree (or the server may not even have a copy of the colliding
+    // document at all), so there is no "the document's current bytes" to
+    // read or relay; the device resolves entirely from its own local files.
+    // For the same reason there is no `manager.currentBytes`/`unknownDoc`
+    // pre-check — the docId these tools operate on isn't necessarily one the
+    // server's document store knows about. `list_collisions` doesn't even
+    // take a docId: a collision can surface on any document the device
+    // knows about, so the relay is device-wide (sentinel `docId: ""`).
+    // None of the three tail into `submitAndRespond` — like
+    // transform_selection/duplicate_selection, the actual mutation (if any)
+    // happens live on the device; the server only relays the op-spec and
+    // passes the device's reply meta straight through.
+
+    /// Read-only, device-wide (no docId). Returns the device's collision
+    /// listing meta JSON verbatim, exactly like get_selection/select_all's
+    /// meta-only tools above.
+    private func callListCollisions() async -> CallTool.Result {
+        let spec: Data
+        do {
+            spec = try JSONEncoder().encode(Value.object(["op": .string("listCollisions")]))
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+
+        let out: DeviceCommandBroker.StrokeOpReply
+        do {
+            out = try await broker.requestStrokeOp(
+                docId: "", docBytes: Data(), spec: spec, capability: "resolveCollision")
+        } catch let error as DeviceCommandBroker.DeviceCommandError {
+            return Self.strokeOpErrorResult(error)
+        } catch {
+            return Self.errorResult("deviceFailed: \(error)")
+        }
+
+        let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    }
+
+    /// Read-only, returns `.image` (PNG) + `.text` (metadata), exactly like
+    /// `callRenderSketch` — `rect`/`scale` are relayed present-only, the
+    /// same optional-pass-through convention `renderSpecParameterNames` uses.
+    private func callRenderCollision(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            var specFields: [String: Value] = ["op": .string("renderCollision"), "docId": .string(docId)]
+            for key in ["rect", "scale"] {
+                if let value = arguments?[key] {
+                    specFields[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(specFields))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: Data(), spec: spec, capability: "resolveCollision")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            let metadataText = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            return CallTool.Result(content: [
+                .image(data: out.bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+                .text(text: metadataText, annotations: nil, _meta: nil),
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The only collision-resolution tool that writes anything — the write
+    /// happens live on the device (which autosaves the side a destructive
+    /// action discards), so this still only relays meta, exactly like
+    /// select_all/duplicate_selection above; there is no `submitAndRespond`
+    /// tail here.
+    private func callResolveCollision(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let action = try Self.nonEmptyStringArg(arguments, "action")
+            let newName = try Self.optionalStringArg(arguments, "newName")
+
+            var envelope: [String: Value] = [
+                "op": .string("resolveCollision"), "docId": .string(docId), "action": .string(action),
+            ]
+            if let newName {
+                envelope["newName"] = .string(newName)
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: Data(), spec: spec, capability: "resolveCollision")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
