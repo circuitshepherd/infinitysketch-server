@@ -228,4 +228,105 @@ import Testing
         }
     }
 
+    // MARK: - removeImage (agent-remove-image)
+
+    @Test func removeImageDropsPlacedAndOrphanedPasted() throws {
+        let doc = Data(#"""
+        {
+          "placedImagesData": [
+            {"id": "P1", "pastedImageDataId": "B1", "rect": [[0, 0], [10, 10]]}
+          ],
+          "pastedImagesData": [
+            {"id": "B1", "data": "AAAA"}
+          ]
+        }
+        """#.utf8)
+        let out = try DocJSON.removeImage(from: doc, imageId: "P1")
+        let d = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        #expect((d["placedImagesData"] as! [Any]).isEmpty)
+        #expect((d["pastedImagesData"] as! [Any]).isEmpty)   // orphan pruned
+    }
+
+    @Test func removeImageKeepsSharedBlobWhenAnotherPlacedReferencesIt() throws {
+        let doc = Data(#"""
+        {
+          "placedImagesData": [
+            {"id": "P1", "pastedImageDataId": "B1", "rect": [[0, 0], [10, 10]]},
+            {"id": "P2", "pastedImageDataId": "B1", "rect": [[20, 20], [10, 10]]}
+          ],
+          "pastedImagesData": [
+            {"id": "B1", "data": "AAAA"}
+          ]
+        }
+        """#.utf8)
+        let out = try DocJSON.removeImage(from: doc, imageId: "P1")
+        let d = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        let placed = d["placedImagesData"] as! [[String: Any]]
+        #expect(placed.count == 1 && placed[0]["id"] as? String == "P2")
+        #expect((d["pastedImagesData"] as! [Any]).count == 1)   // B1 still referenced by P2 -> kept
+    }
+
+    @Test func removeImageUnknownIdThrowsImageNotFound() throws {
+        let doc = Data(#"""
+        {
+          "placedImagesData": [
+            {"id": "P1", "pastedImageDataId": "B1", "rect": [[0, 0], [10, 10]]}
+          ],
+          "pastedImagesData": [
+            {"id": "B1", "data": "AAAA"}
+          ]
+        }
+        """#.utf8)
+        #expect(throws: DocJSON.DocJSONError.imageNotFound) {
+            _ = try DocJSON.removeImage(from: doc, imageId: "NOPE")
+        }
+    }
+
+    /// Other document content (a placed text) survives untouched, and a STRAY
+    /// non-dictionary element in BOTH `placedImagesData` and
+    /// `pastedImagesData` is preserved — proof that removal casts each array
+    /// element individually rather than casting the whole array at once (the
+    /// same trap `removeText`'s stray-element regression test pins).
+    @Test func removeImagePreservesOtherContentAndStrayElements() throws {
+        let doc = Data(#"""
+        {
+          "placedTextsData": [
+            {
+              "id": "T1",
+              "text": ["Hello", {}],
+              "rect": [[10, 20], [1, 1]],
+              "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+              "opacity": 1, "pinned": false, "wordWrapEnabled": false,
+              "colorSchemeIsDark": false
+            }
+          ],
+          "placedImagesData": [
+            "stray-placed-element",
+            {"id": "P1", "pastedImageDataId": "B1", "rect": [[0, 0], [10, 10]]}
+          ],
+          "pastedImagesData": [
+            "stray-pasted-element",
+            {"id": "B1", "data": "AAAA"}
+          ]
+        }
+        """#.utf8)
+        let out = try DocJSON.removeImage(from: doc, imageId: "P1")
+        let d = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+
+        // Other content untouched:
+        #expect((d["placedTextsData"] as! [Any]).count == 1)
+
+        // The real entry is gone, the stray element survives:
+        let placed = d["placedImagesData"] as! [Any]
+        #expect(placed.count == 1)
+        #expect((placed[0] as? String) == "stray-placed-element")
+
+        // B1 was P1's only referencer, so it's pruned -- but the stray
+        // pasted-blob element is preserved (per-element casting, not a
+        // whole-array cast that would have emptied the array instead).
+        let pasted = d["pastedImagesData"] as! [Any]
+        #expect(pasted.count == 1)
+        #expect((pasted[0] as? String) == "stray-pasted-element")
+    }
+
 }

@@ -704,6 +704,22 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "remove_image",
+            description: """
+                Remove a placed image from a document by its id (as returned by add_image or \
+                reported by get_selection). unknownDoc if the document doesn't exist; \
+                imageNotFound if no placed image has that id. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "imageId": .object(["type": "string", "description": "The id of the placed image to remove."]),
+                ]),
+                "required": .array(["docId", "imageId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "replace_doc",
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
@@ -1644,6 +1660,7 @@ public actor MCPAdapter {
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
+        case "remove_image": return await callRemoveImage(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
         case "create_doc": return await callCreateDoc(arguments)
         case "draw_strokes": return await callDrawStrokes(arguments)
@@ -1992,6 +2009,32 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "removed \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callRemoveImage(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let imageId = try Self.stringArg(arguments, "imageId")
+
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.removeImage(from: bytes, imageId: imageId)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "removed \(imageId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -3303,6 +3346,7 @@ public actor MCPAdapter {
         switch error {
         case .invalidDocumentJSON: return "invalidDocumentJSON"
         case .textNotFound: return "textNotFound"
+        case .imageNotFound: return "imageNotFound"
         }
     }
 
