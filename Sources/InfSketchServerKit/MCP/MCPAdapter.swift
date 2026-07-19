@@ -1501,10 +1501,11 @@ public actor MCPAdapter {
             description: """
                 Renders a colliding document (named by list_collisions) so you can compare its \
                 local content against the server's before deciding how to resolve it. `rect`/ \
-                `scale` behave like render_sketch's: omit `rect` for auto-fit, `scale` raises \
-                resolution up to the 16x cap, and an over-large request is downscaled rather \
-                than refused. Returns a PNG plus the same render metadata render_sketch reports \
-                (grid line families, contentSize, appearance, the scale actually used). \
+                `maxPixels` behave like render_sketch's: omit `rect` for auto-fit, `maxPixels` \
+                bounds the pixel budget (defaults to 1000000, hard ceiling 4000000) — the scale \
+                rises to fill it, up to the 16x cap, and an over-large request is downscaled \
+                rather than refused. Returns a PNG plus the same render metadata render_sketch \
+                reports (grid line families, contentSize, appearance, the scale actually used). \
                 Read-only: nothing is written or resolved. REQUIRES a connected device with the \
                 resolveCollision capability — fails with noDeviceAvailable if none is connected.
                 """,
@@ -1519,9 +1520,13 @@ public actor MCPAdapter {
                         "minItems": 4,
                         "maxItems": 4,
                     ]),
-                    "scale": .object([
+                    "maxPixels": .object([
                         "type": "number",
-                        "description": "Render scale, up to the 16x cap. Omit to let the device choose.",
+                        "description": """
+                            Pixel budget. Defaults to 1000000, hard ceiling 4000000. An \
+                            over-large request is downscaled, not rejected, and the \
+                            metadata reports the scale actually used.
+                            """,
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
@@ -2866,14 +2871,14 @@ public actor MCPAdapter {
     }
 
     /// Read-only, returns `.image` (PNG) + `.text` (metadata), exactly like
-    /// `callRenderSketch` — `rect`/`scale` are relayed present-only, the
+    /// `callRenderSketch` — `rect`/`maxPixels` are relayed present-only, the
     /// same optional-pass-through convention `renderSpecParameterNames` uses.
     private func callRenderCollision(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
             var specFields: [String: Value] = ["op": .string("renderCollision"), "docId": .string(docId)]
-            for key in ["rect", "scale"] {
+            for key in ["rect", "maxPixels"] {
                 if let value = arguments?[key] {
                     specFields[key] = value
                 }

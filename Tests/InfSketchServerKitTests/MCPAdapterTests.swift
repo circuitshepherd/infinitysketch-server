@@ -3863,10 +3863,13 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// Pins that `rect`/`scale` are relayed present-only (omitted when not
+    /// Pins that `rect`/`maxPixels` are relayed present-only (omitted when not
     /// supplied, carried verbatim when they are), mirroring
-    /// `renderSketchWithOnlyDocIdOmitsEveryOptionalField`.
-    @Test func renderCollisionRelaysRectAndScaleWhenSupplied() async throws {
+    /// `renderSketchWithOnlyDocIdOmitsEveryOptionalField`. Also pins that
+    /// `scale` is NOT a recognized field — render_collision's resolution
+    /// knob is `maxPixels`, exactly like render_sketch's, not a `scale`
+    /// parameter (review fix: `scale` silently no-ops on auto-fit).
+    @Test func renderCollisionRelaysRectAndMaxPixelsWhenSupplied() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let device = try await FakeStrokeOpDevice(
@@ -3879,15 +3882,16 @@ private actor FakeStrokeOpDevice {
         let rectArg: Value = .array([.double(1), .double(2), .double(30), .double(40)])
         let (_, isError) = try await client.callTool(
             name: "render_collision",
-            arguments: ["docId": "Collision1", "rect": rectArg, "scale": .double(2.5)])
+            arguments: ["docId": "Collision1", "rect": rectArg, "maxPixels": .double(2_000_000)])
         #expect(isError != true)
 
         let received = try #require(await device.receivedRequests.first)
         let envelope = try #require(
             JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(Set(envelope.keys) == ["op", "docId", "rect", "scale"])
-        #expect(envelope["scale"] as? Double == 2.5)
+        #expect(Set(envelope.keys) == ["op", "docId", "rect", "maxPixels"])
+        #expect(envelope["maxPixels"] as? Double == 2_000_000)
         #expect(envelope["rect"] as? [Double] == [1, 2, 30, 40])
+        #expect(envelope["scale"] == nil)
 
         await server.stop()
     }
