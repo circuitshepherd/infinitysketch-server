@@ -111,8 +111,13 @@ actor Connection {
             // "controlSelection" (agent-selection-control spec) joined the
             // same way, for get_selection/transform_selection's
             // capability: "controlSelection" relay.
+            // "resolveCollision" (agent-collision-resolution spec) joined
+            // the same way, for list_collisions/render_collision/
+            // resolve_collision's capability: "resolveCollision" relay.
             let caps = Set(capabilities)
-            if !caps.isDisjoint(with: ["createDoc", "authorStrokes", "authorText", "controlSelection"]) {
+            if !caps.isDisjoint(with: [
+                "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
+            ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
