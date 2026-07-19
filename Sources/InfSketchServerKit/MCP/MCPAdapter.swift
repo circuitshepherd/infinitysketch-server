@@ -674,6 +674,36 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "add_image",
+            description: """
+                Place an image into a document. `bytes` is a base64-encoded PNG/JPEG/GIF; `x`,`y` are the \
+                TOP-LEFT corner of the placement in canvas coordinates. Optional `width`/`height` (canvas \
+                points) resize it — omit both for natural pixel size, give one to preserve aspect ratio, both \
+                for exact. Optional `opacity` (0..1, default 1). Requires a connected device (the image is \
+                decoded there) — noDeviceAvailable otherwise. Returns the new image's id. unknownDoc if the \
+                document doesn't exist; invalidSpec if the bytes aren't a decodable image.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "bytes": .object(["type": "string", "description": "Base64-encoded PNG/JPEG/GIF image data."]),
+                    "x": .object(["type": "number", "description": "Canvas-space x of the placement's top-left corner."]),
+                    "y": .object(["type": "number", "description": "Canvas-space y of the placement's top-left corner."]),
+                    "width": .object([
+                        "type": "number",
+                        "description": "Canvas-point width. Omit both width and height for natural pixel size; give one to preserve aspect ratio.",
+                    ]),
+                    "height": .object([
+                        "type": "number",
+                        "description": "Canvas-point height. Omit both width and height for natural pixel size; give one to preserve aspect ratio.",
+                    ]),
+                    "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
+                ]),
+                "required": .array(["docId", "bytes", "x", "y"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "replace_doc",
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
@@ -1611,6 +1641,7 @@ public actor MCPAdapter {
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
         case "add_text": return await callAddText(arguments)
+        case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
@@ -1732,6 +1763,74 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 var summary = "added styled text at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
+                   let id = decoded["id"] {
+                    summary += "\nid: \(id)"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `add_image` (Task 2): relays an `addImage` device op — `{op, imageBytes
+    /// (base64, relayed verbatim), x, y, width?, height?, opacity?}`, present-only
+    /// optionals — through `broker.requestStrokeOp`, gated on the "authorImage"
+    /// capability (a device that only authors strokes/text must not be picked
+    /// for this — same reasoning as `callAddTextStyled`'s "authorText" gate).
+    /// The image itself is decoded device-side (`ImageAuthoring`, app repo);
+    /// this relay never touches the bytes beyond passing the base64 string
+    /// through. `expectedBytes` is the exact bytes relayed to the device (the
+    /// write CAS, unchanged from every other relay tool) — never a fresh
+    /// re-read. Surfaces the new image's id (from the device reply's `meta`,
+    /// `{"id": …}`) in the result text, mirroring `callAddTextStyled`.
+    private func callAddImage(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let bytesB64 = try Self.stringArg(arguments, "bytes")  // relay verbatim as base64
+            let x = try Self.doubleArg(arguments, "x")
+            let y = try Self.doubleArg(arguments, "y")
+            let width = try Self.optionalDoubleArg(arguments, "width")
+            let height = try Self.optionalDoubleArg(arguments, "height")
+            let opacity = try Self.optionalDoubleArg(arguments, "opacity")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = [
+                "op": .string("addImage"), "imageBytes": .string(bytesB64),
+                "x": .double(x), "y": .double(y),
+            ]
+            if let width { envelope["width"] = .double(width) }
+            if let height { envelope["height"] = .double(height) }
+            if let opacity { envelope["opacity"] = .double(opacity) }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "added image to \(docId) at seq \(seq)"
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
                    let id = decoded["id"] {
