@@ -114,9 +114,12 @@ actor Connection {
             // "resolveCollision" (agent-collision-resolution spec) joined
             // the same way, for list_collisions/render_collision/
             // resolve_collision's capability: "resolveCollision" relay.
+            // "mergeDocs" (agent-merge-docs spec) joined the same way, for
+            // merge_docs's capability: "mergeDocs" relay.
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
+                "mergeDocs",
             ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in

@@ -253,6 +253,18 @@ private func toolResultImage(_ content: [Tool.Content]) -> (data: String, mimeTy
     return nil
 }
 
+/// Seeds a second document via the opaque-bytes `replace_doc` tool (the same
+/// tool `replaceDocForFreshIdStoresFile` etc. drive directly) — the
+/// `merge_docs` relay tests (agent-merge-docs, Task 1) need TWO distinct
+/// existing documents in the same running server, and `startServer` only
+/// seeds one via its `DirectoryDocumentStore`.
+private func seedDocViaReplaceDoc(_ client: Client, docId: String, bytes: Data) async throws {
+    let (_, isError) = try await client.callTool(
+        name: "replace_doc",
+        arguments: ["docId": .string(docId), "bytes": .string(bytes.base64EncodedString())])
+    #expect(isError != true)
+}
+
 /// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
 /// WebSocket client against the same running server's `/ws` endpoint (NOT
 /// the in-process `WSAdapterTests` harness — this needs to share the
@@ -701,7 +713,7 @@ private actor FakeStrokeOpDevice {
     // agent-collision-resolution (Task 1) added list_collisions/
     // render_collision/resolve_collision, renaming this from
     // `listToolsContainsAllTwentyThreeTools`.
-    @Test func listToolsContainsAllTwentySixTools() async throws {
+    @Test func listToolsContainsAllTwentySevenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -716,7 +728,7 @@ private actor FakeStrokeOpDevice {
             "snap_points", "list_fonts", "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
-            "list_collisions", "render_collision", "resolve_collision",
+            "list_collisions", "render_collision", "resolve_collision", "merge_docs",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -4064,6 +4076,133 @@ private actor FakeStrokeOpDevice {
             name: "resolve_collision", arguments: ["docId": "Collision1", "action": "adoptServer"])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceFailed: collisionNotFound")
+
+        await server.stop()
+    }
+
+    // MARK: - merge_docs (agent-merge-docs spec, Task 1: server relay)
+    //
+    // Same device-relay shape as resolve_collision's "merge" action: compose
+    // a minimal op-spec envelope, relay it plus TARGET's current bytes
+    // through `broker.requestStrokeOp` (capability "mergeDocs"), then write
+    // the device's merged reply back to `target` under the standard byte-CAS
+    // every other write tool uses. `source` is read but never written — its
+    // bytes travel base64'd INSIDE the spec envelope, never as the relay's
+    // `docBytes`.
+
+    /// Relay: callMergeDocs ships {op, prefer, sourceBytes(base64)} to the
+    /// device, docBytes = target's bytes.
+    @Test func mergeDocsRelaysSourceBytesAndPrefer() async throws {
+        let targetBytes = Fixtures.docBytes
+        let sourceBytes = Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: targetBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "S", bytes: sourceBytes)
+
+        let mergedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(mergedBytes), capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "prefer": "source"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("merged S into T"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "T")
+        #expect(received.docBytes == targetBytes)
+
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "prefer", "sourceBytes"])
+        #expect(envelope["op"] as? String == "mergeDocs")
+        #expect(envelope["prefer"] as? String == "source")
+        let encodedSource = try #require(envelope["sourceBytes"] as? String)
+        #expect(Data(base64Encoded: encodedSource) == sourceBytes)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/T/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == mergedBytes)
+
+        await server.stop()
+    }
+
+    /// A call that omits `prefer` (the default-to-"target" case) must relay
+    /// "target" verbatim, mirroring `resolveCollisionOmitsPreferWhenNotSupplied`'s
+    /// sibling default (that tool defaults to "mine"; this one to "target" —
+    /// the server always sends a concrete `prefer` to the device).
+    @Test func mergeDocsDefaultsPreferToTarget() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(
+            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)),
+            capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(envelope["prefer"] as? String == "target")
+
+        await server.stop()
+    }
+
+    /// `source` absent -> "sourceNotFound", checked before any device is
+    /// contacted (mirrors `unknownDoc`'s pre-device-round-trip convenience —
+    /// see `callCreateDoc`'s `docExists` pre-check).
+    @Test func mergeDocsErrorsSourceNotFound() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "NoSuchSource", "target": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "sourceNotFound")
+
+        await server.stop()
+    }
+
+    /// `target` absent -> "targetNotFound".
+    @Test func mergeDocsErrorsTargetNotFound() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "d", "target": "NoSuchTarget"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "targetNotFound")
+
+        await server.stop()
+    }
+
+    /// `source == target` -> "invalidArguments", checked before either doc's
+    /// bytes are even read.
+    @Test func mergeDocsRejectsSourceEqualsTarget() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "d", "target": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
 
         await server.stop()
     }
