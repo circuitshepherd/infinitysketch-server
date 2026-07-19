@@ -1537,12 +1537,16 @@ public actor MCPAdapter {
             description: """
                 Resolves a document collision reported by list_collisions with the named \
                 `action`: "keepBoth" (keeps both copies — the local one renamed to `newName`), \
-                "overwriteServer" (the local copy replaces the server's), or "adoptServer" (the \
-                server's copy replaces the local one). Nothing auto-resolves: this is the only \
-                one of the three collision tools that writes anything, and only the action you \
-                name. The side a destructive action (overwriteServer/adoptServer) discards is \
-                autosaved first, so it stays recoverable. REQUIRES a connected device with the \
-                resolveCollision capability — fails with noDeviceAvailable if none is connected.
+                "overwriteServer" (the local copy replaces the server's), "adoptServer" (the \
+                server's copy replaces the local one), or "merge" (a 2-way union by element \
+                identity — strokes/texts/images present on either side are kept; `prefer` picks \
+                which side wins when the same element differs on both, default "mine"). Nothing \
+                auto-resolves: this is the only one of the three collision tools that writes \
+                anything, and only the action you name. The side a destructive action \
+                (overwriteServer/adoptServer) discards, and the pre-merge local copy for \
+                "merge", is autosaved first, so it stays recoverable. REQUIRES a connected \
+                device with the resolveCollision capability — fails with noDeviceAvailable if \
+                none is connected.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1550,12 +1554,17 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The colliding document's id, from list_collisions."]),
                     "action": .object([
                         "type": "string",
-                        "enum": .array(["keepBoth", "overwriteServer", "adoptServer"].map(Value.string)),
+                        "enum": .array(["keepBoth", "overwriteServer", "adoptServer", "merge"].map(Value.string)),
                         "description": "How to resolve the collision.",
                     ]),
                     "newName": .object([
                         "type": "string",
                         "description": "New name for the local copy, when action is \"keepBoth\".",
+                    ]),
+                    "prefer": .object([
+                        "type": "string",
+                        "enum": .array(["mine", "theirs"].map(Value.string)),
+                        "description": "for merge: which side wins a same-identity element clash; default mine",
                     ]),
                 ]),
                 "required": .array(["docId", "action"].map(Value.string)),
@@ -2923,12 +2932,16 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let action = try Self.nonEmptyStringArg(arguments, "action")
             let newName = try Self.optionalStringArg(arguments, "newName")
+            let prefer = try Self.optionalStringArg(arguments, "prefer")
 
             var envelope: [String: Value] = [
                 "op": .string("resolveCollision"), "docId": .string(docId), "action": .string(action),
             ]
             if let newName {
                 envelope["newName"] = .string(newName)
+            }
+            if let prefer {
+                envelope["prefer"] = .string(prefer)
             }
 
             let spec: Data
