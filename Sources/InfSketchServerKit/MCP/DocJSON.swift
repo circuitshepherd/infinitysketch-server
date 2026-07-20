@@ -45,6 +45,7 @@ public enum DocJSON {
     public enum DocJSONError: Error, Equatable {
         case invalidDocumentJSON
         case textNotFound
+        case imageNotFound
     }
 
     // MARK: - Read
@@ -152,6 +153,32 @@ public enum DocJSON {
         }
         elements.remove(at: index)
         doc["placedTextsData"] = elements
+        return try serialize(doc)
+    }
+
+    /// Removes a placed-image entry by id, then orphan-prunes its backing
+    /// `pastedImagesData` blob IFF no *remaining* placed image still
+    /// references the same `pastedImageDataId` — two placed images can share
+    /// one blob via paste-dedup, so the blob only goes when nothing else
+    /// points at it. Every other array element (including unrecognized ones,
+    /// in either array) is left untouched in place. Throws `.imageNotFound`
+    /// if no placed image matches `imageId`.
+    public static func removeImage(from bytes: Data, imageId: String) throws -> Data {
+        var doc = try parseDocument(bytes)
+        var placed = (doc["placedImagesData"] as? [Any]) ?? []
+        guard let index = entryIndex(withId: imageId, in: placed) else {
+            throw DocJSONError.imageNotFound
+        }
+        let removedPastedId = (placed[index] as? [String: Any])?["pastedImageDataId"] as? String
+        placed.remove(at: index)
+        doc["placedImagesData"] = placed
+        // Orphan-prune the backing blob IFF no remaining placement references it (images can share a blob).
+        if let removedPastedId,
+           !placed.contains(where: { ($0 as? [String: Any])?["pastedImageDataId"] as? String == removedPastedId }) {
+            var pasted = (doc["pastedImagesData"] as? [Any]) ?? []
+            pasted.removeAll { ($0 as? [String: Any])?["id"] as? String == removedPastedId }
+            doc["pastedImagesData"] = pasted
+        }
         return try serialize(doc)
     }
 

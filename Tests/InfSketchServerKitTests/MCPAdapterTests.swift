@@ -714,7 +714,9 @@ private actor FakeStrokeOpDevice {
     // render_collision/resolve_collision, renaming this from
     // `listToolsContainsAllTwentyThreeTools`. add_image (Task 2) added
     // one more, renaming this from `listToolsContainsAllTwentySevenTools`.
-    @Test func listToolsContainsAllTwentyEightTools() async throws {
+    // remove_image (agent-remove-image) added one more, renaming this from
+    // `listToolsContainsAllTwentyEightTools`.
+    @Test func listToolsContainsAllTwentyNineTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -730,7 +732,7 @@ private actor FakeStrokeOpDevice {
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
-            "add_image",
+            "add_image", "remove_image",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1172,6 +1174,71 @@ private actor FakeStrokeOpDevice {
         let summaryJSON = try #require(summaryContents[0].text)
         let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
         #expect(envelope.summary.texts.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - remove_image (agent-remove-image)
+    //
+    // Entirely server-side (pure JSON record-filtering, no device, no
+    // capability) -- mirrors remove_text almost exactly. Since there's no
+    // device-relayed `add_image` harness helper that lands a placed image
+    // server-side without a device round trip, these seed the doc's raw
+    // bytes directly (JSONSerialization, as in DocJSONTests) via
+    // `startServer(bytes:)`, the same seeding seam other tool tests use.
+
+    private static let seededImageDocBytes = Data(#"""
+        {"aaa001_thumbnailData":"",
+         "placedImagesData":[{"id":"IMG-X","pastedImageDataId":"B1","rect":[[0,0],[10,10]]}],
+         "pastedImagesData":[{"id":"B1","data":"AAAA"}]}
+        """#.utf8)
+
+    @Test func removeImageRemovesFromDocAndReplies() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.seededImageDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_image", arguments: ["docId": "d", "imageId": "IMG-X"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "removed IMG-X at seq 1")
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        let rawBytes = try #require(Data(base64Encoded: rawBlob))
+        let obj = try JSONSerialization.jsonObject(with: rawBytes) as! [String: Any]
+        #expect((obj["placedImagesData"] as! [Any]).isEmpty)
+        // The blob is orphan-pruned too (IMG-X was its only referencer).
+        #expect((obj["pastedImagesData"] as! [Any]).isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func removeImageUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.seededImageDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_image", arguments: ["docId": "ghost", "imageId": "IMG-X"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func removeImageUnknownIdSurfacesImageNotFound() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.seededImageDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_image", arguments: ["docId": "d", "imageId": "NOPE"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "imageNotFound")
 
         await server.stop()
     }
