@@ -720,7 +720,9 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllTwentyNineTools`. list_grids/add_grid/update_grid/
     // remove_grid/set_grid_origin (agent-grid-authoring, Task 3) added five
     // more, renaming this from `listToolsContainsAllThirtyOneTools`.
-    @Test func listToolsContainsAllThirtySixTools() async throws {
+    // reorder_grids (agent-grid-reorder, Task 2) added one more, renaming
+    // this from `listToolsContainsAllThirtySixTools`.
+    @Test func listToolsContainsAllThirtySevenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -738,6 +740,7 @@ private actor FakeStrokeOpDevice {
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
+            "reorder_grids",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -4919,6 +4922,112 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "unknownDoc")
 
         // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// The exact relayed envelope: `{op:"reorderGrids", orderedIds:[...]}`,
+    /// capability "authorGrids" (proven by the fake device only advertising
+    /// that capability — mirrors every other grid tool's device harness) —
+    /// mirrors `removeGridRelaysOpAndId`'s minimal-envelope assertion.
+    @Test func reorderGridsRelaysOrderedIdsAndCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grids-reordered"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modifiedBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_grids",
+            arguments: ["docId": "d", "orderedIds": ["id1", "id2"]])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("2"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "reorderGrids")
+        #expect(Set(spec.keys) == ["op", "orderedIds"])
+        #expect(spec["orderedIds"] as? [String] == ["id1", "id2"])
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func reorderGridsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_grids", arguments: ["docId": "ghost", "orderedIds": ["id1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `orderedIds: []` is a VALID no-op (a 0-grid document reorders to
+    /// nothing) — it must relay to the device, NOT be rejected as a
+    /// server-side empty-array argument error. The device (Task 1) is what
+    /// decides count-vs-gridCount validity; the server relays verbatim.
+    @Test func reorderGridsEmptyOrderedIdsRelays() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grids-reordered-empty"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modifiedBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_grids",
+            arguments: ["docId": "d", "orderedIds": []])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "reorderGrids")
+        #expect(spec["orderedIds"] as? [String] == [])
+
+        await server.stop()
+    }
+
+    /// Absent `orderedIds` -> a server-side `missingArgument`, short-circuiting
+    /// BEFORE any device round trip — distinct from the present-but-empty
+    /// no-op case above.
+    @Test func reorderGridsMissingOrderedIdsErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_grids", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "missingArgument: orderedIds")
+
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
