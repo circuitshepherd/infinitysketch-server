@@ -894,6 +894,154 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_grids",
+            description: """
+                Lists a document's grids, one per grid, as {id, type, spacing, snap, \
+                rotation, offset, pivot, color, thickness, visible, enabled, families} — \
+                authored by a connected InfinitySketch device. `type` is one of \
+                "grid"/"horizontal"/"vertical"/"isometric"; `color` is "#RRGGBBAA" hex. \
+                `visible` (drawn) and `enabled` (snapped-to) are independent — check both. \
+                `families` are the derived line families (from GridGeometry), the same \
+                vocabulary render_sketch reports, so a grid's id here is what \
+                snap_points' gridIds and transform_strokes' snapTo refer to. REQUIRES a \
+                connected device — fails with noDeviceAvailable if none is connected and \
+                deviceTimeout if it doesn't respond in time. Returns the device's listing \
+                verbatim as text; this call never writes to the document. unknownDoc if the \
+                document doesn't exist.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to list grids from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_grid",
+            description: """
+                Adds a new grid to a document, authored by a connected InfinitySketch \
+                device. Every field is optional and defaults to the app's own new-grid \
+                defaults (spacing 20, snap 1, type "grid", color a translucent blue, \
+                thickness 1, rotation 0, offset [0, 0]) EXCEPT `visible` and `enabled`, \
+                which default to true — a grid an agent adds is usable immediately, unlike \
+                the app's own hidden-by-default "Add Grid" affordance which the user then \
+                configures. `snap` is a MULTIPLIER of `spacing`, not a distance — real snap \
+                distance is spacing × snap. Returns the new grid's id. Requires a connected \
+                device — fails with noDeviceAvailable if none is connected and deviceTimeout \
+                if it doesn't respond in time. unknownDoc if the document doesn't exist; \
+                invalidSpec if `color` isn't valid hex or `type` isn't one of the four \
+                recognized strings. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "type": .object([
+                        "type": "string",
+                        "enum": .array(["grid", "horizontal", "vertical", "isometric"].map(Value.string)),
+                        "description": "The grid's lattice type. Defaults to \"grid\".",
+                    ]),
+                    "spacing": .object(["type": "number", "description": "Line spacing in canvas points. Defaults to 20."]),
+                    "snap": .object([
+                        "type": "number",
+                        "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap. Defaults to 1.",
+                    ]),
+                    "rotation": .object(["type": "number", "description": "Rotation in degrees. Defaults to 0."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Defaults to a translucent blue."]),
+                    "thickness": .object(["type": "number", "description": "Line thickness. Defaults to 1."]),
+                    "visible": .object(["type": "boolean", "description": "Whether the grid is drawn. Defaults to true."]),
+                    "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid. Defaults to true."]),
+                    "offset": .object([
+                        "type": "array",
+                        "description": "The lattice phase [x, y]. Defaults to [0, 0].",
+                        "items": .object(["type": "number"]),
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "update_grid",
+            description: """
+                Modifies an existing grid's supplied fields only (present-only), authored \
+                by a connected InfinitySketch device. Same field vocabulary as add_grid. If \
+                the grid has a pivot (set via set_grid_origin or the app's tap-to-pick-origin) \
+                and `type`/`spacing`/`rotation` changes, the offset is automatically \
+                re-reduced so the lattice keeps passing through that pivot. Requires a \
+                connected device — fails with noDeviceAvailable if none is connected and \
+                deviceTimeout if it doesn't respond in time. gridNotFound if no grid has \
+                that id; unknownDoc if the document doesn't exist; invalidSpec if `color`/ \
+                `type` aren't recognized. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "id": .object(["type": "string", "description": "The id of the grid to modify, as returned by add_grid/list_grids."]),
+                    "type": .object([
+                        "type": "string",
+                        "enum": .array(["grid", "horizontal", "vertical", "isometric"].map(Value.string)),
+                        "description": "The grid's lattice type.",
+                    ]),
+                    "spacing": .object(["type": "number", "description": "Line spacing in canvas points."]),
+                    "snap": .object([
+                        "type": "number",
+                        "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap.",
+                    ]),
+                    "rotation": .object(["type": "number", "description": "Rotation in degrees."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex."]),
+                    "thickness": .object(["type": "number", "description": "Line thickness."]),
+                    "visible": .object(["type": "boolean", "description": "Whether the grid is drawn."]),
+                    "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid."]),
+                    "offset": .object([
+                        "type": "array",
+                        "description": "The lattice phase [x, y].",
+                        "items": .object(["type": "number"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "id"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "remove_grid",
+            description: """
+                Removes a grid from a document by its id, authored by a connected \
+                InfinitySketch device. The grid array may legitimately reach zero, as in the \
+                app. gridNotFound if no grid has that id; unknownDoc if the document doesn't \
+                exist. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "id": .object(["type": "string", "description": "The id of the grid to remove, as returned by add_grid/list_grids."]),
+                ]),
+                "required": .array(["docId", "id"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "set_grid_origin",
+            description: """
+                Sets a grid's pivot to an EXACT canvas coordinate — the programmatic \
+                equivalent of the app's tap-to-pick-origin gesture — so the lattice passes \
+                through (x, y): the offset is recomputed so the grid stays anchored there. \
+                No snap — use snap_points first if you want a lattice point. Authored by a \
+                connected InfinitySketch device. gridNotFound if no grid has that id; \
+                unknownDoc if the document doesn't exist. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "id": .object(["type": "string", "description": "The id of the grid to set the origin of, as returned by add_grid/list_grids."]),
+                    "x": .object(["type": "number", "description": "Canvas-space x the lattice should pass through."]),
+                    "y": .object(["type": "number", "description": "Canvas-space y the lattice should pass through."]),
+                ]),
+                "required": .array(["docId", "id", "x", "y"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "render_sketch",
             description: """
                 Renders a region of a document, specific strokes, and/or ephemeral \
@@ -1704,6 +1852,11 @@ public actor MCPAdapter {
         case "list_strokes": return await callListStrokes(arguments)
         case "list_texts": return await callListTexts(arguments)
         case "list_images": return await callListImages(arguments)
+        case "list_grids": return await callListGrids(arguments)
+        case "add_grid": return await callAddGrid(arguments)
+        case "update_grid": return await callUpdateGrid(arguments)
+        case "remove_grid": return await callRemoveGrid(arguments)
+        case "set_grid_origin": return await callSetGridOrigin(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
@@ -2394,6 +2547,249 @@ public actor MCPAdapter {
             return CallTool.Result(content: [
                 .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
             ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    // MARK: - Grid authoring (agent-grid-authoring spec, Task 3)
+    //
+    // `list_grids`/`add_grid`/`update_grid`/`remove_grid`/`set_grid_origin`
+    // relay a `GridAuthoring` device op (app repo, Task 2), gated on the
+    // "authorGrids" capability — a device that only authors strokes/text/
+    // images must not be picked for these. `list_grids` mirrors
+    // `callListImages`: READ-ONLY, no `submitAndRespond`. The four write
+    // tools mirror `callAddImage`: present-only envelope, byte-CAS write via
+    // `submitAndRespond(expectedBytes: docBytes)`.
+
+    /// Mirrors `callListImages` exactly, but gated on the "authorGrids"
+    /// capability. Never writes: the device's listing bytes are decoded as
+    /// UTF-8 and passed straight through as the tool result's text content.
+    private func callListGrids(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("listGrids")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // `.meta` is render-only (nil here) — list ignores it.
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays an `addGrid` device op carrying ONLY the arguments the caller
+    /// actually supplied — mirrors `callAddImage`. `expectedBytes` is the
+    /// exact bytes relayed to the device (the write CAS) — never a fresh
+    /// re-read. Surfaces the new grid's id (from the device reply's `meta`,
+    /// `{"id": …}`) in the result text, mirroring `callAddImage`/
+    /// `callAddTextStyled`.
+    private func callAddGrid(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("addGrid")]
+            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset"] {
+                if let value = arguments?[key], !value.isNull {
+                    envelope[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "added grid to \(docId) at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
+                   let id = decoded["id"] {
+                    summary += "\nid: \(id)"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays an `updateGrid` device op carrying the target `id` plus ONLY
+    /// the fields the caller actually supplied — mirrors `callAddGrid`'s
+    /// present-only envelope construction. `expectedBytes` is the exact
+    /// bytes relayed to the device (the write CAS) — never a fresh re-read.
+    private func callUpdateGrid(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let id = try Self.stringArg(arguments, "id")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var envelope: [String: Value] = ["op": .string("updateGrid"), "id": .string(id)]
+            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset"] {
+                if let value = arguments?[key], !value.isNull {
+                    envelope[key] = value
+                }
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(envelope))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "updated grid \(id) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays a `removeGrid` device op naming the target `id` — mirrors
+    /// `callRemoveImage`'s shape, but device-relayed (not server-side
+    /// `DocJSON`, unlike remove_text/remove_image): a grid CRUD op needs the
+    /// device's pivot/offset reduction math (`GridRotationMath`, app-only),
+    /// so every grid op is device-relayed uniformly, including removal.
+    private func callRemoveGrid(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let id = try Self.stringArg(arguments, "id")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("removeGrid"), "id": .string(id)]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "removed grid \(id) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays a `setGridOrigin` device op naming the target `id` plus the
+    /// canvas-space `x`/`y` pivot — the programmatic equivalent of the app's
+    /// tap-to-pick-origin gesture. `expectedBytes` is the exact bytes
+    /// relayed to the device (the write CAS) — never a fresh re-read.
+    private func callSetGridOrigin(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let id = try Self.stringArg(arguments, "id")
+            let x = try Self.doubleArg(arguments, "x")
+            let y = try Self.doubleArg(arguments, "y")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("setGridOrigin"), "id": .string(id), "x": .double(x), "y": .double(y),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "set origin of grid \(id) at seq \(seq)"
+            }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {

@@ -717,8 +717,10 @@ private actor FakeStrokeOpDevice {
     // remove_image (agent-remove-image) added one more, renaming this from
     // `listToolsContainsAllTwentyEightTools`. list_texts/list_images
     // (agent-list-elements, Task 2) added two more, renaming this from
-    // `listToolsContainsAllTwentyNineTools`.
-    @Test func listToolsContainsAllThirtyOneTools() async throws {
+    // `listToolsContainsAllTwentyNineTools`. list_grids/add_grid/update_grid/
+    // remove_grid/set_grid_origin (agent-grid-authoring, Task 3) added five
+    // more, renaming this from `listToolsContainsAllThirtyOneTools`.
+    @Test func listToolsContainsAllThirtySixTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -735,6 +737,7 @@ private actor FakeStrokeOpDevice {
             "preview_selection", "duplicate_selection",
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
+            "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -4604,6 +4607,314 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "add_image",
             arguments: ["docId": "ghost", "bytes": .string(Data([0x01, 0x02]).base64EncodedString()), "x": 0, "y": 0])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - list_grids / add_grid / update_grid / remove_grid / set_grid_origin
+    // (agent-grid-authoring spec, Task 3)
+    //
+    // Five grid-authoring relay tools, all gated on the "authorGrids"
+    // capability (a device that only authors strokes/text/images must not be
+    // picked for these). `list_grids` mirrors `callListStrokes`/
+    // `callListImages`: relay `{op:"listGrids"}`, pass the device's reply
+    // through verbatim as text, never write. The four write tools mirror
+    // `callAddImage`: read `currentBytes` -> `unknownDoc` if absent, build a
+    // present-only `{op, ...}` envelope, relay, then `submitAndRespond` with
+    // the byte-CAS (`expectedBytes: docBytes`). `add_grid` surfaces the new
+    // grid's id from the reply's `meta`, exactly as `add_image` does.
+
+    @Test func listGridsRelaysAndPassesReplyThrough() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listingJSON = Data(#"[{"id":"GRID-1","type":"grid","spacing":20,"visible":true,"enabled":true}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(listingJSON), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_grids", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        // No write: list_grids never opens a session, same as list_strokes/list_images.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        // The fake (hello'd with ONLY "authorGrids") received the request —
+        // proving requestStrokeOp's capability argument was "authorGrids".
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "listGrids")
+        #expect(Set(specJSON.keys) == ["op"])
+
+        await server.stop()
+    }
+
+    /// Pins the capability gate: a device advertising ONLY "authorStrokes"
+    /// (no "authorGrids") must NOT be selected for list_grids.
+    @Test func listGridsWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "authorGrids".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_grids", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func listGridsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_grids", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// The exact relayed envelope key set, string-literally (mirroring
+    /// `addImageRelaysEnvelopeAndSurfacesId`): present-only optional keys,
+    /// and the new grid's id (from `meta`) surfaced in the result text.
+    @Test func addGridRelaysEnvelopeAndSurfacesId() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grid-added"}"#.utf8)
+        let metaBytes = Data(#"{"id":"GRID-NEW"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes),
+            capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_grid",
+            arguments: ["docId": "d", "type": "isometric", "spacing": 50, "color": "#FF0000FF"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("GRID-NEW"), "add_grid must surface the new grid's id")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addGrid")
+        // Exact envelope: present-only optionals — no snap/rotation/thickness/
+        // visible/enabled/offset when omitted.
+        #expect(Set(spec.keys) == ["op", "type", "spacing", "color"])
+        #expect(spec["type"] as? String == "isometric")
+        #expect(spec["spacing"] as? Double == 50)
+        #expect(spec["color"] as? String == "#FF0000FF")
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func addGridUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_grid", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// The exact relayed envelope: `id` plus only the supplied optional
+    /// fields — mirrors `addGridRelaysEnvelopeAndSurfacesId`'s present-only
+    /// assertion.
+    @Test func updateGridRelaysIdAndSuppliedFieldsOnly() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grid-updated"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modifiedBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "update_grid",
+            arguments: ["docId": "d", "id": "GRID-1", "spacing": 40, "visible": false])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("GRID-1"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "updateGrid")
+        #expect(spec["id"] as? String == "GRID-1")
+        #expect(Set(spec.keys) == ["op", "id", "spacing", "visible"])
+        #expect(spec["spacing"] as? Double == 40)
+        #expect(spec["visible"] as? Bool == false)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func updateGridUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "update_grid", arguments: ["docId": "ghost", "id": "GRID-1", "spacing": 40])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func removeGridRelaysOpAndId() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grid-removed"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modifiedBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_grid", arguments: ["docId": "d", "id": "GRID-1"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("GRID-1"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "removeGrid")
+        #expect(spec["id"] as? String == "GRID-1")
+        #expect(Set(spec.keys) == ["op", "id"])
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func removeGridUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "remove_grid", arguments: ["docId": "ghost", "id": "GRID-1"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func setGridOriginRelaysIdAndCoordinates() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"grid-origin-set"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modifiedBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_grid_origin",
+            arguments: ["docId": "d", "id": "GRID-1", "x": 123.5, "y": 45.0])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("GRID-1"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "setGridOrigin")
+        #expect(spec["id"] as? String == "GRID-1")
+        #expect(Set(spec.keys) == ["op", "id", "x", "y"])
+        #expect(spec["x"] as? Double == 123.5)
+        #expect(spec["y"] as? Double == 45.0)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func setGridOriginUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_grid_origin",
+            arguments: ["docId": "ghost", "id": "GRID-1", "x": 0, "y": 0])
         #expect(isError == true)
         #expect(toolResultText(content) == "unknownDoc")
 
