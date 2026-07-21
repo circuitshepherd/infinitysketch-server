@@ -858,6 +858,42 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_texts",
+            description: """
+                Lists a document's placed texts, one per text, as \
+                {id, text, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a \
+                connected InfinitySketch device. REQUIRES a connected device — fails with \
+                noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
+                respond in time. Returns the device's listing verbatim as text; this call \
+                never writes to the document. unknownDoc if the document doesn't exist.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to list placed texts from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_images",
+            description: """
+                Lists a document's placed images, one per image, as \
+                {id, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a \
+                connected InfinitySketch device. REQUIRES a connected device — fails with \
+                noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
+                respond in time. Returns the device's listing verbatim as text; this call \
+                never writes to the document. unknownDoc if the document doesn't exist.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to list placed images from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "render_sketch",
             description: """
                 Renders a region of a document, specific strokes, and/or ephemeral \
@@ -1666,6 +1702,8 @@ public actor MCPAdapter {
         case "draw_strokes": return await callDrawStrokes(arguments)
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
+        case "list_texts": return await callListTexts(arguments)
+        case "list_images": return await callListImages(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
@@ -2262,6 +2300,90 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // `.meta` is render-only (nil here) — list ignores it.
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Mirrors `callListStrokes` exactly, but gated on the "authorText"
+    /// capability instead of the stroke tools' default "authorStrokes" — a
+    /// device that only advertises stroke authoring must not be selected for
+    /// this read (agent-list-elements spec, Task 2). Never writes: the
+    /// device's listing bytes are decoded as UTF-8 and passed straight
+    /// through as the tool result's text content.
+    private func callListTexts(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("listTexts")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // `.meta` is render-only (nil here) — list ignores it.
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Mirrors `callListStrokes` exactly, but gated on the "authorImage"
+    /// capability instead of the stroke tools' default "authorStrokes" — a
+    /// device that only advertises stroke authoring must not be selected for
+    /// this read (agent-list-elements spec, Task 2). Never writes: the
+    /// device's listing bytes are decoded as UTF-8 and passed straight
+    /// through as the tool result's text content.
+    private func callListImages(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object(["op": .string("listImages")]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

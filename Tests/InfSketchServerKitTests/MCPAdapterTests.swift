@@ -715,8 +715,10 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllTwentyThreeTools`. add_image (Task 2) added
     // one more, renaming this from `listToolsContainsAllTwentySevenTools`.
     // remove_image (agent-remove-image) added one more, renaming this from
-    // `listToolsContainsAllTwentyEightTools`.
-    @Test func listToolsContainsAllTwentyNineTools() async throws {
+    // `listToolsContainsAllTwentyEightTools`. list_texts/list_images
+    // (agent-list-elements, Task 2) added two more, renaming this from
+    // `listToolsContainsAllTwentyNineTools`.
+    @Test func listToolsContainsAllThirtyOneTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -732,7 +734,7 @@ private actor FakeStrokeOpDevice {
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
-            "add_image", "remove_image",
+            "add_image", "remove_image", "list_texts", "list_images",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1794,6 +1796,160 @@ private actor FakeStrokeOpDevice {
         #expect(received.docBytes == Fixtures.docBytes)
         let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(specJSON["op"] as? String == "list")
+
+        await server.stop()
+    }
+
+    // MARK: - list_texts / list_images (Task 2, agent-list-elements spec) —
+    // mirror list_strokes exactly: relay a minimal `{op:...}` envelope via
+    // requestStrokeOp and pass the device's reply bytes through verbatim as
+    // text, never writing to the document. Only the relayed op string and
+    // the capability used to pick a connection differ (authorText /
+    // authorImage instead of the stroke tools' default authorStrokes) —
+    // mirroring the styled-text tools' capability split
+    // (styledAddTextRelaysTheStyleEnvelopeThroughTheDevice /
+    // styledAddTextWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable).
+
+    @Test func listTextsRelaysAndPassesReplyThrough() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listingJSON = Data(#"[{"id":"T1","text":"hi","bounds":[0,0,10,10],"pinned":false,"opacity":1}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(listingJSON), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_texts", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        // No write: list_texts never opens a session, same as list_strokes.
+        let summaryContents = try await client.readResource(uri: "infsketch://doc/d")
+        let summaryJSON = try #require(summaryContents[0].text)
+        let envelope = try JSONDecoder().decode(SummaryEnvelope.self, from: Data(summaryJSON.utf8))
+        #expect(envelope.seq == -1)
+
+        // The fake (hello'd with ONLY "authorText") received the request —
+        // proving requestStrokeOp's capability argument was "authorText",
+        // not the stroke tools' default "authorStrokes".
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "listTexts")
+        #expect(Set(specJSON.keys) == ["op"])
+
+        await server.stop()
+    }
+
+    /// Pins the capability gate: a device advertising ONLY "authorStrokes"
+    /// (no "authorText") must NOT be selected for list_texts — mirrors
+    /// styledAddTextWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable.
+    @Test func listTextsWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "authorText".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_texts", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip — mirroring `mergeDocsIntoRejectsExistingNameWithoutWakingDevice`.
+    @Test func listTextsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_texts", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func listImagesRelaysWithAuthorImageCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listingJSON = Data(#"[{"id":"IMG1","bounds":[0,0,20,20],"pinned":false,"opacity":1}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(listingJSON), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_images", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == String(decoding: listingJSON, as: UTF8.self))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "listImages")
+        #expect(Set(specJSON.keys) == ["op"])
+
+        await server.stop()
+    }
+
+    /// Pins the capability gate: a device advertising ONLY "authorStrokes"
+    /// (no "authorImage") must NOT be selected for list_images.
+    @Test func listImagesWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        // Default capabilities: ["authorStrokes"] only — no "authorImage".
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_images", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip — mirroring `mergeDocsIntoRejectsExistingNameWithoutWakingDevice`.
+    @Test func listImagesUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "list_images", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        // Fast-fail: the device must never be contacted for an unknown doc.
+        #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
     }
