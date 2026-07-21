@@ -1021,6 +1021,31 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "reorder_grids",
+            description: """
+                Sets the draw order (z-order) of a document's grids, authored by a connected \
+                InfinitySketch device. `orderedIds` must be a full permutation of the \
+                document's current grid ids (as returned by list_grids) — the grids draw, and \
+                list_grids reports them, in this sequence. Requires a connected device — fails \
+                with noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
+                respond in time. unknownDoc if the document doesn't exist; gridNotFound/ \
+                invalidSpec if orderedIds isn't a valid permutation of the document's grid ids. \
+                \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "orderedIds": .object([
+                        "type": "array",
+                        "description": "The grid ids (as returned by list_grids/add_grid), in the desired draw order — a full permutation of the document's current grid ids.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "orderedIds"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "set_grid_origin",
             description: """
                 Sets a grid's pivot to an EXACT canvas coordinate — the programmatic \
@@ -1857,6 +1882,7 @@ public actor MCPAdapter {
         case "update_grid": return await callUpdateGrid(arguments)
         case "remove_grid": return await callRemoveGrid(arguments)
         case "set_grid_origin": return await callSetGridOrigin(arguments)
+        case "reorder_grids": return await callReorderGrids(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
@@ -2789,6 +2815,61 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "set origin of grid \(id) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Relays a `reorderGrids` device op carrying the full ordered id list
+    /// verbatim — mirrors `callUpdateGrid`'s shape (same capability,
+    /// same CAS write), but with a single required array argument instead of
+    /// present-only optionals. Reads via `optionalStringArrayArg`
+    /// (`select_elements`'s helper) rather than `nonEmptyStringArrayArg`
+    /// (`delete_strokes`'s `keys`) because `orderedIds: []` is a VALID
+    /// no-op on a 0-grid document — a non-empty guard here would be a
+    /// server-side validation of `orderedIds`, contradicting the next
+    /// sentence. The server does NOT validate that `orderedIds` is a
+    /// permutation of the document's actual grid ids — that's the device's
+    /// job (gridNotFound/invalidSpec, surfaced via `deviceFailed:`).
+    /// `expectedBytes` is the exact bytes relayed to the device (the write
+    /// CAS) — never a fresh re-read.
+    private func callReorderGrids(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            guard let orderedIds = try Self.optionalStringArrayArg(arguments, "orderedIds") else {
+                return Self.errorResult("missingArgument: orderedIds")
+            }
+
+            guard let docBytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("reorderGrids"), "orderedIds": .array(orderedIds.map(Value.string)),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorGrids")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                "reordered \(orderedIds.count) grids in \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
