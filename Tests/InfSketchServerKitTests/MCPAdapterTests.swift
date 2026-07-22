@@ -1331,6 +1331,26 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// An ABSENT `pinned` is a hard error (`missingArgument: pinned`), never a
+    /// silent `false` — this is why `callSetPinned` uses `requiredBoolArg`, not
+    /// the defaulting `boolArg`. Pins that load-bearing choice against a
+    /// regression that swapped the reader (which every other set_pinned test
+    /// would still pass).
+    @Test func setPinnedMissingPinnedErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.pinDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_pinned",
+            arguments: ["docId": "d", "ids": ["IIIIIIII-0000-0000-0000-000000000001"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "missingArgument: pinned")
+
+        await server.stop()
+    }
+
     /// Covers the `createIfMissing: true` path `create_doc` would have used
     /// (deferred per the Task 2 gate resolution — see the plan doc).
     @Test func replaceDocForFreshIdStoresFile() async throws {
