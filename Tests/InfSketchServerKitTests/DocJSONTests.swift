@@ -399,6 +399,20 @@ import Testing
             // one valid id + one unknown -> atomic failure, nothing changes
             _ = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, "nope"], pinned: true)
         }
+        // Atomicity: the VALID id (the text) must NOT have been pinned by the
+        // failed call — the source fixture still reads pinned:false for both.
+        let flags = try pinnedFlags(Self.pinFixture)
+        #expect(flags.text == false)
+        #expect(flags.image == false)
+    }
+
+    @Test func setPinnedToCurrentValueIsAValidNoopReencode() throws {
+        // Idempotence: setting pinned to its existing value (false -> false) is a
+        // valid re-encode, never a throw; the flags stay put.
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, Self.imageId], pinned: false)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == false)
+        #expect(flags.image == false)
     }
 
     @Test func setPinnedChangesOnlyThePinnedField() throws {
@@ -409,6 +423,13 @@ import Testing
         #expect(img["pastedImageDataId"] as? String == "PPPPPPPP-0000-0000-0000-000000000001")
         #expect((img["opacity"] as? NSNumber)?.doubleValue == 1)
         #expect(img["pinned"] as? Bool == true)
+        // Geometry fields survive too — only `pinned` changed.
+        let rect = img["rect"] as! [[NSNumber]]
+        #expect(rect[0].map(\.doubleValue) == [0, 0])
+        #expect(rect[1].map(\.doubleValue) == [100, 100])
+        let transform = img["transform"] as! [String: NSNumber]
+        #expect(transform["a"]?.doubleValue == 1)
+        #expect(transform["d"]?.doubleValue == 1)
     }
 
     @Test func setPinnedPreservesStrayNonDictionaryElements() throws {
