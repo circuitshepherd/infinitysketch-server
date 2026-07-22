@@ -47,6 +47,7 @@ public enum DocJSON {
         case textNotFound
         case imageNotFound
         case elementNotFound
+        case invalidColor
     }
 
     // MARK: - Read
@@ -217,6 +218,51 @@ public enum DocJSON {
         if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
         if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
         return try serialize(doc)
+    }
+
+    /// Sets any subset of a document's paper fields — `backgroundColor` (light),
+    /// `backgroundColorDark` (dark), `transparentBackground`. `light`/`dark` are
+    /// `#RRGGBB`/`#RRGGBBAA` hex, written as the `ColorModel` JSON shape
+    /// (`{red,green,blue,alpha}`, doubles in 0…1). An omitted field is left
+    /// exactly as-is. ATOMIC: every supplied hex is validated BEFORE the doc is
+    /// mutated, so a bad `dark` never leaves a half-written `light`
+    /// (`.invalidColor` → the adapter's `invalidSpec`). Light/dark are
+    /// INDEPENDENT — no `convertColor` coupling (that's UIKit; unavailable here).
+    public static func setPaper(from bytes: Data, light: String?, dark: String?, transparent: Bool?) throws -> Data {
+        // Validate every supplied hex up front (atomic).
+        let lightDict = try light.map { hex -> [String: Double] in
+            guard let c = colorModelDict(fromHex: hex) else { throw DocJSONError.invalidColor }
+            return c
+        }
+        let darkDict = try dark.map { hex -> [String: Double] in
+            guard let c = colorModelDict(fromHex: hex) else { throw DocJSONError.invalidColor }
+            return c
+        }
+        var doc = try parseDocument(bytes)
+        if let lightDict { doc["backgroundColor"] = lightDict }
+        if let darkDict { doc["backgroundColorDark"] = darkDict }
+        if let transparent { doc["transparentBackground"] = transparent }
+        return try serialize(doc)
+    }
+
+    /// `#RRGGBB` / `#RRGGBBAA` → the `ColorModel` JSON dict (doubles in 0…1), or
+    /// nil for a malformed hex. Pure — no UIKit (the app's
+    /// `GridAuthoring.colorModel(fromHex:)` is device-only; the server carries
+    /// its own tiny parser).
+    private static func colorModelDict(fromHex hex: String) -> [String: Double]? {
+        // A leading `#` is REQUIRED, matching the app's one hex parser
+        // (`UIColor(hexString:)` in StrokeAuthoring, used by GridAuthoring) — one
+        // consistent hex contract across every agent tool that takes a colour.
+        guard hex.hasPrefix("#") else { return nil }
+        let s = hex.dropFirst()
+        guard s.count == 6 || s.count == 8, s.allSatisfy({ $0.isHexDigit }) else { return nil }
+        let chars = Array(s)
+        func component(_ i: Int) -> Double {
+            let hi = chars[i].hexDigitValue!, lo = chars[i + 1].hexDigitValue!
+            return Double(hi * 16 + lo) / 255.0
+        }
+        let alpha = chars.count == 8 ? component(6) : 1.0
+        return ["red": component(0), "green": component(2), "blue": component(4), "alpha": alpha]
     }
 
     // MARK: - Parsing helpers
