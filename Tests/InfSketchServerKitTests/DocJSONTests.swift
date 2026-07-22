@@ -521,4 +521,12 @@ import Testing
         }
     }
 
+    @Test func setPaperRequiresLeadingHash() throws {
+        // A bare hex (no leading `#`) is rejected — matches the app's UIColor(hexString:)
+        // / GridAuthoring contract, so every agent colour tool speaks one hex language.
+        #expect(throws: DocJSON.DocJSONError.invalidColor) {
+            _ = try DocJSON.setPaper(from: Self.paperFixture, light: "FF8800", dark: nil, transparent: nil)
+        }
+    }
+
 }

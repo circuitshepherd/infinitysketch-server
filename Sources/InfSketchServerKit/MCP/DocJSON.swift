@@ -250,8 +250,11 @@ public enum DocJSON {
     /// `GridAuthoring.colorModel(fromHex:)` is device-only; the server carries
     /// its own tiny parser).
     private static func colorModelDict(fromHex hex: String) -> [String: Double]? {
-        var s = Substring(hex)
-        if s.hasPrefix("#") { s = s.dropFirst() }
+        // A leading `#` is REQUIRED, matching the app's one hex parser
+        // (`UIColor(hexString:)` in StrokeAuthoring, used by GridAuthoring) — one
+        // consistent hex contract across every agent tool that takes a colour.
+        guard hex.hasPrefix("#") else { return nil }
+        let s = hex.dropFirst()
         guard s.count == 6 || s.count == 8, s.allSatisfy({ $0.isHexDigit }) else { return nil }
         let chars = Array(s)
         func component(_ i: Int) -> Double {
