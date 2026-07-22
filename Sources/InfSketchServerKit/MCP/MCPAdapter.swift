@@ -3946,6 +3946,7 @@ public actor MCPAdapter {
         case .invalidDocumentJSON: return "invalidDocumentJSON"
         case .textNotFound: return "textNotFound"
         case .imageNotFound: return "imageNotFound"
+        case .elementNotFound: return "elementNotFound"
         }
     }
 

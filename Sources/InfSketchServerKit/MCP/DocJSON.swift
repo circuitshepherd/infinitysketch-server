@@ -46,6 +46,7 @@ public enum DocJSON {
         case invalidDocumentJSON
         case textNotFound
         case imageNotFound
+        case elementNotFound
     }
 
     // MARK: - Read
@@ -179,6 +180,42 @@ public enum DocJSON {
             pasted.removeAll { ($0 as? [String: Any])?["id"] as? String == removedPastedId }
             doc["pastedImagesData"] = pasted
         }
+        return try serialize(doc)
+    }
+
+    /// Sets the `pinned` flag to `pinned` on every placed text or image whose
+    /// `id` is in `ids`. `ids` may mix text ids and image ids — both arrays are
+    /// scanned. ATOMIC: every id must resolve to a text or image, else
+    /// `.elementNotFound` is thrown and nothing is mutated. Only the `pinned`
+    /// field of a matched entry changes; every other field, and every
+    /// non-dictionary / unmatched element (in either array), is preserved in
+    /// place (the `[Any]`-per-element robustness rule). Strokes have no `pinned`
+    /// field and are not involved.
+    public static func setPinned(from bytes: Data, ids: [String], pinned: Bool) throws -> Data {
+        var doc = try parseDocument(bytes)
+        let texts = (doc["placedTextsData"] as? [Any]) ?? []
+        let images = (doc["placedImagesData"] as? [Any]) ?? []
+
+        // Validate BEFORE mutating (atomic): every requested id must be present.
+        let present = Set((texts + images).compactMap { ($0 as? [String: Any])?["id"] as? String })
+        for id in ids where !present.contains(id) {
+            throw DocJSONError.elementNotFound
+        }
+
+        let idSet = Set(ids)
+        func repin(_ elements: [Any]) -> [Any] {
+            elements.map { element in
+                guard var dict = element as? [String: Any],
+                      let id = dict["id"] as? String, idSet.contains(id)
+                else { return element }
+                dict["pinned"] = pinned
+                return dict
+            }
+        }
+        // Only write back arrays that were actually present (don't add an empty
+        // key to a doc that had no texts or no images).
+        if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
+        if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
         return try serialize(doc)
     }
 
