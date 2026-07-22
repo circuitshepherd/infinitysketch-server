@@ -721,8 +721,10 @@ private actor FakeStrokeOpDevice {
     // remove_grid/set_grid_origin (agent-grid-authoring, Task 3) added five
     // more, renaming this from `listToolsContainsAllThirtyOneTools`.
     // reorder_grids (agent-grid-reorder, Task 2) added one more, renaming
-    // this from `listToolsContainsAllThirtySixTools`.
-    @Test func listToolsContainsAllThirtySevenTools() async throws {
+    // this from `listToolsContainsAllThirtySixTools`. set_pinned
+    // (agent-set-pinned, Task 2) added one more, renaming this from
+    // `listToolsContainsAllThirtySevenTools`.
+    @Test func listToolsContainsAllThirtyEightTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -740,7 +742,7 @@ private actor FakeStrokeOpDevice {
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids",
+            "reorder_grids", "set_pinned",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1247,6 +1249,84 @@ private actor FakeStrokeOpDevice {
             name: "remove_image", arguments: ["docId": "d", "imageId": "NOPE"])
         #expect(isError == true)
         #expect(toolResultText(content) == "imageNotFound")
+
+        await server.stop()
+    }
+
+    // MARK: - set_pinned (agent-set-pinned)
+    //
+    // Entirely server-side (pure JSON record-filtering via DocJSON.setPinned,
+    // no device, no capability) -- mirrors remove_image's shape almost
+    // exactly. Seeds a doc with one placed text + one placed image (both
+    // pinned:false) directly via `startServer(bytes:)`, the same seeding seam
+    // `removeImageRemovesFromDocAndReplies` etc. use.
+
+    private static let pinDocBytes = Data(#"""
+        {"aaa001_thumbnailData":"",
+         "placedTextsData":[{"id":"TTTTTTTT-0000-0000-0000-000000000001","text":["Hi",{}],"rect":[[10,20],[1,1]],"transform":{"a":1,"b":0,"c":0,"d":1,"tx":0,"ty":0},"opacity":1,"pinned":false}],
+         "placedImagesData":[{"id":"IIIIIIII-0000-0000-0000-000000000001","pastedImageDataId":"PPPPPPPP-0000-0000-0000-000000000001","rect":[[0,0],[100,100]],"transform":{"a":1,"b":0,"c":0,"d":1,"tx":0,"ty":0},"opacity":1,"pinned":false}]}
+        """#.utf8)
+
+    @Test func setPinnedFlipsAndReportsCount() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.pinDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_pinned",
+            arguments: ["docId": "d", "ids": ["IIIIIIII-0000-0000-0000-000000000001"], "pinned": true])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("set pinned=true on 1 element(s) in d"))
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        let rawBytes = try #require(Data(base64Encoded: rawBlob))
+        let obj = try JSONSerialization.jsonObject(with: rawBytes) as! [String: Any]
+        let image = (obj["placedImagesData"] as! [[String: Any]])[0]
+        #expect(image["pinned"] as? Bool == true)
+
+        await server.stop()
+    }
+
+    @Test func setPinnedUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.pinDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_pinned", arguments: ["docId": "ghost", "ids": ["x"], "pinned": true])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    @Test func setPinnedUnknownElementErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.pinDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_pinned", arguments: ["docId": "d", "ids": ["nope"], "pinned": true])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "elementNotFound")
+
+        await server.stop()
+    }
+
+    @Test func setPinnedEmptyIdsErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.pinDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_pinned", arguments: ["docId": "d", "ids": [], "pinned": true])
+        #expect(isError == true)   // nonEmptyStringArrayArg rejects [] -> invalidArgument: ids
+        #expect(toolResultText(content).contains("ids"))
 
         await server.stop()
     }

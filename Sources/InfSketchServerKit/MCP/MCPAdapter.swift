@@ -720,6 +720,31 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "set_pinned",
+            description: """
+                Sets the `pinned` (background) flag on the named placed texts and/or images \
+                of a document. `ids` may mix text ids and image ids (as returned by \
+                list_texts/list_images/add_text/add_image). A pinned element draws beneath \
+                unpinned content and is skipped by rect-select. Server-side, no device needed. \
+                Atomic: if any id isn't a text or image in the document it fails with \
+                elementNotFound and nothing changes. unknownDoc if the document doesn't exist. \
+                \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "ids": .object([
+                        "type": "array",
+                        "description": "Ids of the placed texts/images to (un)pin — a non-empty list.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "pinned": .object(["type": "boolean", "description": "true to pin, false to unpin."]),
+                ]),
+                "required": .array(["docId", "ids", "pinned"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "replace_doc",
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
@@ -1870,6 +1895,7 @@ public actor MCPAdapter {
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
         case "remove_image": return await callRemoveImage(arguments)
+        case "set_pinned": return await callSetPinned(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
         case "create_doc": return await callCreateDoc(arguments)
         case "draw_strokes": return await callDrawStrokes(arguments)
@@ -2252,6 +2278,37 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "removed \(imageId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Flips the `pinned` flag on the named placed texts/images — a pure
+    /// server-side `DocJSON` write (no device), mirroring `callRemoveImage`:
+    /// `unknownDoc` fast-fail, `DocJSON.setPinned`, then the byte-CAS write
+    /// (`docChangedDuringOp`). `ids` is required non-empty; `pinned` is required.
+    private func callSetPinned(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
+            let pinned = try Self.requiredBoolArg(arguments, "pinned")
+
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.setPinned(from: bytes, ids: ids, pinned: pinned)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "set pinned=\(pinned) on \(ids.count) element(s) in \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -3999,6 +4056,15 @@ public actor MCPAdapter {
 
     private static func boolArg(_ arguments: [String: Value]?, _ key: String, default def: Bool) throws -> Bool {
         guard let value = arguments?[key], !value.isNull else { return def }
+        guard let b = Bool(value) else { throw ArgumentError.invalidType(key) }
+        return b
+    }
+
+    /// A required Bool argument — mirrors `boolArg` but throws `.missing` when
+    /// absent/null instead of returning a default (set_pinned's `pinned` has no
+    /// sensible default).
+    private static func requiredBoolArg(_ arguments: [String: Value]?, _ key: String) throws -> Bool {
+        guard let value = arguments?[key], !value.isNull else { throw ArgumentError.missing(key) }
         guard let b = Bool(value) else { throw ArgumentError.invalidType(key) }
         return b
     }
