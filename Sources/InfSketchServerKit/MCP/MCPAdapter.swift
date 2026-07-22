@@ -1952,7 +1952,11 @@ public actor MCPAdapter {
                 is required. `mode` selects the direction: "front" moves the named \
                 elements to the top of the draw order, "back" to the bottom — each \
                 WITHIN its own element type's stacking, mirroring the app's \
-                Bring-to-Front/Send-to-Back tool. \
+                Bring-to-Front/Send-to-Back tool. The cross-type order is FIXED (images \
+                below strokes below texts), so a stroke brought to front is still drawn \
+                below every text; use this only to reorder among same-type elements. For \
+                images, pinned (background) images always draw behind unpinned ones \
+                regardless of this order — change that band with set_pinned. \
                 REQUIRES a connected device with the reorderElements capability — fails \
                 with noDeviceAvailable if none is connected, deviceTimeout if it doesn't \
                 respond in time, unknownDoc if the document doesn't exist, and \

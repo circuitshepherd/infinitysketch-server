@@ -5382,6 +5382,24 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// An ABSENT `mode` is `missingArgument: mode` (a required arg), distinct from a
+    /// bad-VALUE `mode` (`invalidArguments`) — the required-arg convention set_pinned's
+    /// `pinned` also uses. (A `mode`-value error is `invalidArguments`; a `mode`-absent
+    /// error names the arg.)
+    @Test func reorderElementsMissingModeErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "missingArgument: mode")
+
+        await server.stop()
+    }
+
     // MARK: - set_paper (agent-doc-appearance, Task 2)
     //
     // Entirely server-side (pure JSON field-writing via DocJSON.setPaper, no
