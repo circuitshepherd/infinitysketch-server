@@ -4004,6 +4004,7 @@ public actor MCPAdapter {
         case .textNotFound: return "textNotFound"
         case .imageNotFound: return "imageNotFound"
         case .elementNotFound: return "elementNotFound"
+        case .invalidColor: return "invalidSpec"
         }
     }
 

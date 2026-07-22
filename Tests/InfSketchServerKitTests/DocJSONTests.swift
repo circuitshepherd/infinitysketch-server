@@ -454,4 +454,71 @@ import Testing
         #expect((elements[1] as! [String: Any])["pinned"] as? Bool == true)
     }
 
+    // MARK: - setPaper (agent-doc-appearance)
+
+    // A minimal doc with default white/black paper for set_paper.
+    static let paperFixture: Data = Data(#"""
+    {
+      "backgroundColor": {"red": 1, "green": 1, "blue": 1, "alpha": 1},
+      "backgroundColorDark": {"red": 0, "green": 0, "blue": 0, "alpha": 1},
+      "transparentBackground": false,
+      "placedTextsData": []
+    }
+    """#.utf8)
+
+    private func paperOf(_ bytes: Data) throws -> (light: [String: Double], dark: [String: Double], transparent: Bool) {
+        let obj = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+        func rgba(_ any: Any?) -> [String: Double] {
+            let d = any as! [String: Any]
+            return ["red": (d["red"] as! NSNumber).doubleValue, "green": (d["green"] as! NSNumber).doubleValue,
+                    "blue": (d["blue"] as! NSNumber).doubleValue, "alpha": (d["alpha"] as! NSNumber).doubleValue]
+        }
+        return (rgba(obj["backgroundColor"]), rgba(obj["backgroundColorDark"]), obj["transparentBackground"] as! Bool)
+    }
+
+    @Test func setPaperSetsLightColorAsRGBA() throws {
+        let out = try DocJSON.setPaper(from: Self.paperFixture, light: "#FF8800", dark: nil, transparent: nil)
+        let p = try paperOf(out)
+        #expect(abs(p.light["red"]! - 1.0) < 0.001)
+        #expect(abs(p.light["green"]! - (0x88 / 255.0)) < 0.001)   // 0.5333…
+        #expect(abs(p.light["blue"]! - 0.0) < 0.001)
+        #expect(abs(p.light["alpha"]! - 1.0) < 0.001)
+        // dark + transparent untouched
+        #expect(p.dark["red"] == 0); #expect(p.transparent == false)
+    }
+
+    @Test func setPaperParsesEightDigitHexAlpha() throws {
+        let out = try DocJSON.setPaper(from: Self.paperFixture, light: nil, dark: "#00000080", transparent: nil)
+        let p = try paperOf(out)
+        #expect(abs(p.dark["alpha"]! - (0x80 / 255.0)) < 0.001)   // 0.5019…
+    }
+
+    @Test func setPaperSetsTransparentOnly() throws {
+        let out = try DocJSON.setPaper(from: Self.paperFixture, light: nil, dark: nil, transparent: true)
+        let p = try paperOf(out)
+        #expect(p.transparent == true)
+        #expect(p.light["red"] == 1)   // light untouched
+    }
+
+    @Test func setPaperSetsAllThree() throws {
+        let out = try DocJSON.setPaper(from: Self.paperFixture, light: "#000000", dark: "#FFFFFF", transparent: true)
+        let p = try paperOf(out)
+        #expect(p.light["red"] == 0); #expect(p.dark["red"] == 1); #expect(p.transparent == true)
+    }
+
+    @Test func setPaperRejectsBadHexAtomically() throws {
+        // dark is invalid -> throws, and the valid `light` is NOT written (validate-before-mutate).
+        #expect(throws: DocJSON.DocJSONError.invalidColor) {
+            _ = try DocJSON.setPaper(from: Self.paperFixture, light: "#000000", dark: "nothex", transparent: nil)
+        }
+        let p = try paperOf(Self.paperFixture)   // source unchanged
+        #expect(p.light["red"] == 1)
+    }
+
+    @Test func setPaperRejectsWrongLengthHex() throws {
+        #expect(throws: DocJSON.DocJSONError.invalidColor) {
+            _ = try DocJSON.setPaper(from: Self.paperFixture, light: "#FFF", dark: nil, transparent: nil)
+        }
+    }
+
 }
