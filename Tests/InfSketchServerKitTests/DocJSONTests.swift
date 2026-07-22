@@ -329,4 +329,129 @@ import Testing
         #expect((pasted[0] as? String) == "stray-pasted-element")
     }
 
+    // A doc with one text (pinned:false) and one image (pinned:false) for set_pinned.
+    static let pinFixture: Data = Data(#"""
+    {
+      "darkColorScheme": false,
+      "placedTextsData": [
+        {
+          "id": "TTTTTTTT-0000-0000-0000-000000000001",
+          "text": ["Hi", {}],
+          "rect": [[10, 20], [1, 1]],
+          "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+          "opacity": 1, "pinned": false
+        }
+      ],
+      "placedImagesData": [
+        {
+          "id": "IIIIIIII-0000-0000-0000-000000000001",
+          "pastedImageDataId": "PPPPPPPP-0000-0000-0000-000000000001",
+          "rect": [[0, 0], [100, 100]],
+          "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+          "opacity": 1, "pinned": false
+        }
+      ],
+      "strokeAnchors": {}
+    }
+    """#.utf8)
+
+    private static let textId = "TTTTTTTT-0000-0000-0000-000000000001"
+    private static let imageId = "IIIIIIII-0000-0000-0000-000000000001"
+
+    private func pinnedFlags(_ bytes: Data) throws -> (text: Bool, image: Bool) {
+        let obj = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+        let t = (obj["placedTextsData"] as! [[String: Any]])[0]["pinned"] as! Bool
+        let i = (obj["placedImagesData"] as! [[String: Any]])[0]["pinned"] as! Bool
+        return (t, i)
+    }
+
+    @Test func setPinnedFlipsTextOnly() throws {
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId], pinned: true)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == true)
+        #expect(flags.image == false)   // untouched
+    }
+
+    @Test func setPinnedFlipsImageOnly() throws {
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.imageId], pinned: true)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == false)    // untouched
+        #expect(flags.image == true)
+    }
+
+    @Test func setPinnedFlipsMixedTextAndImage() throws {
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, Self.imageId], pinned: true)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == true)
+        #expect(flags.image == true)
+    }
+
+    @Test func setPinnedCanUnpin() throws {
+        let pinned = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, Self.imageId], pinned: true)
+        let out = try DocJSON.setPinned(from: pinned, ids: [Self.textId, Self.imageId], pinned: false)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == false)
+        #expect(flags.image == false)
+    }
+
+    @Test func setPinnedUnknownIdThrowsAndMutatesNothing() throws {
+        #expect(throws: DocJSON.DocJSONError.elementNotFound) {
+            // one valid id + one unknown -> atomic failure, nothing changes
+            _ = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, "nope"], pinned: true)
+        }
+        // Atomicity: the VALID id (the text) must NOT have been pinned by the
+        // failed call — the source fixture still reads pinned:false for both.
+        let flags = try pinnedFlags(Self.pinFixture)
+        #expect(flags.text == false)
+        #expect(flags.image == false)
+    }
+
+    @Test func setPinnedToCurrentValueIsAValidNoopReencode() throws {
+        // Idempotence: setting pinned to its existing value (false -> false) is a
+        // valid re-encode, never a throw; the flags stay put.
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.textId, Self.imageId], pinned: false)
+        let flags = try pinnedFlags(out)
+        #expect(flags.text == false)
+        #expect(flags.image == false)
+    }
+
+    @Test func setPinnedChangesOnlyThePinnedField() throws {
+        let out = try DocJSON.setPinned(from: Self.pinFixture, ids: [Self.imageId], pinned: true)
+        let obj = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        let img = (obj["placedImagesData"] as! [[String: Any]])[0]
+        #expect(img["id"] as? String == Self.imageId)
+        #expect(img["pastedImageDataId"] as? String == "PPPPPPPP-0000-0000-0000-000000000001")
+        #expect((img["opacity"] as? NSNumber)?.doubleValue == 1)
+        #expect(img["pinned"] as? Bool == true)
+        // Geometry fields survive too — only `pinned` changed.
+        let rect = img["rect"] as! [[NSNumber]]
+        #expect(rect[0].map(\.doubleValue) == [0, 0])
+        #expect(rect[1].map(\.doubleValue) == [100, 100])
+        let transform = img["transform"] as! [String: NSNumber]
+        #expect(transform["a"]?.doubleValue == 1)
+        #expect(transform["d"]?.doubleValue == 1)
+    }
+
+    @Test func setPinnedPreservesStrayNonDictionaryElements() throws {
+        // A stray non-dictionary element in placedTextsData must survive untouched.
+        let stray = Data(#"""
+        {
+          "placedTextsData": [
+            "STRAY",
+            {
+              "id": "TTTTTTTT-0000-0000-0000-000000000001",
+              "text": ["Hi", {}], "rect": [[1, 1], [1, 1]],
+              "transform": {"a":1,"b":0,"c":0,"d":1,"tx":0,"ty":0},
+              "opacity": 1, "pinned": false
+            }
+          ]
+        }
+        """#.utf8)
+        let out = try DocJSON.setPinned(from: stray, ids: [Self.textId], pinned: true)
+        let elements = (try JSONSerialization.jsonObject(with: out) as! [String: Any])["placedTextsData"] as! [Any]
+        #expect(elements.count == 2)
+        #expect(elements[0] as? String == "STRAY")
+        #expect((elements[1] as! [String: Any])["pinned"] as? Bool == true)
+    }
+
 }
