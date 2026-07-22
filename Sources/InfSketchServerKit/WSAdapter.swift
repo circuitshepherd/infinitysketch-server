@@ -123,10 +123,13 @@ actor Connection {
             // set_grid_origin's capability: "authorGrids" relay.
             // "copyElements" (agent-copy-elements spec, Task 2) joined the
             // same way, for copy_elements's capability: "copyElements" relay.
+            // "reorderElements" (agent-element-zorder spec, Task 2) joined
+            // the same way, for reorder_elements's capability:
+            // "reorderElements" relay.
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
-                "mergeDocs", "authorImage", "authorGrids", "copyElements",
+                "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements",
             ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
