@@ -4788,6 +4788,22 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// An empty `source`/`target` is a caller error (`invalidArgument`), not a
+    /// `sourceNotFound` — matching the sibling `merge_docs`' `nonEmptyStringArg`.
+    @Test func copyElementsEmptySourceErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements", arguments: ["source": "", "target": "d", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArgument: source")
+
+        await server.stop()
+    }
+
     // MARK: - add_image (Task 2)
     //
     // Places an image into a document, authored by a connected device

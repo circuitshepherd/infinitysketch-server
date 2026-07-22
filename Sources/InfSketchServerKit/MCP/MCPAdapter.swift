@@ -4016,8 +4016,8 @@ public actor MCPAdapter {
 
     private func callCopyElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
-            let source = try Self.stringArg(arguments, "source")
-            let target = try Self.stringArg(arguments, "target")
+            let source = try Self.nonEmptyStringArg(arguments, "source")
+            let target = try Self.nonEmptyStringArg(arguments, "target")
             let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
