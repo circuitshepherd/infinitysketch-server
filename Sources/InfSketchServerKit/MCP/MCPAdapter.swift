@@ -1943,6 +1943,54 @@ public actor MCPAdapter {
                 "required": .array(["source", "target"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "reorder_elements",
+            description: """
+                Sets the z-order (draw order) of named strokes/texts/images within ONE \
+                document — bring-to-front or send-to-back, authored by a connected \
+                InfinitySketch device. At least one of `strokeKeys`/`textIds`/`imageIds` \
+                is required. `mode` selects the direction: "front" moves the named \
+                elements to the top of the draw order, "back" to the bottom — each \
+                WITHIN its own element type's stacking, mirroring the app's \
+                Bring-to-Front/Send-to-Back tool. The cross-type order is FIXED (images \
+                below strokes below texts), so a stroke brought to front is still drawn \
+                below every text; use this only to reorder among same-type elements. For \
+                images, pinned (background) images always draw behind unpinned ones \
+                regardless of this order — change that band with set_pinned. \
+                REQUIRES a connected device with the reorderElements capability — fails \
+                with noDeviceAvailable if none is connected, deviceTimeout if it doesn't \
+                respond in time, unknownDoc if the document doesn't exist, and \
+                deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. \
+                \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "strokeKeys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys to reorder, from list_strokes/get_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "textIds": .object([
+                        "type": "array",
+                        "description": "Placed-text ids to reorder, from list_texts.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "imageIds": .object([
+                        "type": "array",
+                        "description": "Placed-image ids to reorder, from list_images.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "mode": .object([
+                        "type": "string",
+                        "enum": .array(["front", "back"].map(Value.string)),
+                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — within each element type.",
+                    ]),
+                ]),
+                "required": .array(["docId", "mode"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1991,6 +2039,7 @@ public actor MCPAdapter {
         case "resolve_collision": return await callResolveCollision(arguments)
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
+        case "reorder_elements": return await callReorderElements(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -3025,6 +3074,60 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "reordered \(orderedIds.count) grids in \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    // MARK: - reorder_elements (agent-element-zorder, Task 2: server relay)
+    //
+    // Bring-to-front/send-to-back for strokes/texts/images within ONE
+    // document — the element-level counterpart to reorder_grids above, but
+    // gated on the "reorderElements" capability (a device that only authors
+    // grids must not be picked for this) and validated server-side on
+    // `mode` (unlike orderedIds above, "front"/"back" IS a closed
+    // enumeration the server can and does check before ever contacting a
+    // device). At least one of strokeKeys/textIds/imageIds is required —
+    // an op with no ids at all would be a silent no-op relayed to the
+    // device for nothing.
+    private func callReorderElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys") ?? []
+            let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
+            let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            let mode = try Self.stringArg(arguments, "mode")
+            guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
+            guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+
+            guard let bytes = await manager.currentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
+            let count = strokeKeys.count + textIds.count + imageIds.count
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("reorderElements"),
+                    "strokeKeys": .array(strokeKeys.map(Value.string)),
+                    "textIds": .array(textIds.map(Value.string)),
+                    "imageIds": .array(imageIds.map(Value.string)),
+                    "mode": .string(mode),
+                ]))
+            } catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "reorderElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in
+                "moved \(count) element(s) to \(mode) in \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

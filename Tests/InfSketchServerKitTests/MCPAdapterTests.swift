@@ -727,8 +727,10 @@ private actor FakeStrokeOpDevice {
     // (agent-doc-appearance, Task 2) added one more, renaming this from
     // `listToolsContainsAllThirtyEightTools`. copy_elements
     // (agent-copy-elements, Task 2) added one more, renaming this from
-    // `listToolsContainsAllThirtyNineTools`.
-    @Test func listToolsContainsAllFortyTools() async throws {
+    // `listToolsContainsAllThirtyNineTools`. reorder_elements
+    // (agent-element-zorder, Task 2) added one more, renaming this from
+    // `listToolsContainsAllFortyTools`.
+    @Test func listToolsContainsAllFortyOneTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -746,7 +748,7 @@ private actor FakeStrokeOpDevice {
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_paper", "copy_elements",
+            "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -5292,6 +5294,108 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - reorder_elements (agent-element-zorder, Task 2)
+    //
+    // Bring-to-front/send-to-back for strokes/texts/images, authored by a
+    // connected device — the same shape as reorder_grids above, but WITHIN
+    // one document's element z-order rather than the grid stack. Relays
+    // {op:"reorderElements", strokeKeys, textIds, imageIds, mode} through
+    // broker.requestStrokeOp, gated on the "reorderElements" capability, and
+    // writes the reply back under the standard byte-CAS.
+
+    /// The exact relayed envelope and capability — mirrors
+    /// `reorderGridsRelaysOrderedIdsAndCapability`'s minimal-envelope
+    /// assertion.
+    @Test func reorderElementsRelaysSpecAndCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"reordered"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["reorderElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"], "mode": "front"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("moved 1 element(s) to front in d"))
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "reorderElements")
+        #expect(spec["mode"] as? String == "front")
+        #expect(spec["strokeKeys"] as? [String] == ["k1"])
+    }
+
+    /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
+    /// device round trip.
+    @Test func reorderElementsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["reorderElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "ghost", "strokeKeys": ["k1"], "mode": "front"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `mode` outside {"front", "back"} -> `invalidArguments`, checked before
+    /// the document is even looked up.
+    @Test func reorderElementsBadModeErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"], "mode": "sideways"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    /// No ids at all (strokeKeys/textIds/imageIds all omitted) ->
+    /// `invalidArguments`.
+    @Test func reorderElementsNoIdsErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "d", "mode": "front"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    /// An ABSENT `mode` is `missingArgument: mode` (a required arg), distinct from a
+    /// bad-VALUE `mode` (`invalidArguments`) — the required-arg convention set_pinned's
+    /// `pinned` also uses. (A `mode`-value error is `invalidArguments`; a `mode`-absent
+    /// error names the arg.)
+    @Test func reorderElementsMissingModeErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "missingArgument: mode")
 
         await server.stop()
     }
