@@ -745,6 +745,29 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "set_paper",
+            description: """
+                Sets a document's paper appearance: `light` (the paper colour in light \
+                mode), `dark` (the paper colour in dark mode), and/or `transparent` (a \
+                transparent background). `light`/`dark` are #RRGGBB or #RRGGBBAA hex. At \
+                least one field is required. Light and dark are set independently (no \
+                automatic light<->dark derivation). Server-side, no device needed; applies \
+                live to an open document with no banner. unknownDoc if the document doesn't \
+                exist; invalidSpec on a bad hex colour; invalidArguments if no field is given. \
+                \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "light": .object(["type": "string", "description": "Light-mode paper colour, #RRGGBB or #RRGGBBAA."]),
+                    "dark": .object(["type": "string", "description": "Dark-mode paper colour, #RRGGBB or #RRGGBBAA."]),
+                    "transparent": .object(["type": "boolean", "description": "Whether the background is transparent."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "replace_doc",
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
@@ -1896,6 +1919,7 @@ public actor MCPAdapter {
         case "remove_text": return await callRemoveText(arguments)
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
+        case "set_paper": return await callSetPaper(arguments)
         case "replace_doc": return await callReplaceDoc(arguments)
         case "create_doc": return await callCreateDoc(arguments)
         case "draw_strokes": return await callDrawStrokes(arguments)
@@ -2309,6 +2333,41 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "set pinned=\(pinned) on \(ids.count) element(s) in \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Sets a document's paper colours / transparent flag — a pure server-side
+    /// `DocJSON` write (no device), mirroring `callSetPinned`. At least one of
+    /// `light`/`dark`/`transparent` is required (else `invalidArguments`);
+    /// `unknownDoc` fast-fail; byte-CAS write (`docChangedDuringOp`); a bad hex
+    /// surfaces as `invalidSpec` via `DocJSON`.
+    private func callSetPaper(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.stringArg(arguments, "docId")
+            let light = try Self.optionalStringArg(arguments, "light")
+            let dark = try Self.optionalStringArg(arguments, "dark")
+            let transparent = try Self.optionalBoolArg(arguments, "transparent")
+            guard light != nil || dark != nil || transparent != nil else {
+                return Self.errorResult("invalidArguments")
+            }
+            guard let bytes = await manager.currentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.setPaper(from: bytes, light: light, dark: dark, transparent: transparent)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "set paper on \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4066,6 +4125,15 @@ public actor MCPAdapter {
     /// sensible default).
     private static func requiredBoolArg(_ arguments: [String: Value]?, _ key: String) throws -> Bool {
         guard let value = arguments?[key], !value.isNull else { throw ArgumentError.missing(key) }
+        guard let b = Bool(value) else { throw ArgumentError.invalidType(key) }
+        return b
+    }
+
+    /// An optional Bool argument — `nil` when absent/null (so a caller can
+    /// distinguish "not supplied" from an explicit `false`), `.invalidType` on a
+    /// non-bool. (set_paper's `transparent` is present-only.)
+    private static func optionalBoolArg(_ arguments: [String: Value]?, _ key: String) throws -> Bool? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
         guard let b = Bool(value) else { throw ArgumentError.invalidType(key) }
         return b
     }

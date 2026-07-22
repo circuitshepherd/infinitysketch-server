@@ -723,8 +723,10 @@ private actor FakeStrokeOpDevice {
     // reorder_grids (agent-grid-reorder, Task 2) added one more, renaming
     // this from `listToolsContainsAllThirtySixTools`. set_pinned
     // (agent-set-pinned, Task 2) added one more, renaming this from
-    // `listToolsContainsAllThirtySevenTools`.
-    @Test func listToolsContainsAllThirtyEightTools() async throws {
+    // `listToolsContainsAllThirtySevenTools`. set_paper
+    // (agent-doc-appearance, Task 2) added one more, renaming this from
+    // `listToolsContainsAllThirtyEightTools`.
+    @Test func listToolsContainsAllThirtyNineTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -742,7 +744,7 @@ private actor FakeStrokeOpDevice {
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned",
+            "reorder_grids", "set_pinned", "set_paper",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -5130,6 +5132,66 @@ private actor FakeStrokeOpDevice {
 
         #expect(await device.receivedRequests.isEmpty)
 
+        await server.stop()
+    }
+
+    // MARK: - set_paper (agent-doc-appearance, Task 2)
+    //
+    // Entirely server-side (pure JSON field-writing via DocJSON.setPaper, no
+    // device, no capability) -- mirrors set_pinned's shape: seed a doc with
+    // paper fields directly via `startServer(bytes:)`, the same seeding seam
+    // `setPinnedFlipsAndReportsCount` etc. use.
+
+    private static let paperDocBytes = Data(#"""
+        {"aaa001_thumbnailData":"","backgroundColor":{"red":1,"green":1,"blue":1,"alpha":1},"backgroundColorDark":{"red":0,"green":0,"blue":0,"alpha":1},"transparentBackground":false,"placedTextsData":[]}
+        """#.utf8)
+
+    @Test func setPaperSetsLightAndReports() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.paperDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "set_paper", arguments: ["docId": "d", "light": "#112233"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("set paper on d"))
+        await server.stop()
+    }
+
+    @Test func setPaperUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.paperDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "set_paper", arguments: ["docId": "ghost", "light": "#112233"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+        await server.stop()
+    }
+
+    @Test func setPaperNoFieldsErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.paperDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "set_paper", arguments: ["docId": "d"])   // no light/dark/transparent
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
+        await server.stop()
+    }
+
+    @Test func setPaperBadHexErrors() async throws {
+        let (server, port, task) = try await startServer(bytes: Self.paperDocBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "set_paper", arguments: ["docId": "d", "light": "nothex"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidSpec")
         await server.stop()
     }
 }
