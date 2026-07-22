@@ -121,10 +121,12 @@ actor Connection {
             // "authorGrids" (agent-grid-authoring spec, Task 3) joined the same
             // way, for list_grids/add_grid/update_grid/remove_grid/
             // set_grid_origin's capability: "authorGrids" relay.
+            // "copyElements" (agent-copy-elements spec, Task 2) joined the
+            // same way, for copy_elements's capability: "copyElements" relay.
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
-                "mergeDocs", "authorImage", "authorGrids",
+                "mergeDocs", "authorImage", "authorGrids", "copyElements",
             ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in

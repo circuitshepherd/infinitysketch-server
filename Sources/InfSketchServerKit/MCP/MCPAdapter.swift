@@ -1905,6 +1905,44 @@ public actor MCPAdapter {
                 "required": .array(["source", "target"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "copy_elements",
+            description: """
+                Copies named strokes/texts/images from document `source` INTO document \
+                `target`, as FRESH clones (fresh stroke composite keys / ids) — unlike \
+                merge_docs, elements are never deduped by identity, so copying the same \
+                source element twice yields two distinct clones. `source` is left \
+                untouched; `target` gains the copies. At least one of `strokeKeys`/ \
+                `textIds`/`imageIds` is required. \
+                REQUIRES a connected device with the copyElements capability — fails with \
+                noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
+                either document is absent, and deviceFailed: elementNotFound if an id \
+                isn't found in `source`. \(casRejectionSentence)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "source": .object(["type": "string", "description": "The document to copy FROM (left unchanged)."]),
+                    "target": .object(["type": "string", "description": "The document to copy INTO (gains the clones)."]),
+                    "strokeKeys": .object([
+                        "type": "array",
+                        "description": "Composite stroke keys to clone, from list_strokes/get_strokes.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "textIds": .object([
+                        "type": "array",
+                        "description": "Placed-text ids to clone, from list_texts.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "imageIds": .object([
+                        "type": "array",
+                        "description": "Placed-image ids to clone, from list_images.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["source", "target"].map(Value.string)),
+            ])
+        ),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -1952,6 +1990,7 @@ public actor MCPAdapter {
         case "render_collision": return await callRenderCollision(arguments)
         case "resolve_collision": return await callResolveCollision(arguments)
         case "merge_docs": return await callMergeDocs(arguments)
+        case "copy_elements": return await callCopyElements(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -3954,6 +3993,89 @@ public actor MCPAdapter {
                 ) { seq in
                     "merged \(source) into \(target) at seq \(seq)"
                 }
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    // MARK: - copy_elements (agent-copy-elements spec, Task 2: server relay)
+    //
+    // Parallel to merge_docs (MARK above), but a COPY not a merge: named
+    // strokes/texts/images from `source` are cloned into `target` as FRESH
+    // elements (fresh stroke keys / ids), never deduped by identity — copying
+    // the same source element twice yields two distinct clones (the
+    // contrast the app-side `CopyElements.perform`'s
+    // `copyingSameStrokeTwiceMakesTwoDistinctClones` test pins). `source`'s
+    // bytes ride base64'd INSIDE the op-spec envelope (never as the relay's
+    // `docBytes`, which is always `target`'s); the device's cloned reply is
+    // written back to `target` under the standard byte-CAS every other write
+    // tool uses. `source` is read but never written.
+
+    private func callCopyElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let source = try Self.stringArg(arguments, "source")
+            let target = try Self.stringArg(arguments, "target")
+            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys") ?? []
+            let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
+            let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            guard source != target else { return Self.errorResult("invalidArguments") }
+            guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+
+            guard let sourceBytes = await manager.currentBytes(docId: source) else { return Self.errorResult("sourceNotFound") }
+            guard let targetBytes = await manager.currentBytes(docId: target) else { return Self.errorResult("targetNotFound") }
+
+            let count = strokeKeys.count + textIds.count + imageIds.count
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("copyElements"),
+                    "source": .string(sourceBytes.base64EncodedString()),
+                    "strokeKeys": .array(strokeKeys.map(Value.string)),
+                    "textIds": .array(textIds.map(Value.string)),
+                    "imageIds": .array(imageIds.map(Value.string)),
+                ]))
+            } catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // expectedBytes is targetBytes — the exact bytes relayed to the
+            // device — never a fresh re-read here, which would re-open the
+            // very race window this guard exists to close (Task 2, write CAS).
+            return await submitAndRespond(
+                docId: target, createIfMissing: false, fullDoc: out.bytes, expectedBytes: targetBytes
+            ) { seq in
+                // `out.meta` carries the created elements' fresh keys/ids
+                // (`CopyElements.perform`'s `{"createdStrokeKeys": […],
+                // "createdTextIds": […], "createdImageIds": […]}`, app repo)
+                // — surfaced here the same way draw_strokes surfaces `keys:`,
+                // so the agent can act on exactly what was just copied
+                // instead of re-finding it by bounding box. A missing/
+                // undecodable meta degrades to just the seq line.
+                var summary = "copied \(count) element(s) from \(source) into \(target) at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta) {
+                    if let keys = decoded["createdStrokeKeys"], !keys.isEmpty {
+                        summary += "\nstrokeKeys: \(keys.joined(separator: ", "))"
+                    }
+                    if let ids = decoded["createdTextIds"], !ids.isEmpty {
+                        summary += "\ntextIds: \(ids.joined(separator: ", "))"
+                    }
+                    if let ids = decoded["createdImageIds"], !ids.isEmpty {
+                        summary += "\nimageIds: \(ids.joined(separator: ", "))"
+                    }
+                }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

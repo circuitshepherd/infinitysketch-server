@@ -725,8 +725,10 @@ private actor FakeStrokeOpDevice {
     // (agent-set-pinned, Task 2) added one more, renaming this from
     // `listToolsContainsAllThirtySevenTools`. set_paper
     // (agent-doc-appearance, Task 2) added one more, renaming this from
-    // `listToolsContainsAllThirtyEightTools`.
-    @Test func listToolsContainsAllThirtyNineTools() async throws {
+    // `listToolsContainsAllThirtyEightTools`. copy_elements
+    // (agent-copy-elements, Task 2) added one more, renaming this from
+    // `listToolsContainsAllThirtyNineTools`.
+    @Test func listToolsContainsAllFortyTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -744,7 +746,7 @@ private actor FakeStrokeOpDevice {
             "list_collisions", "render_collision", "resolve_collision", "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_paper",
+            "reorder_grids", "set_pinned", "set_paper", "copy_elements",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -4639,6 +4641,149 @@ private actor FakeStrokeOpDevice {
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "T"])
         #expect(isErrorIntoTarget == true)
         #expect(toolResultText(contentIntoTarget) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    // MARK: - copy_elements (agent-copy-elements spec, Task 2: server relay)
+    //
+    // Same device-relay shape as merge_docs above, but a COPY not a merge:
+    // `source`'s bytes ride base64'd INSIDE the op-spec envelope under the
+    // key `source` (not `sourceBytes` — the field name copy_elements uses),
+    // `target`'s current bytes are the relay's `docBytes`, and the device's
+    // cloned reply is written back to `target` under the standard byte-CAS.
+    // `source` is read but never written.
+
+    /// Relay: callCopyElements ships {op, source(base64), strokeKeys,
+    /// textIds, imageIds} to the device, docBytes = target's bytes.
+    @Test func copyElementsRelaysSpecAndCapability() async throws {
+        let targetBytes = Fixtures.docBytes
+        let sourceBytes = Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "t", bytes: targetBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "s", bytes: sourceBytes)
+
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["copyElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "s", "target": "t", "strokeKeys": ["k1"]])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("from s into t"))
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "t")
+        #expect(received.docBytes == targetBytes)  // target rides as docBytes
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "copyElements")
+        let encodedSource = try #require(spec["source"] as? String)  // base64 source rides in the spec
+        #expect(Data(base64Encoded: encodedSource) == sourceBytes)
+        #expect(spec["strokeKeys"] as? [String] == ["k1"])
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/t/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modified)
+
+        await server.stop()
+    }
+
+    /// `out.meta`'s created ids (`CopyElements.perform`'s app-side
+    /// `{"createdStrokeKeys": […], "createdTextIds": […], "createdImageIds": […]}`
+    /// shape) are surfaced in the result text the same way draw_strokes
+    /// surfaces `keys:` — so the agent can act on exactly what was just
+    /// copied instead of re-finding it.
+    @Test func copyElementsSurfacesCreatedIds() async throws {
+        let targetBytes = Fixtures.docBytes
+        let sourceBytes = Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "t", bytes: targetBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "s", bytes: sourceBytes)
+
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+        let metaBytes = Data(#"{"createdStrokeKeys":["newkey1"],"createdTextIds":[],"createdImageIds":[]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modified, meta: metaBytes),
+            capabilities: ["copyElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "s", "target": "t", "strokeKeys": ["k1"]])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("newkey1"))
+
+        await server.stop()
+    }
+
+    /// `source` absent -> "sourceNotFound", checked before any device is
+    /// contacted (mirrors `mergeDocsErrorsSourceNotFound`).
+    @Test func copyElementsSourceNotFound() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "ghost", "target": "d", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "sourceNotFound")
+
+        await server.stop()
+    }
+
+    /// `target` absent -> "targetNotFound".
+    @Test func copyElementsTargetNotFound() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "ghost", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "targetNotFound")
+
+        await server.stop()
+    }
+
+    /// `source == target` -> "invalidArguments", checked before either doc's
+    /// bytes are even read.
+    @Test func copyElementsSameDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "d", "strokeKeys": ["k1"]])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    /// No ids at all (strokeKeys/textIds/imageIds all omitted) ->
+    /// "invalidArguments", checked before either doc is looked up (neither
+    /// "a" nor "b" need exist for this to fail).
+    @Test func copyElementsNoIdsErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements", arguments: ["source": "a", "target": "b"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
 
         await server.stop()
     }
