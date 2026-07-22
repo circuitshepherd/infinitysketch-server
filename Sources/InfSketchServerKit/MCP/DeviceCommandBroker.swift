@@ -109,10 +109,12 @@ public actor DeviceCommandBroker {
     }
 
     /// Agent stroke-authoring entry point (Task 4). Throws DeviceCommandError.
-    /// The reply's `meta` carries `render`'s metadata JSON AND the selection
-    /// ops' descriptor JSON (get_selection / transform_selection / select_*),
-    /// which reply with `meta` and NO bytes; the byte-returning ops
-    /// (draw/delete/list) resolve with `meta == nil`.
+    /// The reply's `meta` (when present) carries metadata alongside or instead of
+    /// bytes: render/preview metadata JSON, the selection ops' descriptor JSON
+    /// (get_selection / transform_selection / select_*, which reply with `meta` and
+    /// NO bytes), or the created-id lists some authoring ops report (draw_strokes'
+    /// keys, copy_elements' created ids, add_text/add_image's id). Ops that only
+    /// mutate the doc bytes (delete/reorder/set_*) resolve with `meta == nil`.
     ///
     /// `capability` defaults to "authorStrokes" (every stroke-op tool). The
     /// styled `add_text`/`edit_text`/`list_fonts` text-authoring tools (Task
@@ -133,7 +135,8 @@ public actor DeviceCommandBroker {
 
     /// WSAdapter routes createDocReply/strokeOpReply here — kind-agnostic,
     /// resolved purely by requestId. Unknown/expired requestId → log + drop.
-    /// `meta` is only ever non-nil for a strokeOpReply answering a render op;
+    /// `meta` is non-nil only for replies that carry metadata (render/preview,
+    /// selection descriptors, or an authoring op's created ids — see requestStrokeOp);
     /// createDocReply routing always passes the default `nil`.
     public func handleReply(requestId: UInt32, bytes: Data?, meta: Data? = nil, failureReason: String?) {
         guard let entry = completePending(requestId) else {
