@@ -131,13 +131,17 @@ actor Connection {
             // "reorderElements" (agent-element-zorder spec, Task 2) joined
             // the same way, for reorder_elements's capability:
             // "reorderElements" relay.
+            // "provideContent" (M2c-1, Task 4) joined the same way, for
+            // requestProvideContent's capability: "provideContent" relay — a
+            // device advertising only content-provisioning must still register.
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements",
+                "provideContent",
             ]) {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
+                await broker.register(connectionId: connectionId, deviceId: deviceId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
             }
