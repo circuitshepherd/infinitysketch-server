@@ -85,6 +85,47 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         await server.stop()
     }
 
+    /// A leftover M2b sidecar on disk (metadata, no content) must not make `/api/docs` claim the
+    /// doc has content — `store.load` would throw — nor let the stale sidecar shadow the fresher
+    /// live-index entry for the same docId. The HTTP twin of
+    /// `LiveDocIndexTests.testLeftoverSidecarNeitherMislabelsNorShadowsTheLiveEntry`.
+    @Test func apiDocsIgnoresLeftoverSidecarsInFavourOfTheLiveIndex() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("integration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        // An M2b-era sidecar for a doc the server holds NO bytes for.
+        try store.saveMetadata(
+            docId: "stale-doc",
+            DocMetadataEntry(name: "stale-doc", sizeBytes: 1,
+                             modifiedAt: Date(timeIntervalSince1970: 0),
+                             originDeviceId: "device-OLD", thumbnail: nil))
+
+        let server = InfSketchServer(port: 0, docsDirectory: dir, config: SessionConfig())
+        let task = Task { try await server.run() }
+        try await server.waitUntilListening()
+        let port = try #require(await server.listeningPort)
+        defer { task.cancel() }
+
+        // A currently-connected device advertises the SAME doc, fresher and bigger.
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "stale-doc", modifiedAt: Date(timeIntervalSince1970: 900),
+                              sizeBytes: 42, thumbnail: Fixtures.thumbnailPNG)],
+            deviceId: "device-NEW")
+
+        let listURL = URL(string: "http://127.0.0.1:\(port)/api/docs")!
+        let (listData, _) = try await URLSession.shared.data(from: listURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let docs = try decoder.decode([DocSummary].self, from: listData)
+
+        let rows = docs.filter { $0.id == "stale-doc" }
+        #expect(rows.count == 1)                 // the sidecar must not add a second row
+        #expect(rows.first?.hasContent == false) // no bytes on disk — must not claim content
+        #expect(rows.first?.sizeBytes == 42)     // the LIVE entry wins, not the stale sidecar
+        await server.stop()
+    }
+
     @Test func frameServesStoredThumbnail() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
