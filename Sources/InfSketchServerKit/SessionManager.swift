@@ -199,8 +199,23 @@ public actor SessionManager {
                     sizeBytes: info.sizeBytes,
                     modifiedAt: info.modifiedAt,
                     seq: live[info.docId]?.seq,
-                    subscriberCount: live[info.docId]?.subscriberCount)
+                    subscriberCount: live[info.docId]?.subscriberCount,
+                    hasContent: info.hasContent,
+                    originDeviceId: info.originDeviceId)
             }
+    }
+
+    /// M2b: persist a device's advertisements as metadata sidecars. Best-effort per entry — one
+    /// unwritable sidecar must not drop the rest of the batch.
+    public func saveAdvertisements(_ ads: [DocAdvertisement], originDeviceId: String?) {
+        for ad in ads {
+            try? store.saveMetadata(docId: ad.docId, DocMetadataEntry(
+                name: ad.docId,
+                sizeBytes: ad.sizeBytes,
+                modifiedAt: ad.modifiedAt,
+                originDeviceId: originDeviceId,
+                thumbnail: ad.thumbnail))
+        }
     }
 
     private func scheduleGraceTeardown(docId: String) {

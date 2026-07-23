@@ -154,6 +154,42 @@ import InfSketchWire
         }
         #expect(results == [op])
     }
+    /// The chunked path for `.advertiseDocs` — the only `TransferCarrying` case with no
+    /// dedicated chunked round-trip test (M2b Task 1 review finding). A batch of
+    /// `DocAdvertisement`s with multi-KB thumbnails, forced through a tiny `inlineLimit`,
+    /// must genuinely open a `.transfer` descriptor (not silently stay inline) and reassemble
+    /// back to the exact original array.
+    @Test func advertiseDocsRoundTripsThroughChunkedTransfer() throws {
+        let ads = (0..<5).map { i in
+            DocAdvertisement(docId: "doc-\(i)", modifiedAt: Date(timeIntervalSince1970: Double(i)),
+                              sizeBytes: 1000 + i, thumbnail: Data(repeating: UInt8(i), count: 4096))
+        }
+        let json = try JSONEncoder().encode(ads)
+        var sender = TransferSender<ClientMessage>(inlineLimit: 64, chunkSize: 512)
+        var reassembler = TransferReassembler<ClientMessage>()
+        let frames = try sender.frames(for: .advertiseDocs(payload: .inline(json)))
+
+        // Verify this genuinely chunked: the announce frame must carry a `.transfer`
+        // descriptor (not `.inline`), and there must be more than one chunk — proving it
+        // didn't just squeak through as a single inline frame.
+        guard case .text(let announceJSON) = frames[0],
+              case .advertiseDocs(.transfer(let descriptor)) = try ClientMessage(jsonText: announceJSON)
+        else { Issue.record("expected a chunked transfer descriptor announce, not inline"); return }
+        #expect(json.count > 64)
+        #expect(descriptor.totalBytes == json.count)
+        #expect(descriptor.chunkCount > 1)
+        #expect(frames.count == descriptor.chunkCount + 2)   // announce + N chunks + end
+
+        var results: [ClientMessage] = []
+        for frame in frames {
+            if let message = try reassembler.consume(frame) { results.append(message) }
+        }
+        #expect(results.count == 1)
+        guard case .advertiseDocs(let payload) = results.first, case .inline(let reassembled) = payload
+        else { Issue.record("expected reassembled advertiseDocs with inline payload"); return }
+        #expect(try JSONDecoder().decode([DocAdvertisement].self, from: reassembled) == ads)
+    }
+
     @Test func ordinaryMessagePassesThrough() throws {
         var reassembler = TransferReassembler<ClientMessage>()
         let message = try reassembler.consume(.text(try ClientMessage.subscribeStatus.jsonText()))

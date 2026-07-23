@@ -64,7 +64,7 @@ func receive() async throws -> ServerMessage {
     }
 }
 
-try await send(.hello(protocolVersion: WireProtocol.version, capabilities: []))
+try await send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
 guard case .helloAck = try await receive() else {
     print("handshake failed")
     exit(1)

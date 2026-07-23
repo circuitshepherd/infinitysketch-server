@@ -121,17 +121,59 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     public var modifiedAt: Date
     public var seq: Int?
     public var subscriberCount: Int?
-    public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?) {
+    /// M2b: false = the server holds only metadata + thumbnail for this doc; its content
+    /// lives on `originDeviceId`. Defaults to TRUE when absent — every pre-M2b entry had content.
+    public var hasContent: Bool
+    /// M2b: which device advertised this doc (from `hello`'s deviceId). M2c routes content
+    /// fetches by it.
+    public var originDeviceId: String?
+
+    public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?,
+                hasContent: Bool = true, originDeviceId: String? = nil) {
         self.id = id
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
         self.seq = seq
         self.subscriberCount = subscriberCount
+        self.hasContent = hasContent
+        self.originDeviceId = originDeviceId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent, originDeviceId
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
+        modifiedAt = try c.decode(Date.self, forKey: .modifiedAt)
+        seq = try c.decodeIfPresent(Int.self, forKey: .seq)
+        subscriberCount = try c.decodeIfPresent(Int.self, forKey: .subscriberCount)
+        hasContent = try c.decodeIfPresent(Bool.self, forKey: .hasContent) ?? true
+        originDeviceId = try c.decodeIfPresent(String.self, forKey: .originDeviceId)
+    }
+}
+
+/// One document a device advertises: metadata + thumbnail, NO content. The server persists
+/// these as `metadata/` sidecars so a doc is discoverable + previewable everywhere without
+/// its bytes ever being uploaded (M2b). The thumbnail travels WITH the advertisement so a
+/// preview survives the origin device going offline.
+public struct DocAdvertisement: Codable, Equatable, Sendable {
+    public var docId: String
+    public var modifiedAt: Date
+    public var sizeBytes: Int
+    public var thumbnail: Data?
+    public init(docId: String, modifiedAt: Date, sizeBytes: Int, thumbnail: Data?) {
+        self.docId = docId
+        self.modifiedAt = modifiedAt
+        self.sizeBytes = sizeBytes
+        self.thumbnail = thumbnail
     }
 }
 
 public enum ClientMessage: Equatable, Sendable {
-    case hello(protocolVersion: Int, capabilities: [String])
+    case hello(protocolVersion: Int, capabilities: [String], deviceId: String?)
     case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
     case unsubscribe(docId: String)
     case op(docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation? = nil)
@@ -149,11 +191,12 @@ public enum ClientMessage: Equatable, Sendable {
     /// Base64-ing the PNG into a JSON envelope instead would inflate it ~33%
     /// over the wire for no benefit, so the two travel as separate fields.
     case strokeOpReply(requestId: UInt32, docId: String, payload: BulkPayload?, meta: Data?, failureReason: String?)
+    case advertiseDocs(payload: BulkPayload)
 }
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation
+        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation
     }
 
     public init(from decoder: any Decoder) throws {
@@ -162,7 +205,8 @@ extension ClientMessage: Codable {
         case "hello":
             self = .hello(
                 protocolVersion: try c.decode(Int.self, forKey: .protocolVersion),
-                capabilities: try c.decodeIfPresent([String].self, forKey: .capabilities) ?? [])
+                capabilities: try c.decodeIfPresent([String].self, forKey: .capabilities) ?? [],
+                deviceId: try c.decodeIfPresent(String.self, forKey: .deviceId))
         case "subscribe":
             self = .subscribe(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -200,6 +244,14 @@ extension ClientMessage: Codable {
                 payload = .inline(try c.decode(Data.self, forKey: .data))
             }
             self = .frame(docId: try c.decode(String.self, forKey: .docId), payload: payload)
+        case "advertiseDocs":
+            let payload: BulkPayload
+            if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
+                payload = .transfer(descriptor)
+            } else {
+                payload = .inline(try c.decode(Data.self, forKey: .data))
+            }
+            self = .advertiseDocs(payload: payload)
         case "createDocReply":
             let payload: BulkPayload?
             if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
@@ -238,10 +290,11 @@ extension ClientMessage: Codable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let v, let caps):
+        case .hello(let v, let caps, let deviceId):
             try c.encode("hello", forKey: .type)
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(caps, forKey: .capabilities)
+            try c.encodeIfPresent(deviceId, forKey: .deviceId)
         case .subscribe(let docId, let fromSeq, let createIfMissing):
             try c.encode("subscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -278,6 +331,12 @@ extension ClientMessage: Codable {
         case .frame(let docId, let payload):
             try c.encode("frame", forKey: .type)
             try c.encode(docId, forKey: .docId)
+            switch payload {
+            case .inline(let data): try c.encode(data, forKey: .data)
+            case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
+            }
+        case .advertiseDocs(let payload):
+            try c.encode("advertiseDocs", forKey: .type)
             switch payload {
             case .inline(let data): try c.encode(data, forKey: .data)
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
@@ -499,6 +558,7 @@ extension ClientMessage: TransferCarrying {
         switch self {
         case .op(_, _, let payload, _): return payload.bulk.inlineData
         case .frame(_, let payload): return payload.inlineData
+        case .advertiseDocs(let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
         case .strokeOpReply(_, _, let payload, _, _): return payload?.inlineData
         default: return nil
@@ -512,6 +572,8 @@ extension ClientMessage: TransferCarrying {
                        expectation: expectation)
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .transfer(descriptor))
+        case .advertiseDocs:
+            return .advertiseDocs(payload: .transfer(descriptor))
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .transfer(descriptor), failureReason: failureReason)
@@ -532,6 +594,8 @@ extension ClientMessage: TransferCarrying {
             return nil
         case .frame(_, .transfer(let d)):
             return d
+        case .advertiseDocs(.transfer(let d)):
+            return d
         case .createDocReply(_, _, let payload, _):
             if case .transfer(let d) = payload { return d }
             return nil
@@ -548,6 +612,8 @@ extension ClientMessage: TransferCarrying {
                        expectation: expectation)
         case .frame(let docId, _):
             return .frame(docId: docId, payload: .inline(bytes))
+        case .advertiseDocs:
+            return .advertiseDocs(payload: .inline(bytes))
         case .createDocReply(let requestId, let docId, _, let failureReason):
             return .createDocReply(requestId: requestId, docId: docId,
                                     payload: .inline(bytes), failureReason: failureReason)

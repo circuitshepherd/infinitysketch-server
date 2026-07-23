@@ -6,7 +6,7 @@ import InfSketchWire
 @Suite struct WireProtocolTests {
     @Test func clientMessagesRoundTrip() throws {
         let messages: [ClientMessage] = [
-            .hello(protocolVersion: 1, capabilities: ["render"]),
+            .hello(protocolVersion: 1, capabilities: ["render"], deviceId: nil),
             .subscribe(docId: "a", fromSeq: 7, createIfMissing: false),
             .subscribe(docId: "a", fromSeq: nil, createIfMissing: false),
             .unsubscribe(docId: "a"),

@@ -125,6 +125,10 @@ private final class StaleReadStore: DocumentStore, @unchecked Sendable {
     func exists(docId: String) throws -> Bool {
         docId == self.docId
     }
+
+    // M2b: this mock exercises the content-only CAS path; metadata sidecars are untested here.
+    func saveMetadata(docId: String, _ entry: DocMetadataEntry) throws {}
+    func loadMetadata(docId: String) throws -> DocMetadataEntry? { nil }
 }
 
 /// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK
@@ -290,7 +294,7 @@ private actor FakeCreateDocDevice {
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
         ws.resume()
-        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["createDoc"]).jsonText()))
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["createDoc"], deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
         guard ack == .helloAck(protocolVersion: 1) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
@@ -374,7 +378,7 @@ private actor FakeStrokeOpDevice {
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
         ws.resume()
-        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: Array(capabilities)).jsonText()))
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: Array(capabilities), deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
         guard ack == .helloAck(protocolVersion: 1) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
