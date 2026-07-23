@@ -151,10 +151,14 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     }
 }
 
-/// One document a device advertises: metadata + thumbnail, NO content. The server persists
-/// these as `metadata/` sidecars so a doc is discoverable + previewable everywhere without
-/// its bytes ever being uploaded (M2b). The thumbnail travels WITH the advertisement so a
-/// preview survives the origin device going offline.
+/// One document a device advertises: metadata + thumbnail, NO content — so a doc is
+/// discoverable and previewable on other devices without its bytes ever being uploaded.
+/// The thumbnail travels WITH the advertisement so the preview needs no follow-up round trip.
+///
+/// M2c-1: the server holds these ONLY in an in-memory live index, keyed by docId with the set
+/// of devices that advertised it — nothing is persisted (the server's durable state is content
+/// documents alone), and an entry is pruned when its last advertising device disconnects.
+/// All advertisers are equal: any of them may later be asked to hand over the content.
 public struct DocAdvertisement: Codable, Equatable, Sendable {
     public var docId: String
     public var modifiedAt: Date
