@@ -87,6 +87,12 @@ public final class InfSketchServer: Sendable {
         let store = self.store
         let manager = self.manager
 
+        // M2c-1: a subscribe to a doc we hold no bytes for pulls them from a connected holder.
+        let broker = self.deviceCommandBroker
+        await manager.setContentProvider { docId, deviceId in
+            try await broker.requestProvideContent(docId: docId, deviceId: deviceId)
+        }
+
         await http.appendRoute("GET,HEAD /api/docs") { request in
             let live = await manager.liveInfo()
             var summaries = (try store.list()).map { info in

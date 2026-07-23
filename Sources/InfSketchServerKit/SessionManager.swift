@@ -37,10 +37,21 @@ public actor SessionManager {
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
     /// docId → live advertisement entry. In-memory only (see LiveDocEntry).
     private var liveIndex: [String: LiveDocEntry] = [:]
+    /// M2c-1: pulls one document's bytes from ONE named holder. Injected by InfSketchServer
+    /// (which routes it to DeviceCommandBroker.requestProvideContent); tests inject a fake.
+    /// Nil until wired — a nil provider makes a content-less subscribe behave exactly as before.
+    private var contentProvider: (@Sendable (String, String) async throws -> Data)?
+    /// In-flight fetches, keyed by docId, so concurrent subscribers coalesce onto ONE pull
+    /// instead of each hitting a holder (the broker would reject the second with requestInFlight).
+    private var inFlightFetches: [String: Task<Data, Error>] = [:]
 
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
         self.config = config
+    }
+
+    public func setContentProvider(_ provider: @escaping @Sendable (String, String) async throws -> Data) {
+        contentProvider = provider
     }
 
     public func subscribe(docId: String, createIfMissing: Bool = false) async throws -> SubscribeResult {
@@ -56,6 +67,14 @@ public actor SessionManager {
                 // in-memory empty session; the first op persists real bytes.
                 session = DocumentSession(docId: docId, store: store,
                                           bufferLimit: config.outboundBufferLimit, bytes: Data())
+            } catch DocumentStoreError.notFound {
+                // M2c-1: the server holds no bytes, but a connected device does — pull them from
+                // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
+                // then open the session normally. With no holders/provider this rethrows notFound.
+                let bytes = try await fetchFromHolders(docId: docId)
+                try store.save(docId: docId, bytes: bytes)
+                session = try DocumentSession(docId: docId, store: store,
+                                              bufferLimit: config.outboundBufferLimit)
             }
             sessions[docId] = session
             emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
@@ -266,6 +285,28 @@ public actor SessionManager {
     public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
 
     public func liveEntry(docId: String) -> LiveDocEntry? { liveIndex[docId] }
+
+    /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
+    /// origin — so a failure (offline, doc deleted, timeout) just moves to the next. Throws the
+    /// LAST error when every holder fails.
+    private func fetchFromHolders(docId: String) async throws -> Data {
+        guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
+            throw DocumentStoreError.notFound
+        }
+        if let existing = inFlightFetches[docId] { return try await existing.value }
+
+        let holders = entry.holders.sorted()
+        let task = Task<Data, Error> {
+            var lastError: Error = DocumentStoreError.notFound
+            for holder in holders {
+                do { return try await contentProvider(docId, holder) } catch { lastError = error }
+            }
+            throw lastError
+        }
+        inFlightFetches[docId] = task
+        defer { inFlightFetches.removeValue(forKey: docId) }
+        return try await task.value
+    }
 
     private func scheduleGraceTeardown(docId: String) {
         graceTasks[docId]?.task.cancel()
