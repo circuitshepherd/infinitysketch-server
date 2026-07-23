@@ -8,6 +8,9 @@ public struct DocSummary: Codable, Equatable, Sendable {
     public var modifiedAt: Date
     public var seq: Int?
     public var subscriberCount: Int?
+    /// M2b: false = the server holds only metadata + thumbnail; content lives on `originDeviceId`.
+    public var hasContent: Bool
+    public var originDeviceId: String?
 }
 
 public final class InfSketchServer: Sendable {
@@ -95,7 +98,9 @@ public final class InfSketchServer: Sendable {
                         sizeBytes: info.sizeBytes,
                         modifiedAt: info.modifiedAt,
                         seq: live[info.docId]?.seq,
-                        subscriberCount: live[info.docId]?.subscriberCount)
+                        subscriberCount: live[info.docId]?.subscriberCount,
+                        hasContent: info.hasContent,
+                        originDeviceId: info.originDeviceId)
                 }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
@@ -129,9 +134,22 @@ public final class InfSketchServer: Sendable {
                     body: frame.png))
             }
 
-            guard let bytes = try? store.load(docId: parts[2]),
-                  let png = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
-            else {
+            if let bytes = try? store.load(docId: parts[2]),
+               let png = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes) {
+                return self.headAware(request, HTTPResponse(
+                    statusCode: .ok,
+                    headers: [
+                        .contentType: "image/png",
+                        .cacheControl: "no-store",
+                        HTTPHeader("X-Frame-Stale"): "true",
+                    ],
+                    body: png))
+            }
+
+            // M2b: a metadata-only doc has no bytes here — serve the thumbnail its origin device
+            // advertised, so it previews exactly like any other document (same URL, same content
+            // type, so the app's RemotePreviewCache needs no change).
+            guard let png = ((try? store.loadMetadata(docId: parts[2])) ?? nil)?.thumbnail else {
                 return HTTPResponse(statusCode: .notFound)
             }
             return self.headAware(request, HTTPResponse(
