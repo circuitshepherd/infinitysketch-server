@@ -8,10 +8,15 @@ import InfSketchWire
 /// routes back its `*Reply`).
 ///
 /// One broker per server process. `WSAdapter` registers/unregisters a
-/// connection's send closure + capability set at hello/close; MCP tool
+/// connection's send closure + capability set + `deviceId` at hello/close; MCP tool
 /// handlers call `requestCreation` / `requestStrokeOp`; `WSAdapter` routes an
 /// inbound `createDocReply` / `strokeOpReply` to `handleReply` (kind-agnostic
 /// — it resolves purely by `requestId`).
+///
+/// M2c-1 adds a second addressing mode alongside "any device with capability X":
+/// `requestProvideContent` targets ONE named `deviceId`, because only a device that
+/// actually holds a document can hand over its content. All holders are equal — the
+/// caller picks one and falls back to the next if it fails.
 ///
 /// Every completion path — a reply, a timeout, or the owning connection
 /// closing — removes the pending entry, releases the per-docId "request in
@@ -173,9 +178,12 @@ public actor DeviceCommandBroker {
         }
     }
 
-    /// Shared request path for both `requestCreation` and `requestStrokeOp`:
-    /// capability-filtered most-recent connection selection, the shared
-    /// per-docId in-flight guard, atomic actor-turn continuation
+    /// Shared request path for `requestCreation`, `requestStrokeOp` and
+    /// `requestProvideContent`: capability-filtered most-recent connection
+    /// selection — narrowed to ONE named device when `deviceId` is non-nil
+    /// (M2c-1: only a device that HAS a document can serve its content;
+    /// passing nil keeps the original "any capable device" behaviour) — the
+    /// shared per-docId in-flight guard, atomic actor-turn continuation
     /// registration (no awaits before the send + timeout-task wiring), and a
     /// per-kind timeout. `send` fires synchronously inside the continuation
     /// closure — never suspends — so the reply-routing side can never race
