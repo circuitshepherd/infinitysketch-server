@@ -116,7 +116,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
             return try ServerMessage(jsonText: text)
         }
 
-        try await send(.hello(protocolVersion: 1, capabilities: []))
+        try await send(.hello(protocolVersion: 1, capabilities: [], deviceId: nil))
         #expect(try await receive() == .helloAck(protocolVersion: 1))
 
         try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
@@ -164,7 +164,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
             }
         }
 
-        try await send(.hello(protocolVersion: 1, capabilities: []))
+        try await send(.hello(protocolVersion: 1, capabilities: [], deviceId: nil))
         #expect(try await receive() == .helloAck(protocolVersion: 1))
         try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
@@ -214,7 +214,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // Fake device: hellos with authorStrokes so WSAdapter registers it
         // with the server's real DeviceCommandBroker (the same instance the
         // future stroke-authoring MCP tool, Task 4, will call into).
-        try await send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"]))
+        try await send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"], deviceId: nil))
         guard case .text(let ackText) = try await receiveFrame(),
               try ServerMessage(jsonText: ackText) == .helloAck(protocolVersion: 1)
         else { Issue.record("expected helloAck"); return }

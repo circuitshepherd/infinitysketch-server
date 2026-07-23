@@ -92,7 +92,7 @@ actor Connection {
 
     private func dispatch(_ message: ClientMessage) async {
         switch message {
-        case .hello(let version, let capabilities):
+        case .hello(let version, let capabilities, _):
             guard version == WireProtocol.version else {
                 emit(.error(reason: "unsupportedVersion"))
                 await close()
@@ -277,6 +277,13 @@ actor Connection {
                 return
             }
             await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta, failureReason: nil)
+
+        case .advertiseDocs:
+            // Wire-only for now (M2b Task 1) — a later task persists these as
+            // metadata/thumbnail sidecars (DocAdvertisement). Silently ignored
+            // until that lands, matching the reassembler's existing guarantee
+            // that a .transfer payload never reaches dispatch unresolved.
+            break
         }
     }
 
