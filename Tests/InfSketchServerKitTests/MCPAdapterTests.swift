@@ -125,10 +125,6 @@ private final class StaleReadStore: DocumentStore, @unchecked Sendable {
     func exists(docId: String) throws -> Bool {
         docId == self.docId
     }
-
-    // M2b: this mock exercises the content-only CAS path; metadata sidecars are untested here.
-    func saveMetadata(docId: String, _ entry: DocMetadataEntry) throws {}
-    func loadMetadata(docId: String) throws -> DocMetadataEntry? { nil }
 }
 
 /// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK

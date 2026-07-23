@@ -89,14 +89,7 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute("GET,HEAD /api/docs") { request in
             let live = await manager.liveInfo()
-            // `.filter(\.hasContent)`: metadata-only rows coming out of the STORE are leftover
-            // M2b `metadata/*.json` sidecars still on disk during this migration. The live index
-            // is the sole source of metadata now, so drop them — otherwise a stale sidecar would
-            // be reported hasContent:true (it has no bytes; a subscribe would fail) AND, by
-            // landing in `contentIds` below, would shadow the fresher live entry for the same
-            // docId. This mirrors `SessionManager.listDocuments()` and disappears together with
-            // `StoredDocInfo.hasContent` when the sidecar machinery is deleted.
-            var summaries = (try store.list()).filter(\.hasContent).map { info in
+            var summaries = (try store.list()).map { info in
                 DocSummary(
                     id: info.docId, name: info.name, sizeBytes: info.sizeBytes,
                     modifiedAt: info.modifiedAt, seq: live[info.docId]?.seq,
