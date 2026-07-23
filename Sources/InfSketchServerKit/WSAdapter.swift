@@ -283,17 +283,17 @@ actor Connection {
             await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta, failureReason: nil)
 
         case .advertiseDocs(let payload):
-            // M2b: a device advertising the docs it owns — metadata + thumbnail, no content.
-            // Persisted as sidecars stamped with THIS connection's deviceId (the origin M2c will
-            // route content fetches by). Never touches content: `saveMetadata` is separate from
-            // `save`, and `list()` lets content win.
+            // M2c-1: a device advertising the docs it owns — metadata + thumbnail, no content.
+            // Folded into the in-memory live index, keyed by THIS connection's deviceId (any
+            // holder may later serve a fetch). Never touches content: the live index is separate
+            // from the store, and `listDocuments()` lets content win.
             guard case .inline(let bytes) = payload else {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
             guard let ads = try? JSONDecoder().decode([DocAdvertisement].self, from: bytes) else {
                 return emit(.error(reason: "malformedMessage"))
             }
-            await manager.saveAdvertisements(ads, originDeviceId: deviceId)
+            await manager.applyAdvertisements(ads, deviceId: deviceId)
         }
     }
 
@@ -318,6 +318,9 @@ actor Connection {
         if registeredWithBroker {
             registeredWithBroker = false
             await broker.unregister(connectionId: connectionId)
+        }
+        if let deviceId {
+            await manager.removeAdvertisements(deviceId: deviceId)
         }
         output.finish()
     }

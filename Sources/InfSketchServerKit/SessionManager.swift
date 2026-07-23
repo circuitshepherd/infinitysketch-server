@@ -10,6 +10,18 @@ public struct LiveDocInfo: Sendable, Equatable, Codable {
     }
 }
 
+/// M2c-1: what the server knows about a document from a CONNECTED device's advertisement —
+/// metadata + thumbnail + the set of devices that hold it. Purely live: it is rebuilt from
+/// advertisements and pruned on disconnect, and is NEVER written to disk (the server's durable
+/// state is content documents only). All holders are equal; any of them may serve a fetch.
+public struct LiveDocEntry: Sendable, Equatable {
+    public var name: String
+    public var sizeBytes: Int
+    public var modifiedAt: Date
+    public var thumbnail: Data?
+    public var holders: Set<String>
+}
+
 /// Registry of live DocumentSessions. Sole entry point for subscribe /
 /// unsubscribe / submit, so subscriber counting and grace teardown are
 /// serialized on one actor. Also fans out server-status events.
@@ -23,6 +35,8 @@ public actor SessionManager {
     private var watcherCounts: [String: Int] = [:]
     private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    /// docId → live advertisement entry. In-memory only (see LiveDocEntry).
+    private var liveIndex: [String: LiveDocEntry] = [:]
 
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
@@ -188,35 +202,70 @@ public actor SessionManager {
         return info
     }
 
-    /// The WS twin of the REST listing: store contents + live session info.
+    /// The WS twin of the REST listing: store contents + live session info, plus the live
+    /// index's metadata-only documents. Content ALWAYS beats metadata — a docId with real
+    /// bytes is reported hasContent:true and is never duplicated by an advertisement.
     public func listDocuments() async throws -> [DocListEntry] {
         let live = await liveInfo()
-        return try store.list()
-            .sorted { $0.docId < $1.docId }
-            .map { info in
-                DocListEntry(
-                    id: info.docId,
-                    sizeBytes: info.sizeBytes,
-                    modifiedAt: info.modifiedAt,
-                    seq: live[info.docId]?.seq,
-                    subscriberCount: live[info.docId]?.subscriberCount,
-                    hasContent: info.hasContent,
-                    originDeviceId: info.originDeviceId)
-            }
+        var entries = try store.list().map { info in
+            DocListEntry(
+                id: info.docId,
+                sizeBytes: info.sizeBytes,
+                modifiedAt: info.modifiedAt,
+                seq: live[info.docId]?.seq,
+                subscriberCount: live[info.docId]?.subscriberCount,
+                hasContent: true)
+        }
+        let contentIds = Set(entries.map(\.id))
+        for (docId, entry) in liveIndex where !contentIds.contains(docId) {
+            entries.append(DocListEntry(
+                id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
+                seq: nil, subscriberCount: nil, hasContent: false))
+        }
+        return entries.sorted { $0.id < $1.id }
     }
 
-    /// M2b: persist a device's advertisements as metadata sidecars. Best-effort per entry — one
-    /// unwritable sidecar must not drop the rest of the batch.
-    public func saveAdvertisements(_ ads: [DocAdvertisement], originDeviceId: String?) {
+    /// M2c-1: fold a connected device's advertisements into the live index. Multiple devices
+    /// advertising the same docId UNION (holders accumulate); where their metadata differs the
+    /// NEWEST `modifiedAt` is displayed. An advertisement from a device that sent no `deviceId`
+    /// is ignored — it could never be selected to serve a fetch, so indexing it would list a
+    /// document nobody can produce.
+    public func applyAdvertisements(_ ads: [DocAdvertisement], deviceId: String?) {
+        guard let deviceId else { return }
         for ad in ads {
-            try? store.saveMetadata(docId: ad.docId, DocMetadataEntry(
-                name: ad.docId,
-                sizeBytes: ad.sizeBytes,
-                modifiedAt: ad.modifiedAt,
-                originDeviceId: originDeviceId,
-                thumbnail: ad.thumbnail))
+            if var existing = liveIndex[ad.docId] {
+                existing.holders.insert(deviceId)
+                if ad.modifiedAt >= existing.modifiedAt {
+                    existing.name = ad.docId
+                    existing.sizeBytes = ad.sizeBytes
+                    existing.modifiedAt = ad.modifiedAt
+                    existing.thumbnail = ad.thumbnail
+                }
+                liveIndex[ad.docId] = existing
+            } else {
+                liveIndex[ad.docId] = LiveDocEntry(
+                    name: ad.docId, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
+                    thumbnail: ad.thumbnail, holders: [deviceId])
+            }
         }
     }
+
+    /// M2c-1: a device disconnected — drop it from every holder set, and drop any entry whose
+    /// last holder just left. This is what makes a powered-off device's documents disappear.
+    public func removeAdvertisements(deviceId: String) {
+        for (docId, var entry) in liveIndex {
+            guard entry.holders.remove(deviceId) != nil else { continue }
+            if entry.holders.isEmpty {
+                liveIndex.removeValue(forKey: docId)
+            } else {
+                liveIndex[docId] = entry
+            }
+        }
+    }
+
+    public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
+
+    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndex[docId] }
 
     private func scheduleGraceTeardown(docId: String) {
         graceTasks[docId]?.task.cancel()

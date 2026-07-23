@@ -676,12 +676,14 @@ private struct ServerMessageReader {
         #expect(d.originDeviceId == nil)
     }
 
-    /// M2b Task 3: the full path — a device says `hello` with its deviceId, advertises a doc it
-    /// owns but never uploads (no `save`/subscribe for it), and a SUBSEQUENT `listDocs` from any
-    /// connection reports it as `hasContent: false` stamped with the advertiser's `originDeviceId`.
-    /// This is the behavior the WSAdapter/SessionManager wiring exists for — Task 1 only proved
-    /// the wire round-trips and Task 2 only proved the store persists; nothing before this test
-    /// proved a `hello(deviceId:)` → `advertiseDocs` → `listDocs` connection sequence actually works.
+    /// M2c-1: the full path — a device says `hello` with its deviceId, advertises a doc it owns
+    /// but never uploads (no `save`/subscribe for it), and a SUBSEQUENT `listDocs` from any
+    /// connection reports it as `hasContent: false` via the in-memory live index (no sidecar
+    /// involved — `originDeviceId` is gone from this path; the live index tracks holders instead,
+    /// see LiveDocIndexTests). This is the behavior the WSAdapter/SessionManager wiring exists
+    /// for — Task 1 only proved the wire round-trips and Task 2 only proved the store persists;
+    /// nothing before this test proved a `hello(deviceId:)` → `advertiseDocs` → `listDocs`
+    /// connection sequence actually works.
     @Test func advertiseDocsPersistsMetadataVisibleInSubsequentListDocs() async throws {
         let manager = try makeManager()   // seeds doc "d"
         let harness = try await Harness(manager: manager)
@@ -699,7 +701,6 @@ private struct ServerMessageReader {
         }
         let entry = try #require(docs.first(where: { $0.id == "advertised-only" }))
         #expect(entry.hasContent == false)
-        #expect(entry.originDeviceId == "device-A")
         #expect(entry.sizeBytes == 555)
     }
 
