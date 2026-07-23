@@ -29,10 +29,9 @@ final class WireAdvertiseTests: XCTestCase {
         let legacy = #"{"id":"Foo","sizeBytes":10,"modifiedAt":0}"#.data(using: .utf8)!
         let entry = try JSONDecoder().decode(DocListEntry.self, from: legacy)
         XCTAssertTrue(entry.hasContent)
-        XCTAssertNil(entry.originDeviceId)
 
         let full = DocListEntry(id: "Bar", sizeBytes: 1, modifiedAt: Date(timeIntervalSince1970: 0),
-                                seq: nil, subscriberCount: nil, hasContent: false, originDeviceId: "dev-A")
+                                seq: nil, subscriberCount: nil, hasContent: false)
         XCTAssertEqual(try JSONDecoder().decode(DocListEntry.self,
                                                 from: try JSONEncoder().encode(full)), full)
     }

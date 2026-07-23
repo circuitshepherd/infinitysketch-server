@@ -671,9 +671,8 @@ private struct ServerMessageReader {
         #expect(d.sizeBytes == Fixtures.docBytes.count)
         #expect(d.seq == 0)
         #expect(d.subscriberCount == 1)
-        // Pre-existing content: hasContent defaults true, no origin device.
+        // Pre-existing content: hasContent defaults true.
         #expect(d.hasContent == true)
-        #expect(d.originDeviceId == nil)
     }
 
     /// M2c-1: the full path — a device says `hello` with its deviceId, advertises a doc it owns

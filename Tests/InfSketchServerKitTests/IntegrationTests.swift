@@ -36,22 +36,18 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         #expect(docs[0].id == "sample")
         #expect(docs[0].subscriberCount == nil)  // no live session yet
         #expect(docs[0].hasContent == true)
-        #expect(docs[0].originDeviceId == nil)
         await server.stop()
     }
 
-    /// M2b: `/api/docs` reports `hasContent`/`originDeviceId` for a metadata-only (advertised)
-    /// document, and its `/frame` route falls back to the advertised thumbnail instead of 404ing.
+    /// M2c-1: `/api/docs` reports `hasContent` for a metadata-only (advertised) document served
+    /// from the live index, and its `/frame` route serves the advertised thumbnail instead of
+    /// 404ing.
     @Test func apiDocsAndFrameServeAdvertisedMetadataOnlyDoc() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let store = DirectoryDocumentStore(directory: dir)
         try store.save(docId: "sample", bytes: Fixtures.docBytes)
-        let entry = DocMetadataEntry(
-            name: "Ghost", sizeBytes: 42, modifiedAt: Date(timeIntervalSince1970: 1000),
-            originDeviceId: "device-A", thumbnail: Fixtures.thumbnailPNG)
-        try store.saveMetadata(docId: "ghost-doc", entry)
 
         let server = InfSketchServer(port: 0, docsDirectory: dir, config: SessionConfig())
         let task = Task { try await server.run() }
@@ -59,14 +55,24 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         let port = try #require(await server.listeningPort)
         defer { task.cancel() }
 
+        // M2c-1: seed the metadata-only doc through the LIVE index (a connected device's
+        // advertisement), not a sidecar — the server no longer persists advertisement metadata.
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ghost-doc", modifiedAt: Date(timeIntervalSince1970: 0),
+                              sizeBytes: 42, thumbnail: Fixtures.thumbnailPNG)],
+            deviceId: "device-A")
+
         let listURL = URL(string: "http://127.0.0.1:\(port)/api/docs")!
         let (listData, _) = try await URLSession.shared.data(from: listURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let docs = try decoder.decode([DocSummary].self, from: listData)
+        // The real content doc still reports hasContent == true …
+        let sample = try #require(docs.first { $0.id == "sample" })
+        #expect(sample.hasContent == true)
+        // /api/docs reports it metadata-only …
         let ghost = try #require(docs.first { $0.id == "ghost-doc" })
         #expect(ghost.hasContent == false)
-        #expect(ghost.originDeviceId == "device-A")
 
         let frameURL = URL(string: "http://127.0.0.1:\(port)/api/docs/ghost-doc/frame")!
         let (frameData, frameResponse) = try await URLSession.shared.data(from: frameURL)
@@ -74,6 +80,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         #expect(http.statusCode == 200)
         #expect(http.value(forHTTPHeaderField: "Content-Type") == "image/png")
         #expect(http.value(forHTTPHeaderField: "X-Frame-Stale") == "true")
+        // … and /frame serves the ADVERTISED thumbnail from the live index (no content on disk).
         #expect(frameData == Fixtures.thumbnailPNG)
         await server.stop()
     }

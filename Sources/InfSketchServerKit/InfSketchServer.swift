@@ -8,9 +8,9 @@ public struct DocSummary: Codable, Equatable, Sendable {
     public var modifiedAt: Date
     public var seq: Int?
     public var subscriberCount: Int?
-    /// M2b: false = the server holds only metadata + thumbnail; content lives on `originDeviceId`.
+    /// M2b: false = the server holds only metadata + thumbnail; the content lives on a
+    /// connected device (M2c-1: any of its holders).
     public var hasContent: Bool
-    public var originDeviceId: String?
 }
 
 public final class InfSketchServer: Sendable {
@@ -89,19 +89,22 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute("GET,HEAD /api/docs") { request in
             let live = await manager.liveInfo()
-            let summaries = (try store.list())
-                .sorted { $0.docId < $1.docId }
-                .map { info in
-                    DocSummary(
-                        id: info.docId,
-                        name: info.name,
-                        sizeBytes: info.sizeBytes,
-                        modifiedAt: info.modifiedAt,
-                        seq: live[info.docId]?.seq,
-                        subscriberCount: live[info.docId]?.subscriberCount,
-                        hasContent: info.hasContent,
-                        originDeviceId: info.originDeviceId)
-                }
+            var summaries = (try store.list()).map { info in
+                DocSummary(
+                    id: info.docId, name: info.name, sizeBytes: info.sizeBytes,
+                    modifiedAt: info.modifiedAt, seq: live[info.docId]?.seq,
+                    subscriberCount: live[info.docId]?.subscriberCount, hasContent: true)
+            }
+            // M2c-1: metadata-only documents come from the LIVE index (connected devices'
+            // advertisements). Content always beats metadata, so skip any docId with bytes.
+            let contentIds = Set(summaries.map(\.id))
+            for (docId, entry) in await manager.liveDocs() where !contentIds.contains(docId) {
+                summaries.append(DocSummary(
+                    id: docId, name: entry.name, sizeBytes: entry.sizeBytes,
+                    modifiedAt: entry.modifiedAt, seq: nil, subscriberCount: nil,
+                    hasContent: false))
+            }
+            summaries.sort { $0.id < $1.id }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             return self.headAware(request, HTTPResponse(
@@ -146,10 +149,10 @@ public final class InfSketchServer: Sendable {
                     body: png))
             }
 
-            // M2b: a metadata-only doc has no bytes here — serve the thumbnail its origin device
-            // advertised, so it previews exactly like any other document (same URL, same content
-            // type, so the app's RemotePreviewCache needs no change).
-            guard let png = ((try? store.loadMetadata(docId: parts[2])) ?? nil)?.thumbnail else {
+            // M2c-1: a metadata-only doc has no bytes here — serve the thumbnail its holder
+            // advertised, from the live index (same URL/content type, so the app's preview
+            // cache is unaffected).
+            guard let png = await manager.liveEntry(docId: parts[2])?.thumbnail else {
                 return HTTPResponse(statusCode: .notFound)
             }
             return self.headAware(request, HTTPResponse(

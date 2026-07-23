@@ -122,25 +122,22 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     public var seq: Int?
     public var subscriberCount: Int?
     /// M2b: false = the server holds only metadata + thumbnail for this doc; its content
-    /// lives on `originDeviceId`. Defaults to TRUE when absent — every pre-M2b entry had content.
+    /// lives on a connected device (M2c-1: any of its holders). Defaults to TRUE when absent —
+    /// every pre-M2b entry had content.
     public var hasContent: Bool
-    /// M2b: which device advertised this doc (from `hello`'s deviceId). M2c routes content
-    /// fetches by it.
-    public var originDeviceId: String?
 
     public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?,
-                hasContent: Bool = true, originDeviceId: String? = nil) {
+                hasContent: Bool = true) {
         self.id = id
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
         self.seq = seq
         self.subscriberCount = subscriberCount
         self.hasContent = hasContent
-        self.originDeviceId = originDeviceId
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent, originDeviceId
+        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent
     }
 
     public init(from decoder: any Decoder) throws {
@@ -151,7 +148,6 @@ public struct DocListEntry: Codable, Equatable, Sendable {
         seq = try c.decodeIfPresent(Int.self, forKey: .seq)
         subscriberCount = try c.decodeIfPresent(Int.self, forKey: .subscriberCount)
         hasContent = try c.decodeIfPresent(Bool.self, forKey: .hasContent) ?? true
-        originDeviceId = try c.decodeIfPresent(String.self, forKey: .originDeviceId)
     }
 }
 
