@@ -207,7 +207,13 @@ public actor SessionManager {
     /// bytes is reported hasContent:true and is never duplicated by an advertisement.
     public func listDocuments() async throws -> [DocListEntry] {
         let live = await liveInfo()
-        var entries = try store.list().map { info in
+        // Metadata-only entries coming out of the STORE are M2b leftovers (pre-existing
+        // `metadata/*.json` sidecars still on disk during this migration). The live index is now
+        // the sole source of metadata, so ignore them: a stale sidecar would otherwise be
+        // reported hasContent:true (it has no bytes — a subscribe would fail) AND shadow the
+        // fresher live entry for the same docId. This filter disappears together with
+        // `StoredDocInfo.hasContent` when the sidecar machinery is deleted.
+        var entries = try store.list().filter(\.hasContent).map { info in
             DocListEntry(
                 id: info.docId,
                 sizeBytes: info.sizeBytes,

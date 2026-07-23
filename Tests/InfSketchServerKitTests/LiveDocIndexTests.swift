@@ -103,4 +103,24 @@ final class LiveDocIndexTests: XCTestCase {
         let listed = try await manager.listDocuments()
         XCTAssertTrue(listed.isEmpty)
     }
+
+    /// A leftover M2b sidecar on disk (metadata, no content) must NOT be reported as having
+    /// content — a subscribe would fail — and must NOT shadow the live index's fresher entry
+    /// for the same docId. The live index is the sole source of metadata now.
+    func testLeftoverSidecarNeitherMislabelsNorShadowsTheLiveEntry() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Simulate an M2b-era sidecar for a doc the server holds no bytes for.
+        try DirectoryDocumentStore(directory: dir).saveMetadata(
+            docId: "Stale",
+            DocMetadataEntry(name: "Stale", sizeBytes: 1, modifiedAt: Date(timeIntervalSince1970: 0),
+                             originDeviceId: "devOLD", thumbnail: nil))
+        // A currently-connected device advertises the same doc.
+        await manager.applyAdvertisements([ad("Stale", size: 42, at: 900)], deviceId: "devNEW")
+
+        let listed = try await manager.listDocuments().filter { $0.id == "Stale" }
+        XCTAssertEqual(listed.count, 1, "the sidecar must not produce a second row")
+        XCTAssertFalse(listed[0].hasContent, "no bytes on disk — must not claim content")
+        XCTAssertEqual(listed[0].sizeBytes, 42, "the LIVE entry wins, not the stale sidecar")
+    }
 }

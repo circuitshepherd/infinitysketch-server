@@ -40,8 +40,9 @@ actor Connection {
     private var sender: TransferSender<ServerMessage>
     private var reassembler = TransferReassembler<ClientMessage>()
     private var helloed = false
-    /// M2b: the advertising device's identity, from `hello`. Stamped onto every metadata
-    /// sidecar this connection writes, so M2c can route a content fetch back to the origin.
+    /// The advertising device's identity, from `hello`. M2c-1: recorded as a HOLDER on every
+    /// document this connection advertises, so a content fetch can be routed to it — and pruned
+    /// from the live index when the connection closes. All holders are equal; there is no origin.
     private var deviceId: String?
     private var closed = false
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
