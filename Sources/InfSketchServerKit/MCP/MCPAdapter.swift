@@ -2511,7 +2511,15 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytes = try Self.base64DataArg(arguments, "bytes")
-            let currentBytes = await manager.currentBytesOrFetch(docId: docId)
+            // Resident-only, NOT `currentBytesOrFetch` — like `create_doc`/`merge_docs into:`,
+            // this read is a create-vs-write CAS token, not a read-to-operate. `replace_doc`
+            // overwrites the doc with the agent's opaque bytes, so it gains nothing from
+            // fetching content-on-another-device (it would relay for seconds, promote a doc it's
+            // about to overwrite, then discard the fetched bytes). Worse, auto-fetching would
+            // synthesize a `.matchBytes(V0)` token the agent never actually read, defeating the
+            // `.absent` create-CAS above ("never silently overwrite a different doc of the same
+            // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
+            let currentBytes = await manager.currentBytes(docId: docId)
             return await submitAndRespond(
                 docId: docId, createIfMissing: true, fullDoc: bytes,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent

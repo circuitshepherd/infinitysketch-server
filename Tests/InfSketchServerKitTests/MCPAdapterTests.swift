@@ -5474,6 +5474,44 @@ private actor FakeStrokeOpDevice {
     /// same `applyAdvertisements` + `setContentProvider` seam `SubscribeFetchTests` /
     /// `CurrentBytesOrFetchTests` already exercise at the `SessionManager` layer, just driven
     /// here through the real MCP tool call.
+    /// The negative of the sweep: `replace_doc` on a metadata-only doc must NOT auto-fetch.
+    /// Unlike the read-to-operate tools above, `replace_doc`'s byte read is a create-vs-write
+    /// CAS token — the tool overwrites the doc with the agent's opaque bytes, so fetching
+    /// content it's about to discard would only block on the holder and, worse, synthesize a
+    /// `.matchBytes` token the agent never read (defeating the `.absent` create-CAS). Whole-branch
+    /// review caught the mechanical sweep over-reaching to this one `let =` token site. The
+    /// content provider FAILS the test if touched; the doc must be created directly (`.absent`).
+    @Test func replaceDocOnAContentLessDocDoesNotAutoFetch() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in
+            Issue.record("replace_doc must not fetch a metadata-only doc it is about to overwrite")
+            return Data()
+        }
+
+        let before = try await server.manager.listDocuments()
+        #expect(before.first { $0.id == "Ghost" }?.hasContent == false)
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let replacement = Data(#"{"aaa001_thumbnailData":"","marker":"replaced-not-fetched"}"#.utf8)
+        let (content, isError) = try await client.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "Ghost", "bytes": .string(replacement.base64EncodedString())])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("replaced Ghost"))
+
+        // Created directly from the agent's bytes (.absent create path) — NOT the fetched content.
+        let raw = await server.manager.currentBytes(docId: "Ghost")
+        #expect(raw == replacement)
+
+        await server.stop()
+    }
+
     @Test func setPaperAutoFetchesAContentLessDocAndPromotesIt() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
