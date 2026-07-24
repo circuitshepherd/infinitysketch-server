@@ -22,6 +22,16 @@ public struct LiveDocEntry: Sendable, Equatable {
     public var holders: Set<String>
 }
 
+/// Failures of the holder-relay content fetch that are not store errors.
+public enum ContentFetchError: Error, Equatable {
+    /// The total per-call fetch budget (`SessionConfig.fetchTotalTimeout`) was spent
+    /// before any holder produced bytes, so the remaining holders were not tried.
+    /// Callers surface this the same way as any other fetch failure (the content is
+    /// unavailable right now); it is a distinct case so a log or test can tell
+    /// "every holder genuinely failed" from "we ran out of time to ask them all".
+    case budgetExhausted
+}
+
 /// Registry of live DocumentSessions. Sole entry point for subscribe /
 /// unsubscribe / submit, so subscriber counting and grace teardown are
 /// serialized on one actor. Also fans out server-status events.
@@ -69,6 +79,30 @@ public actor SessionManager {
             } catch DocumentStoreError.notFound where createIfMissing {
                 // Mirror clients push docs the server has never seen: open an
                 // in-memory empty session; the first op persists real bytes.
+                //
+                // This branch deliberately does NOT fetch from holders — pinned by
+                // `SubscribeFetchTests.testCreateIfMissingDoesNotFetch`. `createIfMissing` IS the
+                // app's create-push, and the subscribing device is itself typically the holder
+                // that advertised this docId, so fetching would have the server turn around and
+                // ask the very device that is mid-subscribe to supply the content.
+                //
+                // KNOWN, DEFERRED (M2c-1 review F4 — the "content-less createIfMissing shadow
+                // window"): while this empty placeholder session is alive it SHADOWS the fetch
+                // path for other readers. `currentBytes` returns the session's empty bytes, so
+                // `currentBytesOrFetch` treats the doc as resident and an agent tool reads an
+                // EMPTY document instead of pulling the holder's real content.
+                //
+                // The obvious fix — let `currentBytesOrFetch` ignore an unsaved empty placeholder
+                // and fetch instead — is WRONG on its own, and the reason is worth recording:
+                // `WriteExpectation.matchBytes` compares against this SESSION's in-memory bytes
+                // (see `DocumentSession.submit`), not the store. A tool that read fetched content
+                // would then write with `expectedBytes` = that content while the session still
+                // holds empty, so every agent write would fail `docChangedDuringOp` with no way
+                // to converge — trading a silently-wrong read for a permanently-broken write.
+                // Closing F4 therefore requires the placeholder session to ADOPT the fetched
+                // bytes (session + store + readers agreeing), which changes what the app's
+                // create-push sees on its own subscribe (a non-empty snapshot => the M1.5
+                // auto-union path) — a design decision, not a drive-by hardening fix.
                 opened = DocumentSession(docId: docId, store: store,
                                          bufferLimit: config.outboundBufferLimit, bytes: Data())
             } catch DocumentStoreError.notFound {
@@ -239,13 +273,26 @@ public actor SessionManager {
         if let resident = await currentBytes(docId: docId) { return resident }
         guard liveIndex[docId] != nil else { return nil }
         guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
-        // A concurrent subscribe may have opened a session (and accepted writes) while we were
-        // fetching — the same reentrancy window `subscribe`'s own notFound branch guards. Persisting
-        // our now-possibly-stale fetch here would silently revert that write on disk, invisible
-        // until the session recycles and reloads. If a session now exists it is authoritative:
-        // return ITS live bytes and save nothing. When none exists, `sessions[docId]?` short-
-        // circuits with no suspension, so the check-then-save below is atomic against reentrancy.
+        // A concurrent writer may have landed content while we were fetching — the same reentrancy
+        // window `subscribe`'s own notFound branch guards. Persisting our now-possibly-stale fetch
+        // would silently revert it on disk, invisible until the session recycles and reloads.
+        // Whatever is here now is authoritative: return it and save nothing.
+        //
+        // Both halves matter (M2c-1 review F5). A concurrent SUBSCRIBE leaves a live session…
         if let live = await sessions[docId]?.currentBytes { return live }
+        // …but a concurrent PROMOTION leaves none: `currentBytesOrFetch` writes straight to the
+        // store and opens no session, and a session that wrote and then grace-tore-down is the same
+        // observable state (bytes on disk, `sessions[docId] == nil`). A session-only re-check is
+        // blind to both and would clobber the newer bytes with our stale fetch. `store.exists` is
+        // the durable truth — the same reason `WriteExpectation.absent` consults it rather than a
+        // session's in-memory `bytes`.
+        //
+        // Atomicity: the `sessions[docId]?` chain above short-circuits with NO suspension when no
+        // session exists, and `store.exists`/`load`/`save` are synchronous — so from that check
+        // through the save below runs in ONE actor turn, with no window for a writer to interleave.
+        if (try? store.exists(docId: docId)) == true, let durable = try? store.load(docId: docId) {
+            return durable
+        }
         try? store.save(docId: docId, bytes: bytes)
         return bytes
     }
@@ -362,6 +409,15 @@ public actor SessionManager {
     /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
     /// origin — so a failure (offline, doc deleted, timeout) just moves to the next. Throws the
     /// LAST error when every holder fails.
+    ///
+    /// M2c-1 review F9 — the walk is bounded by `config.fetchTotalTimeout`. Each individual
+    /// attempt is already bounded (the broker's `strokeOpTimeout`), but the holders are tried
+    /// SEQUENTIALLY, so N stale holders otherwise cost N x that timeout on ONE subscribe or agent
+    /// tool call. The budget is checked BEFORE starting each attempt: an attempt already in flight
+    /// is never abandoned (cancelling it would leave the device's reply unclaimed for a request the
+    /// broker still has in flight), so the honest worst case is the budget plus one attempt. The
+    /// deadline is computed per CALL — never stored on the entry — so a doc whose fetch timed out
+    /// once is fully retryable later.
     private func fetchFromHolders(docId: String) async throws -> Data {
         guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
             throw DocumentStoreError.notFound
@@ -369,9 +425,16 @@ public actor SessionManager {
         if let existing = inFlightFetches[docId] { return try await existing.value }
 
         let holders = entry.holders.sorted()
+        let deadline = ContinuousClock.now.advanced(by: config.fetchTotalTimeout)
         let task = Task<Data, Error> {
             var lastError: Error = DocumentStoreError.notFound
             for holder in holders {
+                // Spend no more of the caller's time once the budget is gone. `>=` so a
+                // zero/negative budget refuses to start even the first attempt.
+                guard ContinuousClock.now < deadline else {
+                    lastError = ContentFetchError.budgetExhausted
+                    break
+                }
                 do {
                     let bytes = try await contentProvider(docId, holder)
                     // Never persist an empty payload. A holder that returns 0 bytes (a truncated
