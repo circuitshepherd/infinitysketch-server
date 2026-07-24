@@ -116,12 +116,22 @@ public actor SessionManager {
                 // accepted writes. Writing our fetched (by now possibly stale) bytes here would
                 // silently revert those on disk, invisible until the session recycles and reloads
                 // from the store. An adopting caller must therefore persist nothing at all.
-                // Nothing below suspends, so once this check finds nil the save/open/register
+                // Nothing below suspends, so once these checks pass the save/open/register
                 // sequence completes without further reentrancy.
                 if let raced = sessions[docId] {
                     opened = raced
                 } else {
-                    try store.save(docId: docId, bytes: bytes)
+                    // …and a session is not the only thing that can have landed content while we
+                    // awaited: a writer may have opened a session, written, and then had it GRACE
+                    // TORN DOWN, leaving durable bytes with NO session behind them (the same
+                    // store-only state `currentBytesOrFetch`'s own re-check guards). Relying on
+                    // `gracePeriod` outlasting the fetch would be a config coupling, not a
+                    // guarantee — and with the F9 budget the worst-case fetch (budget + one
+                    // attempt) can legitimately approach it. So consult the durable truth: if
+                    // anything is stored now it WINS, and opening from the store loads it.
+                    if (try? store.exists(docId: docId)) != true {
+                        try store.save(docId: docId, bytes: bytes)
+                    }
                     opened = try DocumentSession(docId: docId, store: store,
                                                  bufferLimit: config.outboundBufferLimit)
                 }
@@ -290,9 +300,7 @@ public actor SessionManager {
         // Atomicity: the `sessions[docId]?` chain above short-circuits with NO suspension when no
         // session exists, and `store.exists`/`load`/`save` are synchronous — so from that check
         // through the save below runs in ONE actor turn, with no window for a writer to interleave.
-        if (try? store.exists(docId: docId)) == true, let durable = try? store.load(docId: docId) {
-            return durable
-        }
+        if let durable = try? store.load(docId: docId) { return durable }
         try? store.save(docId: docId, bytes: bytes)
         return bytes
     }
@@ -429,8 +437,8 @@ public actor SessionManager {
         let task = Task<Data, Error> {
             var lastError: Error = DocumentStoreError.notFound
             for holder in holders {
-                // Spend no more of the caller's time once the budget is gone. `>=` so a
-                // zero/negative budget refuses to start even the first attempt.
+                // Spend no more of the caller's time once the budget is gone. The guard is
+                // `now < deadline`, so a zero/negative budget refuses even the first attempt.
                 guard ContinuousClock.now < deadline else {
                     lastError = ContentFetchError.budgetExhausted
                     break

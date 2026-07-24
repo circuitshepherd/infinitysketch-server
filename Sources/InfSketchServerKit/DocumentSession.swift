@@ -29,7 +29,14 @@ public struct SessionConfig: Sendable {
     /// on a single subscribe or agent tool call. Once the budget is spent no
     /// FURTHER holder is tried (an attempt already in flight still runs to its own
     /// timeout, so the true worst case is this budget plus one `strokeOpTimeout`).
-    /// The default admits roughly two 20 s attempts.
+    ///
+    /// The default admits exactly two 20 s attempts (they start at 0 s and 20 s; a
+    /// third would start at 40 s > 30 s and is refused), for a 50 s worst case. Two
+    /// ceilings make a LARGER default a poor trade: it should stay under
+    /// `gracePeriod`, so a fetch cannot outlive a session teardown it raced (see
+    /// `subscribe`'s store-aware re-check, which no longer merely ASSUMES that), and
+    /// under the ~60 s timeout typical MCP clients apply, since a client that gives
+    /// up orphans the fetch.
     public var fetchTotalTimeout: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
@@ -40,7 +47,7 @@ public struct SessionConfig: Sendable {
         mcpSessionCleanupInterval: Duration = .seconds(60),
         createDocTimeout: Duration = .seconds(10),
         strokeOpTimeout: Duration = .seconds(20),
-        fetchTotalTimeout: Duration = .seconds(45)
+        fetchTotalTimeout: Duration = .seconds(30)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
