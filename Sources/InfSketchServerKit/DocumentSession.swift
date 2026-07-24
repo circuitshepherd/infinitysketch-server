@@ -137,6 +137,44 @@ actor DocumentSession {
     /// the live content without subscribing.
     var currentBytes: Data { bytes }
 
+    /// Promote content fetched from a holder into an EMPTY `createIfMissing` placeholder (M2c-1
+    /// review F4), persisting it and adopting it in ONE actor turn. Returns this session's
+    /// authoritative bytes afterwards — the adopted content, or whatever already won.
+    ///
+    /// Why the session and not just the store — TWO reasons, both load-bearing:
+    ///
+    /// 1. `submit`'s `.matchBytes` CAS compares against THESE bytes, so a reader handed fetched
+    ///    content while this session still held empty would have every read-then-write-back
+    ///    rejected `docChangedDuringOp`, non-convergently. Adoption keeps session, store and
+    ///    readers on one value.
+    /// 2. The STORE WRITE MUST HAPPEN HERE, not on the manager. `SessionManager`'s own
+    ///    fetch-promotion write is safe only under "no session ⇒ no concurrent writer" (every
+    ///    write reaches the store through a `DocumentSession`, and opening one needs the manager
+    ///    actor). A placeholder breaks that premise: it is a LIVE session, so the manager's
+    ///    `store.save` could race this session's `submit` writing the app's create-push —
+    ///    `.atomic` writes rename after writing the whole file, so with a multi-MB document the
+    ///    loser's rename can land last and leave store and session DISAGREEING, silently
+    ///    discarding an already-`accepted` write until the session recycles. Doing it inside this
+    ///    actor serializes it against `submit` by construction.
+    ///
+    /// Conditional, so a real write that landed while the caller was suspended wins and is never
+    /// rolled back; a failed `store.save` adopts NOTHING (the doc stays a placeholder, so a later
+    /// read retries the fetch rather than serving in-memory-only content the store never got).
+    /// `seq` is deliberately NOT bumped and nothing is broadcast: this is not a document edit, it
+    /// is the session learning what it should have been holding all along. Subscribers converge
+    /// through the ordinary path — see `SessionManager.currentBytesOrFetch` for what the app's
+    /// create-push does once this content is durable, and for the two narrow consequences.
+    func adoptIfEmpty(bytes newBytes: Data) -> Data {
+        guard bytes.isEmpty else { return bytes }          // a real write landed; it persisted itself
+        if let durable = try? store.load(docId: docId), !durable.isEmpty {
+            bytes = durable                                 // a store-only promotion beat us
+            return durable
+        }
+        guard (try? store.save(docId: docId, bytes: newBytes)) != nil else { return bytes }
+        bytes = newBytes
+        return newBytes
+    }
+
     func subscribe() -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(

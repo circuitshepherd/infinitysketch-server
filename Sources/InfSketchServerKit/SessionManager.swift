@@ -280,29 +280,77 @@ public actor SessionManager {
     /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
     /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
     public func currentBytesOrFetch(docId: String) async -> Data? {
-        if let resident = await currentBytes(docId: docId) { return resident }
-        guard liveIndex[docId] != nil else { return nil }
-        guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
+        // An EMPTY `createIfMissing` placeholder is not content — it is a slot the app opened
+        // moments before pushing (M2c-1 review F4). Treating it as resident is what made an agent
+        // read a BLANK document while a holder had the real thing, and it disagreed with
+        // `/api/docs`, which kept reporting the doc `hasContent: false` (fetchable) because nothing
+        // was durable. `store.exists` is what tells a placeholder from a genuinely-empty SAVED doc;
+        // a session's in-memory bytes cannot.
+        //
+        // Two honest consequences of fetching here, both narrow (this only fires when an agent
+        // reads inside the app's create window) and neither a loss:
+        //  - The holder is often the SAME device that just opened the doc, and `provideContent`
+        //    serves its FILE — so the promoted bytes can be that device's own slightly-older disk
+        //    state. The app's create-push then meets durable content and reroutes into the M1.5
+        //    union, which is additive: an element the user deleted since the last save can come
+        //    back, with the auto-merge notice, on a document they had open alone.
+        //  - That reroute is guaranteed only for the INITIAL create-push, which is the one that
+        //    carries expect-absent. A later (or retried) push carries no expectation and simply
+        //    overwrites the promoted bytes — no loss, since the holder still has its own copy and
+        //    reconciles on its next subscribe, but do not read the reroute as a general rule.
+        let placeholder = await isEmptyPlaceholder(docId: docId)
+        if !placeholder, let resident = await currentBytes(docId: docId) { return resident }
+        // From here a placeholder must never be worse off than before: every failure path below
+        // falls back to it, so a doc mid-creation still reads as the empty doc it is rather than
+        // turning a working call into `unknownDoc`.
+        guard liveIndex[docId] != nil else { return await currentBytes(docId: docId) }
+        guard let bytes = try? await fetchFromHolders(docId: docId) else {
+            return await currentBytes(docId: docId)
+        }
         // A concurrent writer may have landed content while we were fetching — the same reentrancy
         // window `subscribe`'s own notFound branch guards. Persisting our now-possibly-stale fetch
         // would silently revert it on disk, invisible until the session recycles and reloads.
         // Whatever is here now is authoritative: return it and save nothing.
         //
         // Both halves matter (M2c-1 review F5). A concurrent SUBSCRIBE leaves a live session…
-        if let live = await sessions[docId]?.currentBytes { return live }
-        // …but a concurrent PROMOTION leaves none: `currentBytesOrFetch` writes straight to the
-        // store and opens no session, and a session that wrote and then grace-tore-down is the same
-        // observable state (bytes on disk, `sessions[docId] == nil`). A session-only re-check is
-        // blind to both and would clobber the newer bytes with our stale fetch. `store.exists` is
-        // the durable truth — the same reason `WriteExpectation.absent` consults it rather than a
-        // session's in-memory `bytes`.
+        // (`!isEmpty`, so the placeholder we are fetching FOR doesn't count as a racing writer and
+        // discard the very fetch it triggered — a real write is never empty.)
+        if let live = await sessions[docId]?.currentBytes, !live.isEmpty { return live }
+        // …and a concurrent PROMOTION leaves none — but the two promotion cases now diverge, so
+        // they are handled separately below:
         //
-        // Atomicity: the `sessions[docId]?` chain above short-circuits with NO suspension when no
-        // session exists, and `store.exists`/`load`/`save` are synchronous — so from that check
-        // through the save below runs in ONE actor turn, with no window for a writer to interleave.
+        // (a) A LIVE session (necessarily the empty placeholder we fetched for, since a non-empty
+        //     one returned just above): promote THROUGH it. The session persists and adopts in one
+        //     of ITS actor turns, so the store write is serialized against `submit` and the
+        //     session's bytes — what `.matchBytes` compares against — can never disagree with the
+        //     file. Writing the store from HERE instead would race the app's create-push writing
+        //     the same docId from the session actor, and `.atomic` renames after writing the whole
+        //     file: with a multi-MB document the loser's rename can land last, silently discarding
+        //     an already-`accepted` write. It returns the authoritative bytes, so a write that beat
+        //     us is handed back rather than a fetch we already know is stale.
+        if let session = sessions[docId] { return await session.adoptIfEmpty(bytes: bytes) }
+        // (b) NO session — `currentBytesOrFetch` writes straight to the store and opens none, and a
+        //     session that wrote and then grace-tore-down is the same observable state (bytes on
+        //     disk, `sessions[docId] == nil`). A session-only re-check is blind to both and would
+        //     clobber the newer bytes with our stale fetch, so consult the store (M2c-1 review F5).
+        //
+        //     Atomicity holds HERE for the original reason: the `sessions[docId]?` chain above
+        //     short-circuits with NO suspension when no session exists, `store.load`/`save` are
+        //     synchronous, and with no session there is no other writer for this docId (every write
+        //     reaches the store through a `DocumentSession`, and opening one requires this actor) —
+        //     so check-through-save is one uncontended actor turn.
         if let durable = try? store.load(docId: docId) { return durable }
         try? store.save(docId: docId, bytes: bytes)
         return bytes
+    }
+
+    /// True when the only thing here is an EMPTY session with nothing durable behind it — the
+    /// `createIfMissing` placeholder the app opens just before pushing. `store.exists` is the
+    /// discriminator: a genuinely-empty SAVED document is real content and must NOT be treated
+    /// as a placeholder (it would trigger a pointless fetch that could overwrite it).
+    private func isEmptyPlaceholder(docId: String) async -> Bool {
+        guard let live = await sessions[docId]?.currentBytes, live.isEmpty else { return false }
+        return (try? store.exists(docId: docId)) != true
     }
 
     public func subscribeStatus() -> (events: AsyncStream<ServerMessage>, token: UUID) {
