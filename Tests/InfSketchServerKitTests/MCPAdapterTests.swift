@@ -5459,6 +5459,45 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "invalidSpec")
         await server.stop()
     }
+
+    // MARK: - M2c-3: MCP tools auto-fetch a content-on-another-device doc
+
+    /// A content tool called on a doc the server has no bytes for — only metadata via a
+    /// connected holder's advertisement — pulls it via `currentBytesOrFetch` first instead
+    /// of failing "unknownDoc", and that read PROMOTES the doc to ordinary resident content
+    /// (`listDocuments`, the manager-level twin of `/api/docs`, flips `hasContent:true`).
+    /// `set_paper` is the lightest content tool exercising this end-to-end through
+    /// `handleCallTool`: it's a pure server-side `DocJSON` write with no device relay of its
+    /// own, so the ONLY device-shaped part of this test is the fetch itself — seeded via the
+    /// same `applyAdvertisements` + `setContentProvider` seam `SubscribeFetchTests` /
+    /// `CurrentBytesOrFetchTests` already exercise at the `SessionManager` layer, just driven
+    /// here through the real MCP tool call.
+    @Test func setPaperAutoFetchesAContentLessDocAndPromotesIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in Fixtures.docBytes }
+
+        // Before the tool call: "Ghost" is metadata-only (a live-index advertisement, no bytes).
+        let before = try await server.manager.listDocuments()
+        #expect(before.first { $0.id == "Ghost" }?.hasContent == false)
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "set_paper", arguments: ["docId": "Ghost", "light": "#112233"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("set paper on Ghost"))
+
+        // After: auto-fetched from the holder AND promoted to ordinary resident content.
+        let after = try await server.manager.listDocuments()
+        #expect(after.first { $0.id == "Ghost" }?.hasContent == true)
+
+        await server.stop()
+    }
 }
 
 @Suite struct ResourceURITests {

@@ -286,7 +286,7 @@ public actor MCPAdapter {
             ])
 
         case .docSummary(let docId):
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             let summary: DocJSON.DocSummary
@@ -302,7 +302,7 @@ public actor MCPAdapter {
             ])
 
         case .docRaw(let docId):
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             return ReadResource.Result(contents: [
@@ -315,7 +315,7 @@ public actor MCPAdapter {
                     .binary(frame.png, uri: uri, mimeType: "image/png")
                 ])
             }
-            guard let bytes = await manager.currentBytes(docId: docId),
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId),
                   let thumbnail = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
             else {
                 throw MCPError.invalidParams("No frame or thumbnail available for document: \(docId)")
@@ -2067,7 +2067,7 @@ public actor MCPAdapter {
             let y = try Self.doubleArg(arguments, "y")
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let newId = UUID()
@@ -2103,7 +2103,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2170,7 +2170,7 @@ public actor MCPAdapter {
             let height = try Self.optionalDoubleArg(arguments, "height")
             let opacity = try Self.optionalDoubleArg(arguments, "opacity")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2235,7 +2235,7 @@ public actor MCPAdapter {
             let x = try Self.optionalDoubleArg(arguments, "x")
             let y = try Self.optionalDoubleArg(arguments, "y")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2266,7 +2266,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2314,7 +2314,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2351,7 +2351,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2377,7 +2377,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let imageId = try Self.stringArg(arguments, "imageId")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2408,7 +2408,7 @@ public actor MCPAdapter {
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
             let pinned = try Self.requiredBoolArg(arguments, "pinned")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2443,7 +2443,7 @@ public actor MCPAdapter {
             guard light != nil || dark != nil || transparent != nil else {
                 return Self.errorResult("invalidArguments")
             }
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2484,7 +2484,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytes = try Self.base64DataArg(arguments, "bytes")
-            let currentBytes = await manager.currentBytes(docId: docId)
+            let currentBytes = await manager.currentBytesOrFetch(docId: docId)
             return await submitAndRespond(
                 docId: docId, createIfMissing: true, fullDoc: bytes,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
@@ -2572,7 +2572,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let strokes = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2626,7 +2626,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2669,7 +2669,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2710,7 +2710,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2752,7 +2752,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2801,7 +2801,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2843,7 +2843,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2898,7 +2898,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2948,7 +2948,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2992,7 +2992,7 @@ public actor MCPAdapter {
             let x = try Self.doubleArg(arguments, "x")
             let y = try Self.doubleArg(arguments, "y")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3047,7 +3047,7 @@ public actor MCPAdapter {
                 return Self.errorResult("missingArgument: orderedIds")
             }
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3103,7 +3103,7 @@ public actor MCPAdapter {
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
             guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let bytes = await manager.currentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
             let count = strokeKeys.count + textIds.count + imageIds.count
             let spec: Data
             do {
@@ -3153,7 +3153,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3228,7 +3228,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3284,7 +3284,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "points")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3331,7 +3331,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3385,7 +3385,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3434,7 +3434,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let items = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3495,7 +3495,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3537,7 +3537,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3582,7 +3582,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3625,7 +3625,7 @@ public actor MCPAdapter {
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3682,7 +3682,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments: x and y are required")
             }
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3719,7 +3719,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3768,7 +3768,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let include = try Self.optionalStringArg(arguments, "include")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3828,7 +3828,7 @@ public actor MCPAdapter {
             let ops = try Self.optionalValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4039,10 +4039,10 @@ public actor MCPAdapter {
             }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
 
-            guard let sourceBytes = await manager.currentBytes(docId: source) else {
+            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else {
                 return Self.errorResult("sourceNotFound")
             }
-            guard let targetBytes = await manager.currentBytes(docId: target) else {
+            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else {
                 return Self.errorResult("targetNotFound")
             }
             if let into {
@@ -4127,8 +4127,8 @@ public actor MCPAdapter {
             guard source != target else { return Self.errorResult("invalidArguments") }
             guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let sourceBytes = await manager.currentBytes(docId: source) else { return Self.errorResult("sourceNotFound") }
-            guard let targetBytes = await manager.currentBytes(docId: target) else { return Self.errorResult("targetNotFound") }
+            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
+            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
             let count = strokeKeys.count + textIds.count + imageIds.count
             let spec: Data
