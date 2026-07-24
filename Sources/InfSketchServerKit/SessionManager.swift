@@ -277,6 +277,12 @@ public actor SessionManager {
     /// document nobody can produce.
     public func applyAdvertisements(_ ads: [DocAdvertisement], deviceId: String?) {
         guard let deviceId else { return }
+        // A batch is that device's COMPLETE current set (`advertiseLocalDocs` gathers every
+        // syncEnabled local doc), so REPLACE its previous contribution rather than accumulating.
+        // Accumulating would keep listing a document the device has since deleted or marked
+        // local-only, and would keep offering that device as a fetch source for it — a stale
+        // holder that sorts first is asked first and burns the full device timeout.
+        removeAdvertisements(deviceId: deviceId)
         for ad in ads {
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)

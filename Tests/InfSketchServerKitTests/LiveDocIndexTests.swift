@@ -93,6 +93,37 @@ final class LiveDocIndexTests: XCTestCase {
         XCTAssertTrue(listed[1].hasContent)
     }
 
+    /// A batch REPLACES that device's contribution. A doc it no longer advertises (deleted, or
+    /// the user turned `syncEnabled` off) must stop being listed and stop being offered as a
+    /// fetch source — accumulating would leave a ghost row pointing at a stale holder.
+    func testAdvertisementBatchReplacesThatDevicesPreviousContribution() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Keep"), ad("Dropped")], deviceId: "devA")
+        let seeded = await manager.liveEntry(docId: "Dropped")
+        XCTAssertNotNil(seeded)
+
+        // devA re-advertises WITHOUT "Dropped".
+        await manager.applyAdvertisements([ad("Keep")], deviceId: "devA")
+        let dropped = await manager.liveEntry(docId: "Dropped")
+        XCTAssertNil(dropped, "stale doc must stop being listed")
+        let kept = await manager.liveEntry(docId: "Keep")
+        XCTAssertEqual(kept?.holders, ["devA"])
+    }
+
+    /// Replacing one device's contribution must not disturb another device's holdings.
+    func testReplacingOneDevicesBatchLeavesOtherHoldersIntact() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Shared")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Shared")], deviceId: "devB")
+
+        // devA re-advertises nothing at all; devB still holds "Shared".
+        await manager.applyAdvertisements([], deviceId: "devA")
+        let shared = await manager.liveEntry(docId: "Shared")
+        XCTAssertEqual(shared?.holders, ["devB"])
+    }
+
     /// A device that sent no deviceId cannot be routed to for a fetch, so it is not indexed.
     func testAdvertisementWithoutDeviceIdIsIgnored() async throws {
         let (manager, dir) = try makeManager()
