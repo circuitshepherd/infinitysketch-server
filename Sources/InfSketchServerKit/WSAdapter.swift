@@ -160,7 +160,11 @@ actor Connection {
                 emit(result.snapshot)
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {
-                emit(.error(reason: "unknownDoc"))
+                // M2c-3 (F3): a DOCID-CARRYING failure, not a bare `.error`. The app's transport
+                // fails all pending subscribes on a docId-less `.error`, so a failed download
+                // (a subscribe that found no holder) used to collaterally kill an unrelated open
+                // document's subscribe. `subscribeFailed` lets the app fail only THIS doc's.
+                emit(.subscribeFailed(docId: docId, reason: "unknownDoc"))
             }
 
         case .unsubscribe(let docId):
