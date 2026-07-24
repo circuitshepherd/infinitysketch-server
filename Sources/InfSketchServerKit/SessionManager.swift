@@ -230,6 +230,19 @@ public actor SessionManager {
         return try? store.load(docId: docId)
     }
 
+    /// Resident bytes if present; otherwise, for a content-less doc that a connected device
+    /// holds, pull them via the SAME `fetchFromHolders` relay a subscribe uses, PERSIST them
+    /// (promoting the doc to ordinary server content, which then stays), and return them. Nil only
+    /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
+    /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
+    public func currentBytesOrFetch(docId: String) async -> Data? {
+        if let resident = await currentBytes(docId: docId) { return resident }
+        guard liveIndex[docId] != nil else { return nil }
+        guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
+        try? store.save(docId: docId, bytes: bytes)
+        return bytes
+    }
+
     public func subscribeStatus() -> (events: AsyncStream<ServerMessage>, token: UUID) {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
