@@ -298,7 +298,7 @@ actor Connection {
             guard let ads = try? JSONDecoder().decode([DocAdvertisement].self, from: bytes) else {
                 return emit(.error(reason: "malformedMessage"))
             }
-            await manager.applyAdvertisements(ads, deviceId: deviceId)
+            await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
         }
     }
 
@@ -325,7 +325,7 @@ actor Connection {
             await broker.unregister(connectionId: connectionId)
         }
         if let deviceId {
-            await manager.removeAdvertisements(deviceId: deviceId)
+            await manager.removeConnection(connectionId: connectionId, deviceId: deviceId)
         }
         output.finish()
     }

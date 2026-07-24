@@ -37,6 +37,9 @@ public actor SessionManager {
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
     /// docId → live advertisement entry. In-memory only (see LiveDocEntry).
     private var liveIndex: [String: LiveDocEntry] = [:]
+    /// deviceId → its currently-live connectionIds. A device's holdings are pruned only when this
+    /// set empties, so a stale connection's close can't wipe a reconnected connection's ads.
+    private var deviceConnections: [String: Set<UUID>] = [:]
     /// M2c-1: pulls one document's bytes from ONE named holder. Injected by InfSketchServer
     /// (which routes it to DeviceCommandBroker.requestProvideContent); tests inject a fake.
     /// Nil until wired — a nil provider makes a content-less subscribe behave exactly as before.
@@ -275,14 +278,17 @@ public actor SessionManager {
     /// NEWEST `modifiedAt` is displayed. An advertisement from a device that sent no `deviceId`
     /// is ignored — it could never be selected to serve a fetch, so indexing it would list a
     /// document nobody can produce.
-    public func applyAdvertisements(_ ads: [DocAdvertisement], deviceId: String?) {
+    public func applyAdvertisements(_ ads: [DocAdvertisement], connectionId: UUID, deviceId: String?) {
         guard let deviceId else { return }
+        // Track this connection as live for its device, so a LATER close of a DIFFERENT (stale)
+        // connection for the same device can't wipe its advertisements (`removeConnection` below).
+        deviceConnections[deviceId, default: []].insert(connectionId)
         // A batch is that device's COMPLETE current set (`advertiseLocalDocs` gathers every
         // syncEnabled local doc), so REPLACE its previous contribution rather than accumulating.
         // Accumulating would keep listing a document the device has since deleted or marked
         // local-only, and would keep offering that device as a fetch source for it — a stale
         // holder that sorts first is asked first and burns the full device timeout.
-        removeAdvertisements(deviceId: deviceId)
+        dropDeviceFromHolders(deviceId)
         for ad in ads {
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)
@@ -301,9 +307,24 @@ public actor SessionManager {
         }
     }
 
-    /// M2c-1: a device disconnected — drop it from every holder set, and drop any entry whose
-    /// last holder just left. This is what makes a powered-off device's documents disappear.
-    public func removeAdvertisements(deviceId: String) {
+    /// M2c-1: a connection closed. Its device's documents disappear from the index only when
+    /// this was the device's LAST live connection — a reconnect (a fresh connection for the same
+    /// device) races the old socket's close, and pruning by deviceId alone would let that stale
+    /// close wipe the live connection's advertisements until it happened to re-advertise.
+    public func removeConnection(connectionId: UUID, deviceId: String) {
+        guard var live = deviceConnections[deviceId] else { return }
+        live.remove(connectionId)
+        if live.isEmpty {
+            deviceConnections.removeValue(forKey: deviceId)
+            dropDeviceFromHolders(deviceId)
+        } else {
+            deviceConnections[deviceId] = live
+        }
+    }
+
+    /// Remove `deviceId` from every holder set, dropping any entry whose last holder just left.
+    /// Pure index surgery — does NOT touch `deviceConnections` (the caller owns that bookkeeping).
+    private func dropDeviceFromHolders(_ deviceId: String) {
         for (docId, var entry) in liveIndex {
             guard entry.holders.remove(deviceId) != nil else { continue }
             if entry.holders.isEmpty {
@@ -331,7 +352,15 @@ public actor SessionManager {
         let task = Task<Data, Error> {
             var lastError: Error = DocumentStoreError.notFound
             for holder in holders {
-                do { return try await contentProvider(docId, holder) } catch { lastError = error }
+                do {
+                    let bytes = try await contentProvider(docId, holder)
+                    // Never persist an empty payload. A holder that returns 0 bytes (a truncated
+                    // or corrupt local file) would otherwise be saved and reported hasContent:true
+                    // FOREVER — permanently shadowing every real holder's copy, with no eviction.
+                    // Treat it as a failure and try the next holder instead.
+                    guard !bytes.isEmpty else { lastError = DocumentStoreError.notFound; continue }
+                    return bytes
+                } catch { lastError = error }
             }
             throw lastError
         }

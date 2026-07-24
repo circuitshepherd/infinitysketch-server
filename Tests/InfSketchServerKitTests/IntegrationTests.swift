@@ -60,7 +60,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         await server.manager.applyAdvertisements(
             [DocAdvertisement(docId: "ghost-doc", modifiedAt: Date(timeIntervalSince1970: 0),
                               sizeBytes: 42, thumbnail: Fixtures.thumbnailPNG)],
-            deviceId: "device-A")
+            connectionId: UUID(), deviceId: "device-A")
 
         let listURL = URL(string: "http://127.0.0.1:\(port)/api/docs")!
         let (listData, _) = try await URLSession.shared.data(from: listURL)
