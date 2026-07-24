@@ -381,6 +381,7 @@ public enum ServerMessage: Equatable, Sendable {
     case watchers(docId: String, count: Int)
     case createDocRequest(requestId: UInt32, docId: String)
     case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data)
+    case subscribeFailed(docId: String, reason: String)
 }
 
 extension ServerMessage: Codable {
@@ -457,6 +458,10 @@ extension ServerMessage: Codable {
                 docId: try c.decode(String.self, forKey: .docId),
                 payload: payload,
                 spec: try c.decode(Data.self, forKey: .spec))
+        case "subscribeFailed":
+            self = .subscribeFailed(
+                docId: try c.decode(String.self, forKey: .docId),
+                reason: try c.decode(String.self, forKey: .reason))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown server message type: \(other)")
@@ -531,6 +536,10 @@ extension ServerMessage: Codable {
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
             try c.encode(spec, forKey: .spec)
+        case .subscribeFailed(let docId, let reason):
+            try c.encode("subscribeFailed", forKey: .type)
+            try c.encode(docId, forKey: .docId)
+            try c.encode(reason, forKey: .reason)
         }
     }
 }

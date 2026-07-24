@@ -409,13 +409,15 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .event(docId: "brandnew", seq: 1, kind: "op", opId: "o1", payload: payload))
     }
 
-    @Test func unflaggedSubscribeToUnknownDocStillErrors() async throws {
+    /// M2c-3 (F3): a subscribe that can't be opened now emits a DOCID-carrying `subscribeFailed`,
+    /// not a docId-less `.error` — so the app fails only this doc's pending subscribe, not every one.
+    @Test func unflaggedSubscribeToUnknownDocEmitsSubscribeFailed() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 1, capabilities: [], deviceId: nil))
         _ = try await reader.next()
         try harness.send(.subscribe(docId: "ghost", fromSeq: nil, createIfMissing: false))
-        #expect(try await reader.next() == .error(reason: "unknownDoc"))
+        #expect(try await reader.next() == .subscribeFailed(docId: "ghost", reason: "unknownDoc"))
     }
 }
 

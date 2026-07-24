@@ -261,6 +261,11 @@ public actor MCPAdapter {
 
     // MARK: - Resource handlers
 
+    /// M2c-3: `entry.hasContent == false` means this doc is metadata-only — its content lives
+    /// on a connected device (M2c-1's live index) — so the resource carries a `description`
+    /// hint pointing the agent at `fetch_doc` to pull it explicitly. A resident doc's
+    /// `description` stays nil (the ordinary, silent-auto-fetch case every other tool already
+    /// handles via `currentBytesOrFetch`).
     private func handleListResources() async throws -> ListResources.Result {
         var resources = ResourceURI.templateResources
         for entry in try await manager.listDocuments() {
@@ -268,6 +273,9 @@ public actor MCPAdapter {
                 Resource(
                     name: entry.id,
                     uri: ResourceURI.docSummary(docId: entry.id).uriString,
+                    description: entry.hasContent
+                        ? nil
+                        : "content is on another device — call fetch_doc(\"\(entry.id)\") to pull it",
                     mimeType: "application/json"))
         }
         return ListResources.Result(resources: resources)
@@ -286,7 +294,7 @@ public actor MCPAdapter {
             ])
 
         case .docSummary(let docId):
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             let summary: DocJSON.DocSummary
@@ -302,7 +310,7 @@ public actor MCPAdapter {
             ])
 
         case .docRaw(let docId):
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             return ReadResource.Result(contents: [
@@ -315,7 +323,7 @@ public actor MCPAdapter {
                     .binary(frame.png, uri: uri, mimeType: "image/png")
                 ])
             }
-            guard let bytes = await manager.currentBytes(docId: docId),
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId),
                   let thumbnail = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
             else {
                 throw MCPError.invalidParams("No frame or thumbnail available for document: \(docId)")
@@ -1991,6 +1999,24 @@ public actor MCPAdapter {
                 "required": .array(["docId", "mode"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "fetch_doc",
+            description: """
+                Ensures a document's content is available on the server, pulling it from a device \
+                that holds it if the server has only its metadata (a "content on another device" \
+                doc — see the hasContent hint in the resource list). Read-only: it promotes the \
+                document to server content but authors nothing. Call it before other tools if you \
+                want to control when the (possibly multi-second) transfer happens; otherwise the \
+                content tools fetch on demand themselves. Errors: contentUnavailable (the holding \
+                device isn't online), unknownDoc.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to fetch."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -2040,6 +2066,7 @@ public actor MCPAdapter {
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
         case "reorder_elements": return await callReorderElements(arguments)
+        case "fetch_doc": return await callFetchDoc(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -2067,7 +2094,7 @@ public actor MCPAdapter {
             let y = try Self.doubleArg(arguments, "y")
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let newId = UUID()
@@ -2103,7 +2130,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2170,7 +2197,7 @@ public actor MCPAdapter {
             let height = try Self.optionalDoubleArg(arguments, "height")
             let opacity = try Self.optionalDoubleArg(arguments, "opacity")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2235,7 +2262,7 @@ public actor MCPAdapter {
             let x = try Self.optionalDoubleArg(arguments, "x")
             let y = try Self.optionalDoubleArg(arguments, "y")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2266,7 +2293,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2314,7 +2341,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2351,7 +2378,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2377,7 +2404,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let imageId = try Self.stringArg(arguments, "imageId")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2408,7 +2435,7 @@ public actor MCPAdapter {
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
             let pinned = try Self.requiredBoolArg(arguments, "pinned")
 
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2443,7 +2470,7 @@ public actor MCPAdapter {
             guard light != nil || dark != nil || transparent != nil else {
                 return Self.errorResult("invalidArguments")
             }
-            guard let bytes = await manager.currentBytes(docId: docId) else {
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -2484,6 +2511,14 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytes = try Self.base64DataArg(arguments, "bytes")
+            // Resident-only, NOT `currentBytesOrFetch` — like `create_doc`/`merge_docs into:`,
+            // this read is a create-vs-write CAS token, not a read-to-operate. `replace_doc`
+            // overwrites the doc with the agent's opaque bytes, so it gains nothing from
+            // fetching content-on-another-device (it would relay for seconds, promote a doc it's
+            // about to overwrite, then discard the fetched bytes). Worse, auto-fetching would
+            // synthesize a `.matchBytes(V0)` token the agent never actually read, defeating the
+            // `.absent` create-CAS above ("never silently overwrite a different doc of the same
+            // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
             let currentBytes = await manager.currentBytes(docId: docId)
             return await submitAndRespond(
                 docId: docId, createIfMissing: true, fullDoc: bytes,
@@ -2572,7 +2607,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let strokes = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2626,7 +2661,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2669,7 +2704,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2710,7 +2745,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2752,7 +2787,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2801,7 +2836,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2843,7 +2878,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2898,7 +2933,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2948,7 +2983,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -2992,7 +3027,7 @@ public actor MCPAdapter {
             let x = try Self.doubleArg(arguments, "x")
             let y = try Self.doubleArg(arguments, "y")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3047,7 +3082,7 @@ public actor MCPAdapter {
                 return Self.errorResult("missingArgument: orderedIds")
             }
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3103,7 +3138,7 @@ public actor MCPAdapter {
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
             guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let bytes = await manager.currentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
             let count = strokeKeys.count + textIds.count + imageIds.count
             let spec: Data
             do {
@@ -3136,6 +3171,33 @@ public actor MCPAdapter {
         }
     }
 
+    /// M2c-3: the explicit counterpart to every content tool's transparent
+    /// `currentBytesOrFetch` auto-fetch — this tool exists ONLY so an agent
+    /// can distinguish and control the outcome the transparent tools don't
+    /// report: resident-already / freshly-fetched-and-promoted /
+    /// known-but-unreachable / genuinely unknown. Read-only (no write, no
+    /// seq, nothing to retry).
+    private func callFetchDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            if let resident = await manager.currentBytes(docId: docId) {
+                return Self.textResult("already available (\(resident.count) bytes): \(docId)")
+            }
+            if let bytes = await manager.currentBytesOrFetch(docId: docId) {
+                return Self.textResult("fetched \(docId) (\(bytes.count) bytes)")
+            }
+            // Nothing resident and the fetch returned nil: known-but-unreachable vs truly unknown.
+            if await manager.liveEntry(docId: docId) != nil {
+                return Self.errorResult("contentUnavailable")
+            }
+            return Self.errorResult("unknownDoc")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// Task 5 (agent render/preview). Like the three stroke-op tools above,
     /// this composes a minimal op-spec envelope and relays it (plus the
     /// document's current bytes) through `broker.requestStrokeOp` — but
@@ -3153,7 +3215,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3228,7 +3290,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3284,7 +3346,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "points")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3331,7 +3393,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3385,7 +3447,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let keys = try Self.nonEmptyStringArrayArg(arguments, "keys")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3434,7 +3496,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let items = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3495,7 +3557,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3537,7 +3599,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3582,7 +3644,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3625,7 +3687,7 @@ public actor MCPAdapter {
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3682,7 +3744,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments: x and y are required")
             }
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3719,7 +3781,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3768,7 +3830,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let include = try Self.optionalStringArg(arguments, "include")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -3828,7 +3890,7 @@ public actor MCPAdapter {
             let ops = try Self.optionalValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytes(docId: docId) else {
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4039,10 +4101,10 @@ public actor MCPAdapter {
             }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
 
-            guard let sourceBytes = await manager.currentBytes(docId: source) else {
+            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else {
                 return Self.errorResult("sourceNotFound")
             }
-            guard let targetBytes = await manager.currentBytes(docId: target) else {
+            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else {
                 return Self.errorResult("targetNotFound")
             }
             if let into {
@@ -4127,8 +4189,8 @@ public actor MCPAdapter {
             guard source != target else { return Self.errorResult("invalidArguments") }
             guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let sourceBytes = await manager.currentBytes(docId: source) else { return Self.errorResult("sourceNotFound") }
-            guard let targetBytes = await manager.currentBytes(docId: target) else { return Self.errorResult("targetNotFound") }
+            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
+            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
             let count = strokeKeys.count + textIds.count + imageIds.count
             let spec: Data
@@ -4294,6 +4356,13 @@ public actor MCPAdapter {
 
     private static func errorResult(_ reason: String) -> CallTool.Result {
         CallTool.Result(content: [.text(text: reason, annotations: nil, _meta: nil)], isError: true)
+    }
+
+    /// A plain non-error text result. Every other success path in this file builds this shape
+    /// inline (`CallTool.Result(content: [.text(text: ..., annotations: nil, _meta: nil)])`);
+    /// `fetch_doc` is the first handler simple enough to want a named helper for it.
+    private static func textResult(_ text: String) -> CallTool.Result {
+        CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
     }
 
     // MARK: - Tool argument extraction

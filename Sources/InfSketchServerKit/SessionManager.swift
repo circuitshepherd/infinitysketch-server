@@ -230,6 +230,26 @@ public actor SessionManager {
         return try? store.load(docId: docId)
     }
 
+    /// Resident bytes if present; otherwise, for a content-less doc that a connected device
+    /// holds, pull them via the SAME `fetchFromHolders` relay a subscribe uses, PERSIST them
+    /// (promoting the doc to ordinary server content, which then stays), and return them. Nil only
+    /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
+    /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
+    public func currentBytesOrFetch(docId: String) async -> Data? {
+        if let resident = await currentBytes(docId: docId) { return resident }
+        guard liveIndex[docId] != nil else { return nil }
+        guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
+        // A concurrent subscribe may have opened a session (and accepted writes) while we were
+        // fetching — the same reentrancy window `subscribe`'s own notFound branch guards. Persisting
+        // our now-possibly-stale fetch here would silently revert that write on disk, invisible
+        // until the session recycles and reloads. If a session now exists it is authoritative:
+        // return ITS live bytes and save nothing. When none exists, `sessions[docId]?` short-
+        // circuits with no suspension, so the check-then-save below is atomic against reentrancy.
+        if let live = await sessions[docId]?.currentBytes { return live }
+        try? store.save(docId: docId, bytes: bytes)
+        return bytes
+    }
+
     public func subscribeStatus() -> (events: AsyncStream<ServerMessage>, token: UUID) {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
