@@ -108,4 +108,56 @@ final class SubscribeFetchTests: XCTestCase {
         }
         _ = try await manager.subscribe(docId: "Ghost", createIfMissing: true)
     }
+
+    /// Two devices tapping "download" on the same not-yet-resident doc must end up on ONE
+    /// session. The fetch is the first suspension point between subscribe's `sessions[docId]`
+    /// check and its write, and the actor is reentrant — so without adopting the racing winner
+    /// both callers open their own `DocumentSession`, the second overwrites the first, and the
+    /// LOSER's event stream is bound to a session nothing broadcasts into: that subscriber
+    /// silently freezes at its initial snapshot. Assert the user-visible property — BOTH
+    /// subscribers keep receiving broadcasts.
+    func testConcurrentFirstSubscribesShareOneSessionAndBothKeepReceiving() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.setContentProvider { _, _ in
+            try? await Task.sleep(for: .milliseconds(80))   // widen the reentrancy window
+            return Data("PULLED".utf8)
+        }
+
+        async let a = manager.subscribe(docId: "Ghost")
+        async let b = manager.subscribe(docId: "Ghost")
+        let (subA, subB) = try await (a, b)
+
+        // One broadcast to the doc …
+        _ = await manager.submit(docId: "Ghost", opId: "op1",
+                                 payload: OpPayload(type: "fullDoc", data: Data("v2".utf8)))
+
+        // … must reach BOTH subscribers. Bounded waits, NOT a bare `for await` drain: an orphaned
+        // session is never unsubscribed from (its token doesn't belong to the registered session),
+        // so its stream never finishes and the drain would hang forever instead of failing.
+        let gotA = await Self.receivesEvent(subA)
+        let gotB = await Self.receivesEvent(subB)
+        XCTAssertTrue(gotA, "subscriber A missed the broadcast (orphaned session)")
+        XCTAssertTrue(gotB, "subscriber B missed the broadcast (orphaned session)")
+    }
+
+    /// True if `result`'s stream yields an `.event` before the timeout. Each stream has exactly
+    /// one consumer here, so cancelling the loser task can't poison a shared stream.
+    private static func receivesEvent(_ result: SubscribeResult,
+                                      timeout: Duration = .milliseconds(500)) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await message in result.events { if case .event = message { return true } }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
 }

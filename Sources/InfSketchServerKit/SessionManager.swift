@@ -60,24 +60,38 @@ public actor SessionManager {
         if let existing = sessions[docId] {
             session = existing
         } else {
+            let opened: DocumentSession
             do {
-                session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+                opened = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
             } catch DocumentStoreError.notFound where createIfMissing {
                 // Mirror clients push docs the server has never seen: open an
                 // in-memory empty session; the first op persists real bytes.
-                session = DocumentSession(docId: docId, store: store,
-                                          bufferLimit: config.outboundBufferLimit, bytes: Data())
+                opened = DocumentSession(docId: docId, store: store,
+                                         bufferLimit: config.outboundBufferLimit, bytes: Data())
             } catch DocumentStoreError.notFound {
                 // M2c-1: the server holds no bytes, but a connected device does — pull them from
                 // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
                 // then open the session normally. With no holders/provider this rethrows notFound.
                 let bytes = try await fetchFromHolders(docId: docId)
                 try store.save(docId: docId, bytes: bytes)
-                session = try DocumentSession(docId: docId, store: store,
-                                              bufferLimit: config.outboundBufferLimit)
+                opened = try DocumentSession(docId: docId, store: store,
+                                             bufferLimit: config.outboundBufferLimit)
             }
-            sessions[docId] = session
-            emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            // The fetch arm above is the ONLY branch here containing a suspension point, and this
+            // actor is REENTRANT: a second concurrent subscribe for the SAME docId can have
+            // fetched, opened and registered its own session while we were awaiting. Adopt that
+            // winner instead of overwriting it — otherwise the loser's `SubscribeResult.events`
+            // is bound to a session nothing ever broadcasts into, so that subscriber silently
+            // freezes at its initial snapshot (and `sessionOpened` fires twice for one document).
+            // For the two non-fetch branches there is no suspension, so `sessions[docId]` is still
+            // nil here and this re-check is a no-op — their behaviour is unchanged.
+            if let raced = sessions[docId] {
+                session = raced
+            } else {
+                session = opened
+                sessions[docId] = opened
+                emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            }
         }
         let result = await session.subscribe()
         tokenDocs[result.token] = docId
