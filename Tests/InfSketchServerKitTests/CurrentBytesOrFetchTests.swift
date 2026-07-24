@@ -75,4 +75,50 @@ final class CurrentBytesOrFetchTests: XCTestCase {
         let n = await calls.n
         XCTAssertEqual(n, 1)
     }
+
+    /// A one-shot gate: the provider blocks on `wait()` until the test calls `open()`, so the test
+    /// can land a competing session mid-fetch deterministically.
+    private actor Gate {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func open() { opened = true; waiters.forEach { $0.resume() }; waiters.removeAll() }
+    }
+
+    /// The race the reviewer caught: while `currentBytesOrFetch` is suspended in the fetch, a
+    /// concurrent path opens a session and a write lands (V2). When the stale fetch (V1) resumes it
+    /// must NOT overwrite the accepted write on disk — it must adopt the live session's bytes.
+    /// Deterministic via the gate: the session is injected WHILE the fetch is held open.
+    func testFetchDoesNotRevertAConcurrentlyOpenedSessionsWrite() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = DirectoryDocumentStore(directory: dir)
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
+
+        let gate = Gate()
+        await manager.setContentProvider { _, _ in
+            await gate.wait()          // hold the fetch open until the competing write has landed
+            return Data("V1".utf8)     // …then resume with STALE bytes
+        }
+
+        // 1. Start the fetch; it blocks in the provider on the gate.
+        let fetchTask = Task { await manager.currentBytesOrFetch(docId: "Ghost") }
+        try await Task.sleep(for: .milliseconds(60))   // let it reach the provider
+
+        // 2. While the fetch is held, a competing session opens and accepts a write (V2).
+        //    `submitOpeningSession` does NOT fetch, so it doesn't coalesce onto the held fetch.
+        _ = await manager.submitOpeningSession(
+            docId: "Ghost", createIfMissing: true, opId: "u",
+            payload: OpPayload(type: "fullDoc", data: Data("V2".utf8)))
+        XCTAssertEqual(try store.load(docId: "Ghost"), Data("V2".utf8))   // V2 is on disk
+
+        // 3. Release the fetch. The stale V1 must not clobber V2.
+        await gate.open()
+        let got = await fetchTask.value
+        XCTAssertEqual(got, Data("V2".utf8), "must return the live session's bytes, not the stale fetch")
+        XCTAssertEqual(try store.load(docId: "Ghost"), Data("V2".utf8), "must NOT revert disk to V1")
+    }
 }

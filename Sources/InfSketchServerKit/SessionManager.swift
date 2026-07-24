@@ -239,6 +239,13 @@ public actor SessionManager {
         if let resident = await currentBytes(docId: docId) { return resident }
         guard liveIndex[docId] != nil else { return nil }
         guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
+        // A concurrent subscribe may have opened a session (and accepted writes) while we were
+        // fetching — the same reentrancy window `subscribe`'s own notFound branch guards. Persisting
+        // our now-possibly-stale fetch here would silently revert that write on disk, invisible
+        // until the session recycles and reloads. If a session now exists it is authoritative:
+        // return ITS live bytes and save nothing. When none exists, `sessions[docId]?` short-
+        // circuits with no suspension, so the check-then-save below is atomic against reentrancy.
+        if let live = await sessions[docId]?.currentBytes { return live }
         try? store.save(docId: docId, bytes: bytes)
         return bytes
     }
