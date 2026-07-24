@@ -73,9 +73,21 @@ public actor SessionManager {
                 // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
                 // then open the session normally. With no holders/provider this rethrows notFound.
                 let bytes = try await fetchFromHolders(docId: docId)
-                try store.save(docId: docId, bytes: bytes)
-                opened = try DocumentSession(docId: docId, store: store,
-                                             bufferLimit: config.outboundBufferLimit)
+                // Re-check BEFORE persisting. This fetch is the only suspension point in
+                // `subscribe`, and the actor is REENTRANT: another subscribe for this docId may
+                // already have saved, opened and registered a session — which may since have
+                // accepted writes. Writing our fetched (by now possibly stale) bytes here would
+                // silently revert those on disk, invisible until the session recycles and reloads
+                // from the store. An adopting caller must therefore persist nothing at all.
+                // Nothing below suspends, so once this check finds nil the save/open/register
+                // sequence completes without further reentrancy.
+                if let raced = sessions[docId] {
+                    opened = raced
+                } else {
+                    try store.save(docId: docId, bytes: bytes)
+                    opened = try DocumentSession(docId: docId, store: store,
+                                                 bufferLimit: config.outboundBufferLimit)
+                }
             }
             // The fetch arm above is the ONLY branch here containing a suspension point, and this
             // actor is REENTRANT: a second concurrent subscribe for the SAME docId can have

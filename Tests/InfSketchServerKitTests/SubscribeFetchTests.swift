@@ -2,6 +2,24 @@ import XCTest
 import InfSketchWire
 @testable import InfSketchServerKit
 
+/// Wraps the real store and counts `save` calls, so a test can prove that only ONE of several
+/// racing first-subscribers persists the fetched bytes.
+private final class CountingStore: DocumentStore, @unchecked Sendable {
+    private let inner: DirectoryDocumentStore
+    private let lock = NSLock()
+    private var _saveCount = 0
+    var saveCount: Int { lock.lock(); defer { lock.unlock() }; return _saveCount }
+
+    init(directory: URL) { inner = DirectoryDocumentStore(directory: directory) }
+    func list() throws -> [StoredDocInfo] { try inner.list() }
+    func load(docId: String) throws -> Data { try inner.load(docId: docId) }
+    func exists(docId: String) throws -> Bool { try inner.exists(docId: docId) }
+    func save(docId: String, bytes: Data) throws {
+        lock.lock(); _saveCount += 1; lock.unlock()
+        try inner.save(docId: docId, bytes: bytes)
+    }
+}
+
 final class SubscribeFetchTests: XCTestCase {
     private func makeManager() throws -> (SessionManager, URL) {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -140,6 +158,33 @@ final class SubscribeFetchTests: XCTestCase {
         let gotB = await Self.receivesEvent(subB)
         XCTAssertTrue(gotA, "subscriber A missed the broadcast (orphaned session)")
         XCTAssertTrue(gotB, "subscriber B missed the broadcast (orphaned session)")
+    }
+
+    /// An adopting (losing) racer must persist NOTHING. The byte fetch is coalesced, but each
+    /// racer resumes from it holding those bytes — and by then the winner's session may already
+    /// have accepted a write. A second `store.save` of the fetched bytes would silently revert
+    /// that accepted write on disk, staying invisible until the session recycles and reloads from
+    /// the store. So: exactly one save for two concurrent first-subscribes.
+    func testOnlyOneRacingSubscriberPersistsTheFetchedBytes() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("m2c1-save-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CountingStore(directory: dir)
+        let manager = SessionManager(store: store)
+
+        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.setContentProvider { _, _ in
+            try? await Task.sleep(for: .milliseconds(80))   // widen the reentrancy window
+            return Data("PULLED".utf8)
+        }
+
+        async let a = manager.subscribe(docId: "Ghost")
+        async let b = manager.subscribe(docId: "Ghost")
+        _ = try await (a, b)
+
+        XCTAssertEqual(store.saveCount, 1,
+                       "an adopting subscriber must not re-persist — it could revert a newer write")
     }
 
     /// True if `result`'s stream yields an `.event` before the timeout. Each stream has exactly
