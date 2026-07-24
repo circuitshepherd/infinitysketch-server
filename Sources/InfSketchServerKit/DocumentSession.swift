@@ -22,6 +22,22 @@ public struct SessionConfig: Sendable {
     /// How long `DeviceCommandBroker.requestStrokeOp` waits for a device's
     /// `strokeOpReply` before failing with `.deviceTimeout`.
     public var strokeOpTimeout: Duration
+    /// Total budget for ONE `SessionManager.fetchFromHolders` call, across all
+    /// holders (M2c-1 review F9). Each individual attempt is already bounded by
+    /// `strokeOpTimeout`, but holders are tried SEQUENTIALLY — so without a total
+    /// budget a document advertised by N stale devices costs N x `strokeOpTimeout`
+    /// on a single subscribe or agent tool call. Once the budget is spent no
+    /// FURTHER holder is tried (an attempt already in flight still runs to its own
+    /// timeout, so the true worst case is this budget plus one `strokeOpTimeout`).
+    ///
+    /// The default admits exactly two 20 s attempts (they start at 0 s and 20 s; a
+    /// third would start at 40 s > 30 s and is refused), for a 50 s worst case. Two
+    /// ceilings make a LARGER default a poor trade: it should stay under
+    /// `gracePeriod`, so a fetch cannot outlive a session teardown it raced (see
+    /// `subscribe`'s store-aware re-check, which no longer merely ASSUMES that), and
+    /// under the ~60 s timeout typical MCP clients apply, since a client that gives
+    /// up orphans the fetch.
+    public var fetchTotalTimeout: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -30,7 +46,8 @@ public struct SessionConfig: Sendable {
         mcpSessionIdleTimeout: Duration = .seconds(3600),
         mcpSessionCleanupInterval: Duration = .seconds(60),
         createDocTimeout: Duration = .seconds(10),
-        strokeOpTimeout: Duration = .seconds(20)
+        strokeOpTimeout: Duration = .seconds(20),
+        fetchTotalTimeout: Duration = .seconds(30)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
@@ -40,6 +57,7 @@ public struct SessionConfig: Sendable {
         self.mcpSessionCleanupInterval = mcpSessionCleanupInterval
         self.createDocTimeout = createDocTimeout
         self.strokeOpTimeout = strokeOpTimeout
+        self.fetchTotalTimeout = fetchTotalTimeout
     }
 }
 
