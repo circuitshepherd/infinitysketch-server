@@ -30,6 +30,7 @@ import InfSketchWire
             .resyncRequired(docId: "a", seq: 12),
             .statusEvent(payload: StatusPayload(docId: "a", kind: "docUpdated", seq: 4, subscriberCount: 2)),
             .error(reason: "malformedMessage"),
+            .subscribeFailed(docId: "Doc-1", reason: "unknownDoc"),
         ]
         for m in messages {
             let decoded = try ServerMessage(jsonText: try m.jsonText())
