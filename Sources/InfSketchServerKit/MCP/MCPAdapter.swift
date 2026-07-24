@@ -261,6 +261,11 @@ public actor MCPAdapter {
 
     // MARK: - Resource handlers
 
+    /// M2c-3: `entry.hasContent == false` means this doc is metadata-only — its content lives
+    /// on a connected device (M2c-1's live index) — so the resource carries a `description`
+    /// hint pointing the agent at `fetch_doc` to pull it explicitly. A resident doc's
+    /// `description` stays nil (the ordinary, silent-auto-fetch case every other tool already
+    /// handles via `currentBytesOrFetch`).
     private func handleListResources() async throws -> ListResources.Result {
         var resources = ResourceURI.templateResources
         for entry in try await manager.listDocuments() {
@@ -268,6 +273,9 @@ public actor MCPAdapter {
                 Resource(
                     name: entry.id,
                     uri: ResourceURI.docSummary(docId: entry.id).uriString,
+                    description: entry.hasContent
+                        ? nil
+                        : "content is on another device — call fetch_doc(\"\(entry.id)\") to pull it",
                     mimeType: "application/json"))
         }
         return ListResources.Result(resources: resources)
@@ -1991,6 +1999,24 @@ public actor MCPAdapter {
                 "required": .array(["docId", "mode"].map(Value.string)),
             ])
         ),
+        Tool(
+            name: "fetch_doc",
+            description: """
+                Ensures a document's content is available on the server, pulling it from a device \
+                that holds it if the server has only its metadata (a "content on another device" \
+                doc — see the hasContent hint in the resource list). Read-only: it promotes the \
+                document to server content but authors nothing. Call it before other tools if you \
+                want to control when the (possibly multi-second) transfer happens; otherwise the \
+                content tools fetch on demand themselves. Errors: contentUnavailable (the holding \
+                device isn't online), unknownDoc.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to fetch."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])),
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
@@ -2040,6 +2066,7 @@ public actor MCPAdapter {
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
         case "reorder_elements": return await callReorderElements(arguments)
+        case "fetch_doc": return await callFetchDoc(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -3129,6 +3156,33 @@ public actor MCPAdapter {
             ) { seq in
                 "moved \(count) element(s) to \(mode) in \(docId) at seq \(seq)"
             }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// M2c-3: the explicit counterpart to every content tool's transparent
+    /// `currentBytesOrFetch` auto-fetch — this tool exists ONLY so an agent
+    /// can distinguish and control the outcome the transparent tools don't
+    /// report: resident-already / freshly-fetched-and-promoted /
+    /// known-but-unreachable / genuinely unknown. Read-only (no write, no
+    /// seq, nothing to retry).
+    private func callFetchDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            if let resident = await manager.currentBytes(docId: docId) {
+                return Self.textResult("already available (\(resident.count) bytes): \(docId)")
+            }
+            if let bytes = await manager.currentBytesOrFetch(docId: docId) {
+                return Self.textResult("fetched \(docId) (\(bytes.count) bytes)")
+            }
+            // Nothing resident and the fetch returned nil: known-but-unreachable vs truly unknown.
+            if await manager.liveEntry(docId: docId) != nil {
+                return Self.errorResult("contentUnavailable")
+            }
+            return Self.errorResult("unknownDoc")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -4294,6 +4348,13 @@ public actor MCPAdapter {
 
     private static func errorResult(_ reason: String) -> CallTool.Result {
         CallTool.Result(content: [.text(text: reason, annotations: nil, _meta: nil)], isError: true)
+    }
+
+    /// A plain non-error text result. Every other success path in this file builds this shape
+    /// inline (`CallTool.Result(content: [.text(text: ..., annotations: nil, _meta: nil)])`);
+    /// `fetch_doc` is the first handler simple enough to want a named helper for it.
+    private static func textResult(_ text: String) -> CallTool.Result {
+        CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
     }
 
     // MARK: - Tool argument extraction

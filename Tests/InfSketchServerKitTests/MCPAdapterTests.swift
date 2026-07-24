@@ -729,8 +729,9 @@ private actor FakeStrokeOpDevice {
     // (agent-copy-elements, Task 2) added one more, renaming this from
     // `listToolsContainsAllThirtyNineTools`. reorder_elements
     // (agent-element-zorder, Task 2) added one more, renaming this from
-    // `listToolsContainsAllFortyTools`.
-    @Test func listToolsContainsAllFortyOneTools() async throws {
+    // `listToolsContainsAllFortyTools`. fetch_doc (M2c-3, Task 3) added one
+    // more, renaming this from `listToolsContainsAllFortyOneTools`.
+    @Test func listToolsContainsAllFortyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -749,6 +750,7 @@ private actor FakeStrokeOpDevice {
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
+            "fetch_doc",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -5495,6 +5497,121 @@ private actor FakeStrokeOpDevice {
         // After: auto-fetched from the holder AND promoted to ordinary resident content.
         let after = try await server.manager.listDocuments()
         #expect(after.first { $0.id == "Ghost" }?.hasContent == true)
+
+        await server.stop()
+    }
+
+    // MARK: - M2c-3 Task 3: fetch_doc + hasContent on list_resources
+    //
+    // `fetch_doc` is the EXPLICIT counterpart to the transparent auto-fetch
+    // above: the four tests below pin the four outcomes a caller can't tell
+    // apart from a plain content-tool call — resident-already,
+    // freshly-fetched-and-promoted, known-but-unreachable, and genuinely
+    // unknown — by combining `currentBytes` (resident check),
+    // `currentBytesOrFetch` (the fetch), and `liveEntry` (known-but-nil).
+
+    /// A content-less doc with a holder: fetch_doc reports "fetched" and promotes it to
+    /// ordinary resident content, mirroring the auto-fetch test's seam exactly.
+    @Test func fetchDocPromotesAContentLessDoc() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in Fixtures.docBytes }
+
+        let before = try await server.manager.listDocuments()
+        #expect(before.first { $0.id == "Ghost" }?.hasContent == false)
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "fetch_doc", arguments: ["docId": "Ghost"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("fetched"))
+
+        let after = try await server.manager.listDocuments()
+        #expect(after.first { $0.id == "Ghost" }?.hasContent == true)
+
+        await server.stop()
+    }
+
+    /// A doc the server already holds bytes for: fetch_doc reports "already available"
+    /// without touching the (unset) content provider.
+    @Test func fetchDocOnResidentReportsAlreadyAvailable() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "fetch_doc", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("already available"))
+
+        await server.stop()
+    }
+
+    /// A doc known via a live advertisement whose only holder is offline (the provider
+    /// throws): fetch_doc reports contentUnavailable, distinct from an unknown doc.
+    @Test func fetchDocWithNoOnlineHolderReportsContentUnavailable() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in
+            throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable
+        }
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(
+            name: "fetch_doc", arguments: ["docId": "Ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "contentUnavailable")
+
+        await server.stop()
+    }
+
+    /// A docId with no live advertisement and no resident bytes at all: fetch_doc reports
+    /// unknownDoc, the same reason every other tool uses for a nonexistent document.
+    @Test func fetchDocOnGenuinelyUnknownDocReportsUnknownDoc() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "fetch_doc", arguments: ["docId": "TotallyUnknown"])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "unknownDoc")
+
+        await server.stop()
+    }
+
+    /// `list_resources` carries a hasContent-derived hint per document: a metadata-only doc's
+    /// `Resource.description` names fetch_doc; a resident doc's description stays nil.
+    @Test func listResourcesReportsHasContent() async throws {
+        let (server, port, task) = try await startServer()  // seeds resident doc "d"
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (resources, _) = try await client.listResources()
+
+        let ghost = try #require(resources.first { $0.uri == "infsketch://doc/Ghost" })
+        #expect(ghost.description?.contains("fetch_doc") == true)
+        #expect(ghost.description?.contains("another device") == true)
+
+        let resident = try #require(resources.first { $0.uri == "infsketch://doc/d" })
+        #expect(resident.description == nil)
 
         await server.stop()
     }
