@@ -40,8 +40,9 @@ actor Connection {
     private var sender: TransferSender<ServerMessage>
     private var reassembler = TransferReassembler<ClientMessage>()
     private var helloed = false
-    /// M2b: the advertising device's identity, from `hello`. Stamped onto every metadata
-    /// sidecar this connection writes, so M2c can route a content fetch back to the origin.
+    /// The advertising device's identity, from `hello`. M2c-1: recorded as a HOLDER on every
+    /// document this connection advertises, so a content fetch can be routed to it — and pruned
+    /// from the live index when the connection closes. All holders are equal; there is no origin.
     private var deviceId: String?
     private var closed = false
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
@@ -130,13 +131,17 @@ actor Connection {
             // "reorderElements" (agent-element-zorder spec, Task 2) joined
             // the same way, for reorder_elements's capability:
             // "reorderElements" relay.
+            // "provideContent" (M2c-1, Task 4) joined the same way, for
+            // requestProvideContent's capability: "provideContent" relay — a
+            // device advertising only content-provisioning must still register.
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection", "resolveCollision",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements",
+                "provideContent",
             ]) {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId, capabilities: caps) { [weak self] message in
+                await broker.register(connectionId: connectionId, deviceId: deviceId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
             }
@@ -283,17 +288,17 @@ actor Connection {
             await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta, failureReason: nil)
 
         case .advertiseDocs(let payload):
-            // M2b: a device advertising the docs it owns — metadata + thumbnail, no content.
-            // Persisted as sidecars stamped with THIS connection's deviceId (the origin M2c will
-            // route content fetches by). Never touches content: `saveMetadata` is separate from
-            // `save`, and `list()` lets content win.
+            // M2c-1: a device advertising the docs it owns — metadata + thumbnail, no content.
+            // Folded into the in-memory live index, keyed by THIS connection's deviceId (any
+            // holder may later serve a fetch). Never touches content: the live index is separate
+            // from the store, and `listDocuments()` lets content win.
             guard case .inline(let bytes) = payload else {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
             guard let ads = try? JSONDecoder().decode([DocAdvertisement].self, from: bytes) else {
                 return emit(.error(reason: "malformedMessage"))
             }
-            await manager.saveAdvertisements(ads, originDeviceId: deviceId)
+            await manager.applyAdvertisements(ads, deviceId: deviceId)
         }
     }
 
@@ -318,6 +323,9 @@ actor Connection {
         if registeredWithBroker {
             registeredWithBroker = false
             await broker.unregister(connectionId: connectionId)
+        }
+        if let deviceId {
+            await manager.removeAdvertisements(deviceId: deviceId)
         }
         output.finish()
     }

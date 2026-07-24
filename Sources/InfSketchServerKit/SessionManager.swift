@@ -10,6 +10,18 @@ public struct LiveDocInfo: Sendable, Equatable, Codable {
     }
 }
 
+/// M2c-1: what the server knows about a document from a CONNECTED device's advertisement —
+/// metadata + thumbnail + the set of devices that hold it. Purely live: it is rebuilt from
+/// advertisements and pruned on disconnect, and is NEVER written to disk (the server's durable
+/// state is content documents only). All holders are equal; any of them may serve a fetch.
+public struct LiveDocEntry: Sendable, Equatable {
+    public var name: String
+    public var sizeBytes: Int
+    public var modifiedAt: Date
+    public var thumbnail: Data?
+    public var holders: Set<String>
+}
+
 /// Registry of live DocumentSessions. Sole entry point for subscribe /
 /// unsubscribe / submit, so subscriber counting and grace teardown are
 /// serialized on one actor. Also fans out server-status events.
@@ -23,10 +35,23 @@ public actor SessionManager {
     private var watcherCounts: [String: Int] = [:]
     private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    /// docId → live advertisement entry. In-memory only (see LiveDocEntry).
+    private var liveIndex: [String: LiveDocEntry] = [:]
+    /// M2c-1: pulls one document's bytes from ONE named holder. Injected by InfSketchServer
+    /// (which routes it to DeviceCommandBroker.requestProvideContent); tests inject a fake.
+    /// Nil until wired — a nil provider makes a content-less subscribe behave exactly as before.
+    private var contentProvider: (@Sendable (String, String) async throws -> Data)?
+    /// In-flight fetches, keyed by docId, so concurrent subscribers coalesce onto ONE pull
+    /// instead of each hitting a holder (the broker would reject the second with requestInFlight).
+    private var inFlightFetches: [String: Task<Data, Error>] = [:]
 
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
         self.config = config
+    }
+
+    public func setContentProvider(_ provider: @escaping @Sendable (String, String) async throws -> Data) {
+        contentProvider = provider
     }
 
     public func subscribe(docId: String, createIfMissing: Bool = false) async throws -> SubscribeResult {
@@ -35,16 +60,50 @@ public actor SessionManager {
         if let existing = sessions[docId] {
             session = existing
         } else {
+            let opened: DocumentSession
             do {
-                session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+                opened = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
             } catch DocumentStoreError.notFound where createIfMissing {
                 // Mirror clients push docs the server has never seen: open an
                 // in-memory empty session; the first op persists real bytes.
-                session = DocumentSession(docId: docId, store: store,
-                                          bufferLimit: config.outboundBufferLimit, bytes: Data())
+                opened = DocumentSession(docId: docId, store: store,
+                                         bufferLimit: config.outboundBufferLimit, bytes: Data())
+            } catch DocumentStoreError.notFound {
+                // M2c-1: the server holds no bytes, but a connected device does — pull them from
+                // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
+                // then open the session normally. With no holders/provider this rethrows notFound.
+                let bytes = try await fetchFromHolders(docId: docId)
+                // Re-check BEFORE persisting. This fetch is the only suspension point in
+                // `subscribe`, and the actor is REENTRANT: another subscribe for this docId may
+                // already have saved, opened and registered a session — which may since have
+                // accepted writes. Writing our fetched (by now possibly stale) bytes here would
+                // silently revert those on disk, invisible until the session recycles and reloads
+                // from the store. An adopting caller must therefore persist nothing at all.
+                // Nothing below suspends, so once this check finds nil the save/open/register
+                // sequence completes without further reentrancy.
+                if let raced = sessions[docId] {
+                    opened = raced
+                } else {
+                    try store.save(docId: docId, bytes: bytes)
+                    opened = try DocumentSession(docId: docId, store: store,
+                                                 bufferLimit: config.outboundBufferLimit)
+                }
             }
-            sessions[docId] = session
-            emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            // The fetch arm above is the ONLY branch here containing a suspension point, and this
+            // actor is REENTRANT: a second concurrent subscribe for the SAME docId can have
+            // fetched, opened and registered its own session while we were awaiting. Adopt that
+            // winner instead of overwriting it — otherwise the loser's `SubscribeResult.events`
+            // is bound to a session nothing ever broadcasts into, so that subscriber silently
+            // freezes at its initial snapshot (and `sessionOpened` fires twice for one document).
+            // For the two non-fetch branches there is no suspension, so `sessions[docId]` is still
+            // nil here and this re-check is a no-op — their behaviour is unchanged.
+            if let raced = sessions[docId] {
+                session = raced
+            } else {
+                session = opened
+                sessions[docId] = opened
+                emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            }
         }
         let result = await session.subscribe()
         tokenDocs[result.token] = docId
@@ -188,34 +247,97 @@ public actor SessionManager {
         return info
     }
 
-    /// The WS twin of the REST listing: store contents + live session info.
+    /// The WS twin of the REST listing: store contents + live session info, plus the live
+    /// index's metadata-only documents. Content ALWAYS beats metadata — a docId with real
+    /// bytes is reported hasContent:true and is never duplicated by an advertisement.
     public func listDocuments() async throws -> [DocListEntry] {
         let live = await liveInfo()
-        return try store.list()
-            .sorted { $0.docId < $1.docId }
-            .map { info in
-                DocListEntry(
-                    id: info.docId,
-                    sizeBytes: info.sizeBytes,
-                    modifiedAt: info.modifiedAt,
-                    seq: live[info.docId]?.seq,
-                    subscriberCount: live[info.docId]?.subscriberCount,
-                    hasContent: info.hasContent,
-                    originDeviceId: info.originDeviceId)
-            }
+        var entries = try store.list().map { info in
+            DocListEntry(
+                id: info.docId,
+                sizeBytes: info.sizeBytes,
+                modifiedAt: info.modifiedAt,
+                seq: live[info.docId]?.seq,
+                subscriberCount: live[info.docId]?.subscriberCount,
+                hasContent: true)
+        }
+        let contentIds = Set(entries.map(\.id))
+        for (docId, entry) in liveIndex where !contentIds.contains(docId) {
+            entries.append(DocListEntry(
+                id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
+                seq: nil, subscriberCount: nil, hasContent: false))
+        }
+        return entries.sorted { $0.id < $1.id }
     }
 
-    /// M2b: persist a device's advertisements as metadata sidecars. Best-effort per entry — one
-    /// unwritable sidecar must not drop the rest of the batch.
-    public func saveAdvertisements(_ ads: [DocAdvertisement], originDeviceId: String?) {
+    /// M2c-1: fold a connected device's advertisements into the live index. Multiple devices
+    /// advertising the same docId UNION (holders accumulate); where their metadata differs the
+    /// NEWEST `modifiedAt` is displayed. An advertisement from a device that sent no `deviceId`
+    /// is ignored — it could never be selected to serve a fetch, so indexing it would list a
+    /// document nobody can produce.
+    public func applyAdvertisements(_ ads: [DocAdvertisement], deviceId: String?) {
+        guard let deviceId else { return }
+        // A batch is that device's COMPLETE current set (`advertiseLocalDocs` gathers every
+        // syncEnabled local doc), so REPLACE its previous contribution rather than accumulating.
+        // Accumulating would keep listing a document the device has since deleted or marked
+        // local-only, and would keep offering that device as a fetch source for it — a stale
+        // holder that sorts first is asked first and burns the full device timeout.
+        removeAdvertisements(deviceId: deviceId)
         for ad in ads {
-            try? store.saveMetadata(docId: ad.docId, DocMetadataEntry(
-                name: ad.docId,
-                sizeBytes: ad.sizeBytes,
-                modifiedAt: ad.modifiedAt,
-                originDeviceId: originDeviceId,
-                thumbnail: ad.thumbnail))
+            if var existing = liveIndex[ad.docId] {
+                existing.holders.insert(deviceId)
+                if ad.modifiedAt >= existing.modifiedAt {
+                    existing.name = ad.docId
+                    existing.sizeBytes = ad.sizeBytes
+                    existing.modifiedAt = ad.modifiedAt
+                    existing.thumbnail = ad.thumbnail
+                }
+                liveIndex[ad.docId] = existing
+            } else {
+                liveIndex[ad.docId] = LiveDocEntry(
+                    name: ad.docId, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
+                    thumbnail: ad.thumbnail, holders: [deviceId])
+            }
         }
+    }
+
+    /// M2c-1: a device disconnected — drop it from every holder set, and drop any entry whose
+    /// last holder just left. This is what makes a powered-off device's documents disappear.
+    public func removeAdvertisements(deviceId: String) {
+        for (docId, var entry) in liveIndex {
+            guard entry.holders.remove(deviceId) != nil else { continue }
+            if entry.holders.isEmpty {
+                liveIndex.removeValue(forKey: docId)
+            } else {
+                liveIndex[docId] = entry
+            }
+        }
+    }
+
+    public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
+
+    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndex[docId] }
+
+    /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
+    /// origin — so a failure (offline, doc deleted, timeout) just moves to the next. Throws the
+    /// LAST error when every holder fails.
+    private func fetchFromHolders(docId: String) async throws -> Data {
+        guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
+            throw DocumentStoreError.notFound
+        }
+        if let existing = inFlightFetches[docId] { return try await existing.value }
+
+        let holders = entry.holders.sorted()
+        let task = Task<Data, Error> {
+            var lastError: Error = DocumentStoreError.notFound
+            for holder in holders {
+                do { return try await contentProvider(docId, holder) } catch { lastError = error }
+            }
+            throw lastError
+        }
+        inFlightFetches[docId] = task
+        defer { inFlightFetches.removeValue(forKey: docId) }
+        return try await task.value
     }
 
     private func scheduleGraceTeardown(docId: String) {

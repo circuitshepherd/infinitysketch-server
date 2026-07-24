@@ -516,6 +516,33 @@ private struct ServerMessageReader {
         _ = try await task.value
     }
 
+    /// M2c-1: pins the TWO `WSAdapter` lines the deviceId-addressing task changed, both of which
+    /// are invisible to broker-level tests: (1) `"provideContent"` must be in the capability gate,
+    /// or a device advertising only that capability never registers with the broker at all; and
+    /// (2) the connection's hello `deviceId` must be passed into `register`, or every connection
+    /// registers as `deviceId: nil` and a content fetch can never be addressed to it. If either
+    /// regressed, `requestProvideContent` would find no matching connection and no wire frame
+    /// would ever arrive here.
+    @Test func helloWithProvideContentCapabilityRegistersUnderItsDeviceId() async throws {
+        let broker = DeviceCommandBroker()
+        let harness = try await Harness(manager: try makeManager(), broker: broker)
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: 1, capabilities: ["provideContent"],
+                                deviceId: "device-A"))
+        #expect(try await reader.next() == .helloAck(protocolVersion: 1))
+
+        // Address the request to THIS device's id — it must reach the client as a wire frame.
+        let task = Task { try await broker.requestProvideContent(docId: "doc-1", deviceId: "device-A") }
+        guard case .strokeOpRequest(let requestId, "doc-1", _, _) = try await reader.next() else {
+            Issue.record("expected a strokeOpRequest frame addressed to device-A"); return
+        }
+        // The client answers over the wire; the reply must resolve the pending request.
+        try harness.send(.strokeOpReply(
+            requestId: requestId, docId: "doc-1",
+            payload: .inline(Data("CONTENT".utf8)), meta: nil, failureReason: nil))
+        #expect(try await task.value == Data("CONTENT".utf8))
+    }
+
     @Test func createDocReplyRoutesToBroker() async throws {
         let broker = DeviceCommandBroker()
         let harness = try await Harness(manager: try makeManager(), broker: broker)
@@ -671,17 +698,18 @@ private struct ServerMessageReader {
         #expect(d.sizeBytes == Fixtures.docBytes.count)
         #expect(d.seq == 0)
         #expect(d.subscriberCount == 1)
-        // Pre-existing content: hasContent defaults true, no origin device.
+        // Pre-existing content: hasContent defaults true.
         #expect(d.hasContent == true)
-        #expect(d.originDeviceId == nil)
     }
 
-    /// M2b Task 3: the full path — a device says `hello` with its deviceId, advertises a doc it
-    /// owns but never uploads (no `save`/subscribe for it), and a SUBSEQUENT `listDocs` from any
-    /// connection reports it as `hasContent: false` stamped with the advertiser's `originDeviceId`.
-    /// This is the behavior the WSAdapter/SessionManager wiring exists for — Task 1 only proved
-    /// the wire round-trips and Task 2 only proved the store persists; nothing before this test
-    /// proved a `hello(deviceId:)` → `advertiseDocs` → `listDocs` connection sequence actually works.
+    /// M2c-1: the full path — a device says `hello` with its deviceId, advertises a doc it owns
+    /// but never uploads (no `save`/subscribe for it), and a SUBSEQUENT `listDocs` from any
+    /// connection reports it as `hasContent: false` via the in-memory live index (no sidecar
+    /// involved — `originDeviceId` is gone from this path; the live index tracks holders instead,
+    /// see LiveDocIndexTests). This is the behavior the WSAdapter/SessionManager wiring exists
+    /// for — Task 1 only proved the wire round-trips and Task 2 only proved the store persists;
+    /// nothing before this test proved a `hello(deviceId:)` → `advertiseDocs` → `listDocs`
+    /// connection sequence actually works.
     @Test func advertiseDocsPersistsMetadataVisibleInSubsequentListDocs() async throws {
         let manager = try makeManager()   // seeds doc "d"
         let harness = try await Harness(manager: manager)
@@ -699,7 +727,6 @@ private struct ServerMessageReader {
         }
         let entry = try #require(docs.first(where: { $0.id == "advertised-only" }))
         #expect(entry.hasContent == false)
-        #expect(entry.originDeviceId == "device-A")
         #expect(entry.sizeBytes == 555)
     }
 

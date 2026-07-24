@@ -122,25 +122,22 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     public var seq: Int?
     public var subscriberCount: Int?
     /// M2b: false = the server holds only metadata + thumbnail for this doc; its content
-    /// lives on `originDeviceId`. Defaults to TRUE when absent — every pre-M2b entry had content.
+    /// lives on a connected device (M2c-1: any of its holders). Defaults to TRUE when absent —
+    /// every pre-M2b entry had content.
     public var hasContent: Bool
-    /// M2b: which device advertised this doc (from `hello`'s deviceId). M2c routes content
-    /// fetches by it.
-    public var originDeviceId: String?
 
     public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?,
-                hasContent: Bool = true, originDeviceId: String? = nil) {
+                hasContent: Bool = true) {
         self.id = id
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
         self.seq = seq
         self.subscriberCount = subscriberCount
         self.hasContent = hasContent
-        self.originDeviceId = originDeviceId
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent, originDeviceId
+        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent
     }
 
     public init(from decoder: any Decoder) throws {
@@ -151,14 +148,17 @@ public struct DocListEntry: Codable, Equatable, Sendable {
         seq = try c.decodeIfPresent(Int.self, forKey: .seq)
         subscriberCount = try c.decodeIfPresent(Int.self, forKey: .subscriberCount)
         hasContent = try c.decodeIfPresent(Bool.self, forKey: .hasContent) ?? true
-        originDeviceId = try c.decodeIfPresent(String.self, forKey: .originDeviceId)
     }
 }
 
-/// One document a device advertises: metadata + thumbnail, NO content. The server persists
-/// these as `metadata/` sidecars so a doc is discoverable + previewable everywhere without
-/// its bytes ever being uploaded (M2b). The thumbnail travels WITH the advertisement so a
-/// preview survives the origin device going offline.
+/// One document a device advertises: metadata + thumbnail, NO content — so a doc is
+/// discoverable and previewable on other devices without its bytes ever being uploaded.
+/// The thumbnail travels WITH the advertisement so the preview needs no follow-up round trip.
+///
+/// M2c-1: the server holds these ONLY in an in-memory live index, keyed by docId with the set
+/// of devices that advertised it — nothing is persisted (the server's durable state is content
+/// documents alone), and an entry is pruned when its last advertising device disconnects.
+/// All advertisers are equal: any of them may later be asked to hand over the content.
 public struct DocAdvertisement: Codable, Equatable, Sendable {
     public var docId: String
     public var modifiedAt: Date

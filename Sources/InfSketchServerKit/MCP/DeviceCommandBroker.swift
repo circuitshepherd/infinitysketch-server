@@ -8,10 +8,15 @@ import InfSketchWire
 /// routes back its `*Reply`).
 ///
 /// One broker per server process. `WSAdapter` registers/unregisters a
-/// connection's send closure + capability set at hello/close; MCP tool
+/// connection's send closure + capability set + `deviceId` at hello/close; MCP tool
 /// handlers call `requestCreation` / `requestStrokeOp`; `WSAdapter` routes an
 /// inbound `createDocReply` / `strokeOpReply` to `handleReply` (kind-agnostic
 /// — it resolves purely by `requestId`).
+///
+/// M2c-1 adds a second addressing mode alongside "any device with capability X":
+/// `requestProvideContent` targets ONE named `deviceId`, because only a device that
+/// actually holds a document can hand over its content. All holders are equal — the
+/// caller picks one and falls back to the next if it fails.
 ///
 /// Every completion path — a reply, a timeout, or the owning connection
 /// closing — removes the pending entry, releases the per-docId "request in
@@ -50,6 +55,9 @@ public actor DeviceCommandBroker {
     /// a request kind whose required capability it advertised.
     private struct Connection {
         let id: UUID
+        /// M2c-1: which device this connection belongs to (from `hello`). Used to address a
+        /// SPECIFIC holder for a content fetch — every other request kind picks by capability.
+        let deviceId: String?
         let capabilities: Set<String>
         let send: @Sendable (ServerMessage) -> Void
     }
@@ -83,10 +91,12 @@ public actor DeviceCommandBroker {
     /// set. Most-recently-registered, capability-matching connection is
     /// preferred for new requests of a given kind.
     public func register(
-        connectionId: UUID, capabilities: Set<String>, send: @escaping @Sendable (ServerMessage) -> Void
+        connectionId: UUID, deviceId: String? = nil, capabilities: Set<String>,
+        send: @escaping @Sendable (ServerMessage) -> Void
     ) {
         connections.removeAll { $0.id == connectionId }
-        connections.append(Connection(id: connectionId, capabilities: capabilities, send: send))
+        connections.append(Connection(id: connectionId, deviceId: deviceId,
+                                      capabilities: capabilities, send: send))
     }
 
     /// WSAdapter calls on connection close. Fails that connection's pending
@@ -133,6 +143,24 @@ public actor DeviceCommandBroker {
         }
     }
 
+    /// M2c-1: ask ONE NAMED device to hand over a document's current bytes. Unlike every other
+    /// request kind — which picks any capability-matching connection — this addresses a specific
+    /// holder, because only a device that HAS the document can serve it. Rides the existing
+    /// strokeOpRequest/strokeOpReply envelope (op `provideContent`); `docBytes` is deliberately
+    /// EMPTY, since the device is the one supplying content, not transforming it.
+    /// Throws `.noDeviceAvailable` when that device isn't connected (or lacks the capability),
+    /// which is the caller's signal to try the next holder.
+    public func requestProvideContent(docId: String, deviceId: String) async throws -> Data {
+        let spec = try JSONEncoder().encode(["op": "provideContent", "docId": docId])
+        return try await performRequest(
+            docId: docId, capability: "provideContent", timeout: strokeOpTimeout,
+            deviceId: deviceId
+        ) { connection, requestId in
+            connection.send(.strokeOpRequest(
+                requestId: requestId, docId: docId, payload: .inline(Data()), spec: spec))
+        }.bytes
+    }
+
     /// WSAdapter routes createDocReply/strokeOpReply here — kind-agnostic,
     /// resolved purely by requestId. Unknown/expired requestId → log + drop.
     /// `meta` is non-nil only for replies that carry metadata (render/preview,
@@ -150,18 +178,23 @@ public actor DeviceCommandBroker {
         }
     }
 
-    /// Shared request path for both `requestCreation` and `requestStrokeOp`:
-    /// capability-filtered most-recent connection selection, the shared
-    /// per-docId in-flight guard, atomic actor-turn continuation
+    /// Shared request path for `requestCreation`, `requestStrokeOp` and
+    /// `requestProvideContent`: capability-filtered most-recent connection
+    /// selection — narrowed to ONE named device when `deviceId` is non-nil
+    /// (M2c-1: only a device that HAS a document can serve its content;
+    /// passing nil keeps the original "any capable device" behaviour) — the
+    /// shared per-docId in-flight guard, atomic actor-turn continuation
     /// registration (no awaits before the send + timeout-task wiring), and a
     /// per-kind timeout. `send` fires synchronously inside the continuation
     /// closure — never suspends — so the reply-routing side can never race
     /// this registration into existence.
     private func performRequest(
-        docId: String, capability: String, timeout: Duration,
+        docId: String, capability: String, timeout: Duration, deviceId: String? = nil,
         send: @escaping (Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
-        guard let connection = connections.last(where: { $0.capabilities.contains(capability) }) else {
+        guard let connection = connections.last(where: {
+            $0.capabilities.contains(capability) && (deviceId == nil || $0.deviceId == deviceId)
+        }) else {
             throw DeviceCommandError.noDeviceAvailable
         }
         guard !docIdsInFlight.contains(docId) else {
