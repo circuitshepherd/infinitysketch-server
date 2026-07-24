@@ -280,16 +280,30 @@ public actor SessionManager {
     /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
     /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
     public func currentBytesOrFetch(docId: String) async -> Data? {
-        if let resident = await currentBytes(docId: docId) { return resident }
-        guard liveIndex[docId] != nil else { return nil }
-        guard let bytes = try? await fetchFromHolders(docId: docId) else { return nil }
+        // An EMPTY `createIfMissing` placeholder is not content — it is a slot the app opened
+        // moments before pushing (M2c-1 review F4). Treating it as resident is what made an agent
+        // read a BLANK document while a holder had the real thing, and it disagreed with
+        // `/api/docs`, which kept reporting the doc `hasContent: false` (fetchable) because nothing
+        // was durable. `store.exists` is what tells a placeholder from a genuinely-empty SAVED doc;
+        // a session's in-memory bytes cannot.
+        let placeholder = await isEmptyPlaceholder(docId: docId)
+        if !placeholder, let resident = await currentBytes(docId: docId) { return resident }
+        // From here a placeholder must never be worse off than before: every failure path below
+        // falls back to it, so a doc mid-creation still reads as the empty doc it is rather than
+        // turning a working call into `unknownDoc`.
+        guard liveIndex[docId] != nil else { return await currentBytes(docId: docId) }
+        guard let bytes = try? await fetchFromHolders(docId: docId) else {
+            return await currentBytes(docId: docId)
+        }
         // A concurrent writer may have landed content while we were fetching — the same reentrancy
         // window `subscribe`'s own notFound branch guards. Persisting our now-possibly-stale fetch
         // would silently revert it on disk, invisible until the session recycles and reloads.
         // Whatever is here now is authoritative: return it and save nothing.
         //
         // Both halves matter (M2c-1 review F5). A concurrent SUBSCRIBE leaves a live session…
-        if let live = await sessions[docId]?.currentBytes { return live }
+        // (`!isEmpty`, so the placeholder we are fetching FOR doesn't count as a racing writer and
+        // discard the very fetch it triggered — a real write is never empty.)
+        if let live = await sessions[docId]?.currentBytes, !live.isEmpty { return live }
         // …but a concurrent PROMOTION leaves none: `currentBytesOrFetch` writes straight to the
         // store and opens no session, and a session that wrote and then grace-tore-down is the same
         // observable state (bytes on disk, `sessions[docId] == nil`). A session-only re-check is
@@ -302,7 +316,22 @@ public actor SessionManager {
         // through the save below runs in ONE actor turn, with no window for a writer to interleave.
         if let durable = try? store.load(docId: docId) { return durable }
         try? store.save(docId: docId, bytes: bytes)
+        // F4: a placeholder session for this doc must ADOPT what we just promoted, so the session's
+        // bytes (what `.matchBytes` compares against), the store, and what we hand back all agree —
+        // otherwise a reader's write-back is rejected `docChangedDuringOp` forever. Conditional and
+        // checked inside the session actor, so a write that landed during this suspension wins and
+        // is never rolled back. No-op when no session exists (the ordinary promotion case).
+        _ = await sessions[docId]?.adoptIfEmpty(bytes: bytes)
         return bytes
+    }
+
+    /// True when the only thing here is an EMPTY session with nothing durable behind it — the
+    /// `createIfMissing` placeholder the app opens just before pushing. `store.exists` is the
+    /// discriminator: a genuinely-empty SAVED document is real content and must NOT be treated
+    /// as a placeholder (it would trigger a pointless fetch that could overwrite it).
+    private func isEmptyPlaceholder(docId: String) async -> Bool {
+        guard let live = await sessions[docId]?.currentBytes, live.isEmpty else { return false }
+        return (try? store.exists(docId: docId)) != true
     }
 
     public func subscribeStatus() -> (events: AsyncStream<ServerMessage>, token: UUID) {

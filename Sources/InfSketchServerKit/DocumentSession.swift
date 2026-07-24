@@ -137,6 +137,28 @@ actor DocumentSession {
     /// the live content without subscribing.
     var currentBytes: Data { bytes }
 
+    /// Adopt content fetched from a holder into an EMPTY `createIfMissing` placeholder (M2c-1
+    /// review F4). Returns false — changing nothing — if this session already holds content.
+    ///
+    /// Why the session and not just the store: `submit`'s `.matchBytes` CAS compares against
+    /// THESE bytes, so if a reader were handed fetched content while this session still held
+    /// empty, every read-then-write-back would be rejected `docChangedDuringOp` and could never
+    /// converge. Adoption keeps session, store and readers on one value.
+    ///
+    /// Why conditional, and why the check lives INSIDE this actor: the caller must suspend to
+    /// reach us, and a real write can land in that window. Checking emptiness here makes
+    /// check-and-set atomic, so a landed write is never rolled back to the fetched bytes. `seq` is
+    /// deliberately NOT bumped and nothing is broadcast: this is not a document edit, it is the
+    /// session learning what it always should have been holding. Subscribers converge through the
+    /// ordinary path — the app's create-push carries expect-absent, which the now-durable content
+    /// correctly rejects (`docExists`), rerouting it into the M1.5 refetch-and-union instead of
+    /// letting it clobber the holder's version.
+    func adoptIfEmpty(bytes newBytes: Data) -> Bool {
+        guard bytes.isEmpty else { return false }
+        bytes = newBytes
+        return true
+    }
+
     func subscribe() -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
