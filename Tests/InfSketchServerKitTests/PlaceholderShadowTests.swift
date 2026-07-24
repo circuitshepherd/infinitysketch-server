@@ -107,6 +107,11 @@ final class PlaceholderShadowTests: XCTestCase {
     /// A genuinely empty SAVED document is not a placeholder: it is real content and must be
     /// returned as-is, with no fetch. (`store.exists` is what tells the two apart — a session's
     /// in-memory bytes cannot.)
+    ///
+    /// The `subscribe` is load-bearing: it puts a LIVE session with empty bytes in front of the
+    /// saved doc, which is the only state where dropping the `store.exists` discriminator would
+    /// actually misfire. Without it `isEmptyPlaceholder` returns false at its first guard (no
+    /// session) and the discriminator this test exists for is never evaluated.
     func testADurablyEmptyDocumentIsNotTreatedAsAPlaceholder() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -116,10 +121,59 @@ final class PlaceholderShadowTests: XCTestCase {
             XCTFail("a durably-empty document is real content — it must not trigger a fetch")
             return Data("REAL".utf8)
         }
+        _ = try await manager.subscribe(docId: "Empty")   // live session, empty bytes, but SAVED
 
         let got = await manager.currentBytesOrFetch(docId: "Empty")
 
         XCTAssertEqual(got, Data(), "the saved empty document is returned unchanged")
+        XCTAssertEqual(try DirectoryDocumentStore(directory: dir).load(docId: "Empty"), Data(),
+                       "and is not overwritten by a fetch")
+    }
+
+    /// Pins the invariant the promotion exists to maintain: after it, the session's bytes and the
+    /// file are the SAME value (`DocumentSession.currentBytes` promises exactly this).
+    ///
+    /// Honest scope: this does NOT prove review finding #1's fix — it passes with the old
+    /// manager-side `store.save` too (verified by mutation), because the divergence needs the
+    /// manager's write to run CONCURRENTLY with the session's own `submit` write, which this test
+    /// never creates. That fix is structural rather than test-shaped: the store write now happens
+    /// inside the session actor, so it is serialized against `submit` by construction and the two
+    /// writes cannot overlap at all. Reproducing the overlap deterministically would need a store
+    /// fake that blocks inside `save`, i.e. blocking a cooperative-pool thread — not worth the
+    /// deadlock risk to re-prove what the actor model already guarantees.
+    func testPromotionLeavesSessionAndStoreAgreeing() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
+        await manager.setContentProvider { _, _ in Data("REAL".utf8) }
+        try await openPlaceholder(manager, docId: "Ghost")
+
+        _ = await manager.currentBytesOrFetch(docId: "Ghost")
+
+        let session = await manager.currentBytes(docId: "Ghost")
+        let file = try DirectoryDocumentStore(directory: dir).load(docId: "Ghost")
+        XCTAssertEqual(session, file, "session bytes and the file must not diverge")
+        XCTAssertEqual(file, Data("REAL".utf8))
+    }
+
+    /// A promotion that cannot be persisted must adopt NOTHING — otherwise the session would serve
+    /// in-memory-only content the store never received, `isEmptyPlaceholder` would go false, and no
+    /// later read would ever retry the fetch (review finding #2).
+    func testAFailedPersistAdoptsNothingSoTheFetchStaysRetryable() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
+        await manager.setContentProvider { _, _ in Data("REAL".utf8) }
+        try await openPlaceholder(manager, docId: "Ghost")
+
+        // Make the store un-writable for this docId by removing the directory out from under it.
+        try FileManager.default.removeItem(at: dir)
+
+        let got = await manager.currentBytesOrFetch(docId: "Ghost")
+
+        XCTAssertEqual(got, Data(), "an unpersistable promotion degrades to the placeholder")
+        let live = await manager.currentBytes(docId: "Ghost")
+        XCTAssertEqual(live, Data(), "the session must NOT hold content the store never got")
     }
 
     /// A placeholder with NO holder to ask still reads as empty — unchanged behaviour, and in
