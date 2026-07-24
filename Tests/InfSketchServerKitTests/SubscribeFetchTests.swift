@@ -37,7 +37,7 @@ final class SubscribeFetchTests: XCTestCase {
     func testSubscribeFetchesFromHolderAndPersists() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         await manager.setContentProvider { docId, deviceId in
             XCTAssertEqual(docId, "Ghost"); XCTAssertEqual(deviceId, "devA")
             return Data("PULLED".utf8)
@@ -57,8 +57,8 @@ final class SubscribeFetchTests: XCTestCase {
     func testFallsBackToTheNextHolder() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devB")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devB")
         await manager.setContentProvider { _, deviceId in
             if deviceId == "devA" { throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable }
             return Data("FROM-B".utf8)
@@ -68,11 +68,43 @@ final class SubscribeFetchTests: XCTestCase {
         XCTAssertEqual(try DirectoryDocumentStore(directory: dir).load(docId: "Ghost"), Data("FROM-B".utf8))
     }
 
+    /// A holder that returns EMPTY bytes (truncated/corrupt local file) must be skipped, not
+    /// persisted — otherwise the doc is saved and reported hasContent:true forever, shadowing
+    /// every real holder's copy. The next holder's real bytes win.
+    func testEmptyHolderBytesAreSkippedInFavourOfARealHolder() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devEmpty")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devReal")
+        await manager.setContentProvider { _, deviceId in
+            deviceId == "devEmpty" ? Data() : Data("REAL".utf8)
+        }
+
+        _ = try await manager.subscribe(docId: "Ghost")
+        XCTAssertEqual(try DirectoryDocumentStore(directory: dir).load(docId: "Ghost"), Data("REAL".utf8))
+    }
+
+    /// If the ONLY holder returns empty bytes, the subscribe fails and nothing is persisted —
+    /// an empty payload must never become durable content.
+    func testAllHoldersReturningEmptyPersistsNothing() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
+        await manager.setContentProvider { _, _ in Data() }
+
+        do {
+            _ = try await manager.subscribe(docId: "Ghost")
+            XCTFail("expected the subscribe to fail")
+        } catch {
+            XCTAssertThrowsError(try DirectoryDocumentStore(directory: dir).load(docId: "Ghost"))
+        }
+    }
+
     /// Every holder failed → the subscribe fails; nothing is persisted.
     func testAllHoldersFailingSurfacesAnError() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         await manager.setContentProvider { _, _ in throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable }
 
         do {
@@ -100,7 +132,7 @@ final class SubscribeFetchTests: XCTestCase {
     func testConcurrentSubscribesCoalesceIntoOneFetch() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         actor Counter { var n = 0; func bump() { n += 1 } }
         let calls = Counter()
         await manager.setContentProvider { _, _ in
@@ -120,7 +152,7 @@ final class SubscribeFetchTests: XCTestCase {
     func testCreateIfMissingDoesNotFetch() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         await manager.setContentProvider { _, _ in
             XCTFail("createIfMissing must not fetch"); return Data()
         }
@@ -137,7 +169,7 @@ final class SubscribeFetchTests: XCTestCase {
     func testConcurrentFirstSubscribesShareOneSessionAndBothKeepReceiving() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         await manager.setContentProvider { _, _ in
             try? await Task.sleep(for: .milliseconds(80))   // widen the reentrancy window
             return Data("PULLED".utf8)
@@ -173,7 +205,7 @@ final class SubscribeFetchTests: XCTestCase {
         let store = CountingStore(directory: dir)
         let manager = SessionManager(store: store)
 
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: "devA")
         await manager.setContentProvider { _, _ in
             try? await Task.sleep(for: .milliseconds(80))   // widen the reentrancy window
             return Data("PULLED".utf8)

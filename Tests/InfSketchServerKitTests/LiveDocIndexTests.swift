@@ -14,11 +14,18 @@ final class LiveDocIndexTests: XCTestCase {
         DocAdvertisement(docId: id, modifiedAt: Date(timeIntervalSince1970: seconds),
                          sizeBytes: size, thumbnail: thumb)
     }
+    /// One stable connectionId per device string — a device has a single live connection in these
+    /// tests. The reconnect-race test uses explicit distinct ids instead.
+    private var connIds: [String: UUID] = [:]
+    private func conn(_ device: String) -> UUID {
+        if let id = connIds[device] { return id }
+        let id = UUID(); connIds[device] = id; return id
+    }
 
     func testAdvertisementsPopulateTheIndexAndListAsMetadataOnly() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: conn("devA"), deviceId: "devA")
 
         let entry = await manager.liveEntry(docId: "Ghost")
         XCTAssertEqual(entry?.holders, ["devA"])
@@ -35,8 +42,8 @@ final class LiveDocIndexTests: XCTestCase {
     func testTwoDevicesUnionIntoOneEntryWithBothHolders() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Shared", size: 10, at: 100)], deviceId: "devA")
-        await manager.applyAdvertisements([ad("Shared", size: 99, at: 500)], deviceId: "devB")
+        await manager.applyAdvertisements([ad("Shared", size: 10, at: 100)], connectionId: conn("devA"), deviceId: "devA")
+        await manager.applyAdvertisements([ad("Shared", size: 99, at: 500)], connectionId: conn("devB"), deviceId: "devB")
 
         let entry = await manager.liveEntry(docId: "Shared")
         XCTAssertEqual(entry?.holders, ["devA", "devB"])
@@ -51,8 +58,8 @@ final class LiveDocIndexTests: XCTestCase {
     func testOlderAdvertisementAddsHolderWithoutClobberingMetadata() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Shared", size: 99, at: 500)], deviceId: "devB")
-        await manager.applyAdvertisements([ad("Shared", size: 10, at: 100)], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Shared", size: 99, at: 500)], connectionId: conn("devB"), deviceId: "devB")
+        await manager.applyAdvertisements([ad("Shared", size: 10, at: 100)], connectionId: conn("devA"), deviceId: "devA")
 
         let entry = await manager.liveEntry(docId: "Shared")
         XCTAssertEqual(entry?.holders, ["devA", "devB"])
@@ -64,20 +71,43 @@ final class LiveDocIndexTests: XCTestCase {
     func testDisconnectPrunesHolderAndDropsEntryWhenLastHolderLeaves() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Shared")], deviceId: "devA")
-        await manager.applyAdvertisements([ad("Shared")], deviceId: "devB")
+        await manager.applyAdvertisements([ad("Shared")], connectionId: conn("devA"), deviceId: "devA")
+        await manager.applyAdvertisements([ad("Shared")], connectionId: conn("devB"), deviceId: "devB")
 
-        await manager.removeAdvertisements(deviceId: "devA")
+        await manager.removeConnection(connectionId: conn("devA"), deviceId: "devA")
         let afterFirstRemove = await manager.liveEntry(docId: "Shared")
         XCTAssertEqual(afterFirstRemove?.holders, ["devB"])
         let countAfterFirstRemove = try await manager.listDocuments().count
         XCTAssertEqual(countAfterFirstRemove, 1)
 
-        await manager.removeAdvertisements(deviceId: "devB")
+        await manager.removeConnection(connectionId: conn("devB"), deviceId: "devB")
         let afterSecondRemove = await manager.liveEntry(docId: "Shared")
         XCTAssertNil(afterSecondRemove)
         let listedAfterSecondRemove = try await manager.listDocuments()
         XCTAssertTrue(listedAfterSecondRemove.isEmpty)
+    }
+
+    /// F2: a reconnect (a fresh connection for the SAME device) races the old socket's close.
+    /// Pruning by deviceId alone would let that stale close wipe the live connection's ads. The
+    /// device's documents must survive the OLD connection's close and vanish only when the NEW
+    /// (last live) connection also closes.
+    func testStaleConnectionCloseDoesNotWipeAReconnectedDevice() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let old = UUID(), new = UUID()
+        await manager.applyAdvertisements([ad("MyDoc")], connectionId: old, deviceId: "devA")
+        // Reconnect: a NEW connection for the same device advertises, before the old socket closes.
+        await manager.applyAdvertisements([ad("MyDoc")], connectionId: new, deviceId: "devA")
+
+        // The stale OLD connection finally closes — must NOT wipe the device.
+        await manager.removeConnection(connectionId: old, deviceId: "devA")
+        let stillThere = await manager.liveEntry(docId: "MyDoc")
+        XCTAssertEqual(stillThere?.holders, ["devA"], "a stale close must not drop the live connection's docs")
+
+        // The live connection closes — now the device really is gone.
+        await manager.removeConnection(connectionId: new, deviceId: "devA")
+        let gone = await manager.liveEntry(docId: "MyDoc")
+        XCTAssertNil(gone)
     }
 
     /// Content ALWAYS beats metadata: one row, hasContent true, never duplicated.
@@ -85,7 +115,7 @@ final class LiveDocIndexTests: XCTestCase {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
         try DirectoryDocumentStore(directory: dir).save(docId: "Real", bytes: Data("hi".utf8))
-        await manager.applyAdvertisements([ad("Real"), ad("Ghost")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Real"), ad("Ghost")], connectionId: conn("devA"), deviceId: "devA")
 
         let listed = try await manager.listDocuments().sorted { $0.id < $1.id }
         XCTAssertEqual(listed.map(\.id), ["Ghost", "Real"])
@@ -99,12 +129,12 @@ final class LiveDocIndexTests: XCTestCase {
     func testAdvertisementBatchReplacesThatDevicesPreviousContribution() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Keep"), ad("Dropped")], deviceId: "devA")
+        await manager.applyAdvertisements([ad("Keep"), ad("Dropped")], connectionId: conn("devA"), deviceId: "devA")
         let seeded = await manager.liveEntry(docId: "Dropped")
         XCTAssertNotNil(seeded)
 
-        // devA re-advertises WITHOUT "Dropped".
-        await manager.applyAdvertisements([ad("Keep")], deviceId: "devA")
+        // devA (same connection) re-advertises WITHOUT "Dropped".
+        await manager.applyAdvertisements([ad("Keep")], connectionId: conn("devA"), deviceId: "devA")
         let dropped = await manager.liveEntry(docId: "Dropped")
         XCTAssertNil(dropped, "stale doc must stop being listed")
         let kept = await manager.liveEntry(docId: "Keep")
@@ -115,11 +145,11 @@ final class LiveDocIndexTests: XCTestCase {
     func testReplacingOneDevicesBatchLeavesOtherHoldersIntact() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Shared")], deviceId: "devA")
-        await manager.applyAdvertisements([ad("Shared")], deviceId: "devB")
+        await manager.applyAdvertisements([ad("Shared")], connectionId: conn("devA"), deviceId: "devA")
+        await manager.applyAdvertisements([ad("Shared")], connectionId: conn("devB"), deviceId: "devB")
 
         // devA re-advertises nothing at all; devB still holds "Shared".
-        await manager.applyAdvertisements([], deviceId: "devA")
+        await manager.applyAdvertisements([], connectionId: conn("devA"), deviceId: "devA")
         let shared = await manager.liveEntry(docId: "Shared")
         XCTAssertEqual(shared?.holders, ["devB"])
     }
@@ -128,7 +158,7 @@ final class LiveDocIndexTests: XCTestCase {
     func testAdvertisementWithoutDeviceIdIsIgnored() async throws {
         let (manager, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
-        await manager.applyAdvertisements([ad("Ghost")], deviceId: nil)
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: UUID(), deviceId: nil)
         let entry = await manager.liveEntry(docId: "Ghost")
         XCTAssertNil(entry)
         let listed = try await manager.listDocuments()
