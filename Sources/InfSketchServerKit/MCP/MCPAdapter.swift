@@ -1165,15 +1165,15 @@ public actor MCPAdapter {
                             What document content to render, alongside any ephemeral \
                             strokes below. "document" (default): every stroke, placed \
                             image, and placed text. "strokes": only the strokes named \
-                            by strokeKeys — no images or texts. "none": nothing from \
+                            by strokeIds — no images or texts. "none": nothing from \
                             the document.
                             """,
                     ]),
-                    "strokeKeys": .object([
+                    "strokeIds": .object([
                         "type": "array",
                         "description": """
-                            With include: "strokes", the composite stroke keys (as \
-                            returned by list_strokes) to show.
+                            With include: "strokes", the stroke ids (as returned by \
+                            list_strokes) to show.
                             """,
                         "items": .object(["type": "string"]),
                     ]),
@@ -1624,7 +1624,7 @@ public actor MCPAdapter {
             name: "select_elements",
             description: """
                 Select specific elements by id on a connected device's live rect-select, replacing \
-                any existing selection. Pass `strokeKeys` (composite stroke keys, from \
+                any existing selection. Pass `strokeIds` (stroke ids, from \
                 `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
                 `get_selection` or the document summary) — at least one id across the three arrays \
                 is required (enforced device-side). REQUIRES a connected `controlSelection` device.
@@ -1633,9 +1633,9 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id."]),
-                    "strokeKeys": .object([
+                    "strokeIds": .object([
                         "type": "array",
-                        "description": "Composite stroke keys to select.",
+                        "description": "Stroke ids to select.",
                         "items": .object(["type": "string"]),
                     ]),
                     "textIds": .object([
@@ -1825,10 +1825,10 @@ public actor MCPAdapter {
             name: "copy_elements",
             description: """
                 Copies named strokes/texts/images from document `source` INTO document \
-                `target`, as FRESH clones (fresh stroke composite keys / ids) — unlike \
+                `target`, as FRESH clones (fresh ids) — unlike \
                 merge_docs, elements are never deduped by identity, so copying the same \
                 source element twice yields two distinct clones. `source` is left \
-                untouched; `target` gains the copies. At least one of `strokeKeys`/ \
+                untouched; `target` gains the copies. At least one of `strokeIds`/ \
                 `textIds`/`imageIds` is required. \
                 REQUIRES a connected device with the copyElements capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
@@ -1840,9 +1840,9 @@ public actor MCPAdapter {
                 "properties": .object([
                     "source": .object(["type": "string", "description": "The document to copy FROM (left unchanged)."]),
                     "target": .object(["type": "string", "description": "The document to copy INTO (gains the clones)."]),
-                    "strokeKeys": .object([
+                    "strokeIds": .object([
                         "type": "array",
-                        "description": "Composite stroke keys to clone, from list_strokes/get_strokes.",
+                        "description": "Stroke ids to clone, from list_strokes/get_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
                     "textIds": .object([
@@ -1864,7 +1864,7 @@ public actor MCPAdapter {
             description: """
                 Sets the z-order (draw order) of named strokes/texts/images within ONE \
                 document — bring-to-front or send-to-back, authored by a connected \
-                InfinitySketch device. At least one of `strokeKeys`/`textIds`/`imageIds` \
+                InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds` \
                 is required. `mode` selects the direction: "front" moves the named \
                 elements to the top of the draw order, "back" to the bottom — each \
                 WITHIN its own element type's stacking, mirroring the app's \
@@ -1883,9 +1883,9 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
-                    "strokeKeys": .object([
+                    "strokeIds": .object([
                         "type": "array",
-                        "description": "Composite stroke keys to reorder, from list_strokes/get_strokes.",
+                        "description": "Stroke ids to reorder, from list_strokes/get_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
                     "textIds": .object([
@@ -3030,26 +3030,26 @@ public actor MCPAdapter {
     // grids must not be picked for this) and validated server-side on
     // `mode` (unlike orderedIds above, "front"/"back" IS a closed
     // enumeration the server can and does check before ever contacting a
-    // device). At least one of strokeKeys/textIds/imageIds is required —
+    // device). At least one of strokeIds/textIds/imageIds is required —
     // an op with no ids at all would be a silent no-op relayed to the
     // device for nothing.
     private func callReorderElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys") ?? []
+            let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let mode = try Self.stringArg(arguments, "mode")
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
-            guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
-            let count = strokeKeys.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("reorderElements"),
-                    "strokeKeys": .array(strokeKeys.map(Value.string)),
+                    "strokeIds": .array(strokeIds.map(Value.string)),
                     "textIds": .array(textIds.map(Value.string)),
                     "imageIds": .array(imageIds.map(Value.string)),
                     "mode": .string(mode),
@@ -3114,7 +3114,7 @@ public actor MCPAdapter {
     /// relayed present-only — an argument the caller omitted is omitted from
     /// the envelope too, never sent as an explicit null (see
     /// renderSketchWithOnlyDocIdOmitsEveryOptionalField); deep validation
-    /// (stroke shape, unknown strokeKeys, degenerate rect, pixel budget) is
+    /// (stroke shape, unknown strokeIds, degenerate rect, pixel budget) is
     /// the device's job, surfaced verbatim as `deviceFailed: <reason>`.
     private func callRenderSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
@@ -3167,7 +3167,7 @@ public actor MCPAdapter {
     /// verbatim into the op-spec envelope alongside `"op": "render"` — every
     /// one of them optional; see `callRenderSketch`.
     private static let renderSpecParameterNames = [
-        "include", "strokeKeys", "strokes", "rect", "padding", "background", "axes", "maxPixels",
+        "include", "strokeIds", "strokes", "rect", "padding", "background", "axes", "maxPixels",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -3580,7 +3580,7 @@ public actor MCPAdapter {
     }
 
     /// Selects specific elements by id, replacing any existing selection.
-    /// Each of `strokeKeys`/`textIds`/`imageIds` rides into the envelope
+    /// Each of `strokeIds`/`textIds`/`imageIds` rides into the envelope
     /// only when the caller actually supplied it — mirrors
     /// `callTransformSelection`'s conditional `expect`. Deep validation
     /// ("at least one id across the three arrays") is the device's job,
@@ -3588,7 +3588,7 @@ public actor MCPAdapter {
     private func callSelectElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys")
+            let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds")
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
 
@@ -3597,8 +3597,8 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("selectElements")]
-            if let strokeKeys {
-                envelope["strokeKeys"] = .array(strokeKeys.map(Value.string))
+            if let strokeIds {
+                envelope["strokeIds"] = .array(strokeIds.map(Value.string))
             }
             if let textIds {
                 envelope["textIds"] = .array(textIds.map(Value.string))
@@ -3938,7 +3938,7 @@ public actor MCPAdapter {
     //
     // Parallel to merge_docs (MARK above), but a COPY not a merge: named
     // strokes/texts/images from `source` are cloned into `target` as FRESH
-    // elements (fresh stroke keys / ids), never deduped by identity — copying
+    // elements (fresh ids), never deduped by identity — copying
     // the same source element twice yields two distinct clones (the
     // contrast the app-side `CopyElements.perform`'s
     // `copyingSameStrokeTwiceMakesTwoDistinctClones` test pins). `source`'s
@@ -3951,22 +3951,22 @@ public actor MCPAdapter {
         do {
             let source = try Self.nonEmptyStringArg(arguments, "source")
             let target = try Self.nonEmptyStringArg(arguments, "target")
-            let strokeKeys = try Self.optionalStringArrayArg(arguments, "strokeKeys") ?? []
+            let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeKeys.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
             guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
-            let count = strokeKeys.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("copyElements"),
                     "source": .string(sourceBytes.base64EncodedString()),
-                    "strokeKeys": .array(strokeKeys.map(Value.string)),
+                    "strokeIds": .array(strokeIds.map(Value.string)),
                     "textIds": .array(textIds.map(Value.string)),
                     "imageIds": .array(imageIds.map(Value.string)),
                 ]))
@@ -4251,7 +4251,7 @@ public actor MCPAdapter {
     /// An optional JSON array argument whose elements must all be strings,
     /// returning `nil` when the key is absent/null — mirrors
     /// `optionalStringArg`, but for arrays. Used by `select_elements`'s
-    /// `strokeKeys`/`textIds`/`imageIds`: each rides into the op-spec
+    /// `strokeIds`/`textIds`/`imageIds`: each rides into the op-spec
     /// envelope only when the caller actually supplied it (unlike
     /// `nonEmptyStringArrayArg`, an empty array is not rejected here — the
     /// device enforces "at least one id across all three arrays").

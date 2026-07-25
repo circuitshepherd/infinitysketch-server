@@ -2576,7 +2576,7 @@ private actor FakeStrokeOpDevice {
     /// literal, including the nested `strokes` item shape shared with
     /// `draw_strokes` (points/width/color/inkType):
     ///
-    ///     {"op": "render", "include": …, "strokeKeys": […],
+    ///     {"op": "render", "include": …, "strokeIds": […],
     ///      "strokes": [{"points": […], "width": …, "color": …, "inkType": …}],
     ///      "rect": […], "padding": …, "background": …, "axes": …, "maxPixels": …}
     @Test func renderSketchSpecEnvelopeMatchesCanonicalShape() async throws {
@@ -2605,7 +2605,7 @@ private actor FakeStrokeOpDevice {
             arguments: [
                 "docId": "d",
                 "include": .string("strokes"),
-                "strokeKeys": .array([.string("seed123:1.0")]),
+                "strokeIds": .array([.string("seed123:1.0")]),
                 "strokes": strokesArg,
                 "rect": .array([.int(0), .int(0), .int(100), .int(200)]),
                 "padding": .double(15),
@@ -2619,11 +2619,11 @@ private actor FakeStrokeOpDevice {
         let envelope = try #require(
             JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(Set(envelope.keys) == [
-            "op", "include", "strokeKeys", "strokes", "rect", "padding", "background", "axes", "maxPixels",
+            "op", "include", "strokeIds", "strokes", "rect", "padding", "background", "axes", "maxPixels",
         ])
         #expect(envelope["op"] as? String == "render")
         #expect(envelope["include"] as? String == "strokes")
-        #expect(envelope["strokeKeys"] as? [String] == ["seed123:1.0"])
+        #expect(envelope["strokeIds"] as? [String] == ["seed123:1.0"])
         #expect(envelope["rect"] as? [Double] == [0, 0, 100, 200])
         #expect(envelope["padding"] as? Double == 15)
         #expect(envelope["background"] as? String == "paper+grid")
@@ -3686,7 +3686,7 @@ private actor FakeStrokeOpDevice {
     }
 
     /// Pins the exact op-spec envelope `select_elements` relays: each of
-    /// `strokeKeys`/`textIds`/`imageIds` supplied by the caller rides through
+    /// `strokeIds`/`textIds`/`imageIds` supplied by the caller rides through
     /// verbatim; `imageIds` is omitted here to also prove an unsupplied
     /// array is left out of the envelope entirely.
     @Test func selectElementsRelaysProvidedArraysAndOmitsUnsuppliedOnes() async throws {
@@ -3704,7 +3704,7 @@ private actor FakeStrokeOpDevice {
             name: "select_elements",
             arguments: [
                 "docId": "d",
-                "strokeKeys": .array([.string("seed1:1.0")]),
+                "strokeIds": .array([.string("seed1:1.0")]),
                 "textIds": .array([.string("text-1"), .string("text-2")]),
             ])
         #expect(isError != true)
@@ -3713,9 +3713,9 @@ private actor FakeStrokeOpDevice {
         let received = try #require(await device.receivedRequests.first)
         let envelope = try #require(
             JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(Set(envelope.keys) == ["op", "strokeKeys", "textIds"])
+        #expect(Set(envelope.keys) == ["op", "strokeIds", "textIds"])
         #expect(envelope["op"] as? String == "selectElements")
-        #expect(envelope["strokeKeys"] as? [String] == ["seed1:1.0"])
+        #expect(envelope["strokeIds"] as? [String] == ["seed1:1.0"])
         #expect(envelope["textIds"] as? [String] == ["text-1", "text-2"])
 
         await server.stop()
@@ -4353,7 +4353,7 @@ private actor FakeStrokeOpDevice {
     // cloned reply is written back to `target` under the standard byte-CAS.
     // `source` is read but never written.
 
-    /// Relay: callCopyElements ships {op, source(base64), strokeKeys,
+    /// Relay: callCopyElements ships {op, source(base64), strokeIds,
     /// textIds, imageIds} to the device, docBytes = target's bytes.
     @Test func copyElementsRelaysSpecAndCapability() async throws {
         let targetBytes = Fixtures.docBytes
@@ -4370,7 +4370,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
-            arguments: ["source": "s", "target": "t", "strokeKeys": ["k1"]])
+            arguments: ["source": "s", "target": "t", "strokeIds": ["k1"]])
         #expect(isError != true)
         #expect(toolResultText(content).contains("from s into t"))
 
@@ -4381,7 +4381,7 @@ private actor FakeStrokeOpDevice {
         #expect(spec["op"] as? String == "copyElements")
         let encodedSource = try #require(spec["source"] as? String)  // base64 source rides in the spec
         #expect(Data(base64Encoded: encodedSource) == sourceBytes)
-        #expect(spec["strokeKeys"] as? [String] == ["k1"])
+        #expect(spec["strokeIds"] as? [String] == ["k1"])
 
         let rawContents = try await client.readResource(uri: "infsketch://doc/t/raw")
         let rawBlob = try #require(rawContents[0].blob)
@@ -4413,7 +4413,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
-            arguments: ["source": "s", "target": "t", "strokeKeys": ["k1"]])
+            arguments: ["source": "s", "target": "t", "strokeIds": ["k1"]])
         #expect(isError != true)
         #expect(toolResultText(content).contains("newkey1"))
 
@@ -4430,7 +4430,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
-            arguments: ["source": "ghost", "target": "d", "strokeKeys": ["k1"]])
+            arguments: ["source": "ghost", "target": "d", "strokeIds": ["k1"]])
         #expect(isError == true)
         #expect(toolResultText(content) == "sourceNotFound")
 
@@ -4446,7 +4446,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
-            arguments: ["source": "d", "target": "ghost", "strokeKeys": ["k1"]])
+            arguments: ["source": "d", "target": "ghost", "strokeIds": ["k1"]])
         #expect(isError == true)
         #expect(toolResultText(content) == "targetNotFound")
 
@@ -4463,14 +4463,14 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
-            arguments: ["source": "d", "target": "d", "strokeKeys": ["k1"]])
+            arguments: ["source": "d", "target": "d", "strokeIds": ["k1"]])
         #expect(isError == true)
         #expect(toolResultText(content) == "invalidArguments")
 
         await server.stop()
     }
 
-    /// No ids at all (strokeKeys/textIds/imageIds all omitted) ->
+    /// No ids at all (strokeIds/textIds/imageIds all omitted) ->
     /// "invalidArguments", checked before either doc is looked up (neither
     /// "a" nor "b" need exist for this to fail).
     @Test func copyElementsNoIdsErrors() async throws {
@@ -4496,7 +4496,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         let (content, isError) = try await client.callTool(
-            name: "copy_elements", arguments: ["source": "", "target": "d", "strokeKeys": ["k1"]])
+            name: "copy_elements", arguments: ["source": "", "target": "d", "strokeIds": ["k1"]])
         #expect(isError == true)
         #expect(toolResultText(content) == "invalidArgument: source")
 
@@ -5000,7 +5000,7 @@ private actor FakeStrokeOpDevice {
     // Bring-to-front/send-to-back for strokes/texts/images, authored by a
     // connected device — the same shape as reorder_grids above, but WITHIN
     // one document's element z-order rather than the grid stack. Relays
-    // {op:"reorderElements", strokeKeys, textIds, imageIds, mode} through
+    // {op:"reorderElements", strokeIds, textIds, imageIds, mode} through
     // broker.requestStrokeOp, gated on the "reorderElements" capability, and
     // writes the reply back under the standard byte-CAS.
 
@@ -5017,14 +5017,14 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"], "mode": "front"])
+            name: "reorder_elements", arguments: ["docId": "d", "strokeIds": ["k1"], "mode": "front"])
         #expect(isError != true)
         #expect(toolResultText(content).contains("moved 1 element(s) to front in d"))
         let received = try #require(await device.receivedRequests.first)
         let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(spec["op"] as? String == "reorderElements")
         #expect(spec["mode"] as? String == "front")
-        #expect(spec["strokeKeys"] as? [String] == ["k1"])
+        #expect(spec["strokeIds"] as? [String] == ["k1"])
     }
 
     /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
@@ -5039,7 +5039,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "reorder_elements", arguments: ["docId": "ghost", "strokeKeys": ["k1"], "mode": "front"])
+            name: "reorder_elements", arguments: ["docId": "ghost", "strokeIds": ["k1"], "mode": "front"])
         #expect(isError == true)
         #expect(toolResultText(content) == "unknownDoc")
         #expect(await device.receivedRequests.isEmpty)
@@ -5056,14 +5056,14 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         let (content, isError) = try await client.callTool(
-            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"], "mode": "sideways"])
+            name: "reorder_elements", arguments: ["docId": "d", "strokeIds": ["k1"], "mode": "sideways"])
         #expect(isError == true)
         #expect(toolResultText(content) == "invalidArguments")
 
         await server.stop()
     }
 
-    /// No ids at all (strokeKeys/textIds/imageIds all omitted) ->
+    /// No ids at all (strokeIds/textIds/imageIds all omitted) ->
     /// `invalidArguments`.
     @Test func reorderElementsNoIdsErrors() async throws {
         let (server, port, task) = try await startServer()  // seeds "d"
@@ -5090,7 +5090,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         let (content, isError) = try await client.callTool(
-            name: "reorder_elements", arguments: ["docId": "d", "strokeKeys": ["k1"]])
+            name: "reorder_elements", arguments: ["docId": "d", "strokeIds": ["k1"]])
         #expect(isError == true)
         #expect(toolResultText(content) == "missingArgument: mode")
 
