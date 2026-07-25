@@ -180,6 +180,10 @@ public enum ClientMessage: Equatable, Sendable {
     case subscribeStatus
     case unsubscribeStatus
     case listDocs
+    /// Answers a `ServerMessage.ping`. Carries nothing: a connection has at most one ping
+    /// outstanding, and ANY inbound message clears it — this exists only so a client with
+    /// nothing else to say can still prove it is reading.
+    case pong
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
     case watchDoc(docId: String)
@@ -226,6 +230,8 @@ extension ClientMessage: Codable {
             self = .unsubscribeStatus
         case "listDocs":
             self = .listDocs
+        case "pong":
+            self = .pong
         case "transferEnd":
             self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
         case "transferAbort":
@@ -315,6 +321,8 @@ extension ClientMessage: Codable {
             try c.encode("unsubscribeStatus", forKey: .type)
         case .listDocs:
             try c.encode("listDocs", forKey: .type)
+        case .pong:
+            try c.encode("pong", forKey: .type)
         case .transferEnd(let transferId):
             try c.encode("transferEnd", forKey: .type)
             try c.encode(transferId, forKey: .transferId)
@@ -374,6 +382,10 @@ public enum ServerMessage: Equatable, Sendable {
     case resyncRequired(docId: String, seq: Int)
     case statusEvent(payload: StatusPayload)
     case error(reason: String)
+    /// Asks the peer to prove it is still reading. Sent when a connection has been emitted more
+    /// than `SessionConfig.outboundByteBudget` since its last inbound message, or when it has
+    /// been silent for `SessionConfig.keepaliveIdleInterval`. See `ConnectionHealth`.
+    case ping
     case docList(docs: [DocListEntry])
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
@@ -426,6 +438,8 @@ extension ServerMessage: Codable {
             self = .statusEvent(payload: try c.decode(StatusPayload.self, forKey: .payload))
         case "error":
             self = .error(reason: try c.decode(String.self, forKey: .reason))
+        case "ping":
+            self = .ping
         case "docList":
             self = .docList(docs: try c.decode([DocListEntry].self, forKey: .docs))
         case "transferEnd":
@@ -505,6 +519,8 @@ extension ServerMessage: Codable {
         case .error(let reason):
             try c.encode("error", forKey: .type)
             try c.encode(reason, forKey: .reason)
+        case .ping:
+            try c.encode("ping", forKey: .type)
         case .docList(let docs):
             try c.encode("docList", forKey: .type)
             try c.encode(docs, forKey: .docs)

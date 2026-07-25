@@ -38,6 +38,25 @@ public struct SessionConfig: Sendable {
     /// under the ~60 s timeout typical MCP clients apply, since a client that gives
     /// up orphans the fetch.
     public var fetchTotalTimeout: Duration
+    /// Bytes a connection may be sent since the peer last proved it is reading, before the
+    /// server asks it to prove that again with a `ping`. Crossing this is NOT a disconnect —
+    /// see `ConnectionHealth`, which explains why asking is load-bearing.
+    ///
+    /// 64 MB is roughly ten large documents in flight: one broadcast event carries a WHOLE
+    /// document (the bundled Example B is ~2 MB, Example 1 ~5.8 MB), and a healthy client on a
+    /// LAN drains one in milliseconds. Far above any legitimate burst, far below a memory
+    /// problem.
+    public var outboundByteBudget: Int
+    /// Time with no proof of life before an unprompted `ping`. This is what reaps a half-open
+    /// socket — a device that slept or lost WiFi without a FIN, whose subscriptions would
+    /// otherwise hold its document session open forever.
+    public var keepaliveIdleInterval: Duration
+    /// How long a peer has to answer a `ping` before the connection is dropped.
+    public var keepalivePingGrace: Duration
+    /// How often the per-connection timer calls `ConnectionHealth.tick`. It only has to be fine
+    /// enough to observe `keepalivePingGrace` with reasonable precision — the deadlines
+    /// themselves are computed from timestamps, not from tick counts.
+    public var keepaliveTickInterval: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -47,7 +66,11 @@ public struct SessionConfig: Sendable {
         mcpSessionCleanupInterval: Duration = .seconds(60),
         createDocTimeout: Duration = .seconds(10),
         strokeOpTimeout: Duration = .seconds(20),
-        fetchTotalTimeout: Duration = .seconds(30)
+        fetchTotalTimeout: Duration = .seconds(30),
+        outboundByteBudget: Int = 64 * 1024 * 1024,
+        keepaliveIdleInterval: Duration = .seconds(30),
+        keepalivePingGrace: Duration = .seconds(10),
+        keepaliveTickInterval: Duration = .seconds(5)
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
@@ -58,6 +81,10 @@ public struct SessionConfig: Sendable {
         self.createDocTimeout = createDocTimeout
         self.strokeOpTimeout = strokeOpTimeout
         self.fetchTotalTimeout = fetchTotalTimeout
+        self.outboundByteBudget = outboundByteBudget
+        self.keepaliveIdleInterval = keepaliveIdleInterval
+        self.keepalivePingGrace = keepalivePingGrace
+        self.keepaliveTickInterval = keepaliveTickInterval
     }
 }
 
@@ -305,6 +332,13 @@ actor DocumentSession {
             case .dropped, .terminated:
                 // Bounded-buffer overflow (or consumer gone): disconnect; the
                 // client recovers by re-subscribing (fresh snapshot in v0).
+                //
+                // NOT the primary guard against a slow SOCKET, despite appearances.
+                // `WSAdapter.Connection.pump` drains this stream as fast as events arrive and
+                // re-yields into the connection's unbounded `output`, so this bound does not
+                // engage for a slow reader — `ConnectionHealth` handles that case. What this
+                // still covers is a `pump` task that is itself suspended or descheduled, which
+                // nothing else notices.
                 subscribers.removeValue(forKey: token)?.finish()
             default:
                 break

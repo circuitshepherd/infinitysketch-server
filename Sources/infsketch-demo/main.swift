@@ -88,6 +88,10 @@ let printer = Task {
                 print("event  seq=\(seq)  kind=\(kind)  opId=\(opId)")
             case .reject(_, let opId, let reason, _):
                 print("REJECT opId=\(opId)  reason=\(reason)")
+            case .ping:
+                // The server drops a connection that will not prove it is reading; this demo
+                // client sends nothing for `interval` seconds at a time, so it must answer.
+                try await send(.pong)
             default:
                 print("received: \(message)")
             }

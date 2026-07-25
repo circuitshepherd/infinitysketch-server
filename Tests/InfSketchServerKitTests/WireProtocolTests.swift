@@ -299,3 +299,37 @@ import InfSketchWire
         #expect(swappedReply.resolvingBulk(with: bigDoc) == reply)
     }
 }
+
+/// Liveness has to be an application-level message: FlyingFox's `WSMessage` is only
+/// `.text`/`.data`/`.close`, so a handler cannot send a protocol-level ping, and an inbound
+/// pong is dropped by `WSHandler` before it ever reaches the handler (`makeMessage` and
+/// `makeResponseFrames` both return nil for it).
+struct WirePingPongTests {
+    @Test func serverPingRoundTrips() throws {
+        let json = try ServerMessage.ping.jsonText()
+        #expect(json.contains("\"type\":\"ping\""))
+        let decoded = try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
+        guard case .ping = decoded else {
+            Issue.record("expected .ping, got \(decoded)")
+            return
+        }
+    }
+
+    @Test func clientPongRoundTrips() throws {
+        let json = try ClientMessage.pong.jsonText()
+        #expect(json.contains("\"type\":\"pong\""))
+        let decoded = try JSONDecoder().decode(ClientMessage.self, from: Data(json.utf8))
+        guard case .pong = decoded else {
+            Issue.record("expected .pong, got \(decoded)")
+            return
+        }
+    }
+
+    /// A ping carries nothing — no correlation id, because only one is ever outstanding per
+    /// connection and ANY inbound message clears it. Pinning the exact wire text keeps the
+    /// hand-written web-UI and demo clients honest.
+    @Test func thePingAndPongWireTextIsExactlyTheTypeTag() throws {
+        #expect(try ServerMessage.ping.jsonText() == #"{"type":"ping"}"#)
+        #expect(try ClientMessage.pong.jsonText() == #"{"type":"pong"}"#)
+    }
+}
