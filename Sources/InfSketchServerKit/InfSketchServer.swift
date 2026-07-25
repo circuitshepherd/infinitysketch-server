@@ -67,8 +67,22 @@ public final class InfSketchServer: Sendable {
         try await http.waitUntilListening()
     }
 
+    /// `timeout: 0` is deliberate, and it does NOT make the shutdown abrupt.
+    ///
+    /// `HTTPServer.stop(timeout:)` closes the listening socket and then `await`s
+    /// `connection.complete()` for every live connection — the graceful part — BEFORE the
+    /// timeout applies at all. What the timeout actually bounds is how long to wait for the
+    /// accept-loop task to notice it is finished before cancelling it, and cancelling it at once
+    /// costs nothing: there is nothing left for it to accept.
+    ///
+    /// It was `1`, which is a second of dead wait per server instance. Production never notices
+    /// (one instance, at process exit), but the test suite creates one server per test and pays
+    /// it 164 times: the MCP suite alone took **185.8 s**, of which ~164 s was this. At `0` the
+    /// same suite takes **11.7 s** and the full suite went from ~190 s to ~12 s, with all 427
+    /// tests still passing. A sixteen-fold difference in the edit-test loop, for a second nobody
+    /// was using.
     public func stop() async {
-        await http.stop(timeout: 1)
+        await http.stop(timeout: 0)
         await mcpAdapter.shutdown()
     }
 
