@@ -1,6 +1,13 @@
 import Foundation
+import InfSketchWire
 
 /// The v0 overview page, embedded so the binary is self-contained.
+///
+/// Both scripts interpolate `WireProtocol.version` into their `hello` rather than hardcoding a
+/// literal. These pages ship inside the same binary that serves them, so they are never
+/// legitimately stale — but a hardcoded number silently rots on the next wire addition, and the
+/// symptom (the server answering `unsupportedVersion` to its own web UI) points nowhere near
+/// the cause.
 public enum WebUI {
     public static let indexHTML = #"""
     <!doctype html>
@@ -63,7 +70,7 @@ public enum WebUI {
       const ws = new WebSocket(`ws://${location.host}/ws`);
       ws.onopen = () => {
         statusEl.textContent = "live";
-        ws.send(JSON.stringify({ type: "hello", protocolVersion: 1, capabilities: [] }));
+        ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
         ws.send(JSON.stringify({ type: "subscribeStatus" }));
       };
       ws.onmessage = (e) => {
@@ -140,7 +147,7 @@ public enum WebUI {
         function connect() {
           const ws = new WebSocket(`ws://${location.host}/ws`);
           ws.onopen = () => {
-            ws.send(JSON.stringify({ type: "hello", protocolVersion: 1, capabilities: [] }));
+            ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
             ws.send(JSON.stringify({ type: "watchDoc", docId: docId }));
           };
           ws.onmessage = (e) => {

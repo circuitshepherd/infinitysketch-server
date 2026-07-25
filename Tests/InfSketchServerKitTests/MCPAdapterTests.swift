@@ -290,9 +290,9 @@ private actor FakeCreateDocDevice {
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
         ws.resume()
-        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: ["createDoc"], deviceId: nil).jsonText()))
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: 1) else {
+        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }
@@ -374,9 +374,9 @@ private actor FakeStrokeOpDevice {
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
         ws.resume()
-        try await ws.send(.string(ClientMessage.hello(protocolVersion: 1, capabilities: Array(capabilities), deviceId: nil).jsonText()))
+        try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: Array(capabilities), deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: 1) else {
+        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }

@@ -20,6 +20,22 @@ import Foundation
 /// user idle, sends nothing back for as long as that lasts — and that is precisely the
 /// multi-device case the product exists to support. So the budget opens a question, and only
 /// silence in answer to it is a verdict.
+///
+/// **Why a budget ping's deadline is not the flat grace.** The ping is not delivered when it is
+/// decided — it is YIELDED onto the same FIFO `output` stream that already holds the backlog
+/// which triggered it, and FlyingFox drains that stream strictly in order. The peer cannot even
+/// SEE the question until it has drained every byte queued ahead of it, which at the moment of
+/// the budget crossing is `bytesSinceProof` — up to `outboundByteBudget`, 64 MB by default.
+/// Starting a flat 10 s clock at enqueue time therefore drops a perfectly healthy passive
+/// receiver on a slow link for failing to answer a question it has not yet received, which is
+/// exactly the client the "ask, don't drop" rule above exists to protect.
+///
+/// So a budget ping records how many bytes sit AHEAD of it (bytes emitted afterwards queue
+/// BEHIND the ping and cannot delay it) and its deadline becomes
+/// `max(pingGrace, bytesAheadOfPing / assumedMinimumDrainRate)` — at least long enough to
+/// DELIVER the question, and never shorter than the ordinary grace. An idle-timer ping has no
+/// backlog (`bytesAheadOfPing == 0`) and so keeps the flat grace exactly, which is right: a
+/// genuine half-open socket has nothing queued to excuse its silence.
 struct ConnectionHealth {
     enum DropReason: String, Equatable, Sendable {
         case unresponsive
@@ -34,30 +50,58 @@ struct ConnectionHealth {
     private let byteBudget: Int
     private let idleInterval: Duration
     private let pingGrace: Duration
+    /// Bytes per second. See the type comment: this converts the backlog queued ahead of a
+    /// budget ping into the time the peer needs merely to REACH the question.
+    private let assumedMinimumDrainRate: Int
 
     private var bytesSinceProof = 0
     private var lastProofAt: ContinuousClock.Instant
     private var pingSentAt: ContinuousClock.Instant?
+    /// Bytes that were queued ahead of the outstanding ping when it was sent, and so must drain
+    /// before the peer can see it. Zero for an idle-timer ping. Only meaningful while
+    /// `pingSentAt != nil`; `sendPing` is the single writer of both, so they cannot disagree.
+    private var bytesAheadOfPing = 0
     /// Set when `.drop` is first returned. Every later input repeats it, so a pong racing the
     /// close cannot revive a connection the server has already given up on.
     private var dropped: DropReason?
 
     init(
         byteBudget: Int, idleInterval: Duration, pingGrace: Duration,
-        now: ContinuousClock.Instant
+        assumedMinimumDrainRate: Int, now: ContinuousClock.Instant
     ) {
         self.byteBudget = byteBudget
         self.idleInterval = idleInterval
         self.pingGrace = pingGrace
+        // Clamped: a zero or negative rate would divide by zero (or compute a negative
+        // allowance) in `pingDeadlineAllowance`. A misconfigured knob must not crash a
+        // connection, and 1 B/s only ever makes the deadline more generous.
+        self.assumedMinimumDrainRate = max(1, assumedMinimumDrainRate)
         self.lastProofAt = now
+    }
+
+    /// How long the outstanding ping may go unanswered. Integer-second granularity is deliberate:
+    /// the tick that observes this runs at whole-second resolution anyway, and the quantity is a
+    /// floor on delivery time, not a measurement.
+    private var pingDeadlineAllowance: Duration {
+        max(pingGrace, .seconds(bytesAheadOfPing / assumedMinimumDrainRate))
+    }
+
+    /// The one place `pingSentAt` and `bytesAheadOfPing` are written, so the deadline can never
+    /// be computed from a backlog belonging to some earlier ping.
+    private mutating func sendPing(at now: ContinuousClock.Instant, bytesAhead: Int) -> Action {
+        pingSentAt = now
+        bytesAheadOfPing = bytesAhead
+        return .ping
     }
 
     mutating func noteEmitted(bytes: Int, now: ContinuousClock.Instant) -> Action {
         if let dropped { return .drop(reason: dropped) }
         bytesSinceProof += bytes
         guard bytesSinceProof > byteBudget, pingSentAt == nil else { return .none }
-        pingSentAt = now
-        return .ping
+        // `bytesSinceProof` already includes the emission that just crossed the budget, and that
+        // emission IS ahead of the ping — `Connection.emit` yields its frames before asking the
+        // health machine anything. Everything emitted after this point queues behind the ping.
+        return sendPing(at: now, bytesAhead: bytesSinceProof)
     }
 
     mutating func noteInbound(now: ContinuousClock.Instant) -> Action {
@@ -65,18 +109,20 @@ struct ConnectionHealth {
         bytesSinceProof = 0
         lastProofAt = now
         pingSentAt = nil
+        bytesAheadOfPing = 0
         return .none
     }
 
     mutating func tick(now: ContinuousClock.Instant) -> Action {
         if let dropped { return .drop(reason: dropped) }
         if let pingSentAt {
-            guard now - pingSentAt > pingGrace else { return .none }
+            guard now - pingSentAt > pingDeadlineAllowance else { return .none }
             dropped = .unresponsive
             return .drop(reason: .unresponsive)
         }
         guard now - lastProofAt > idleInterval else { return .none }
-        pingSentAt = now
-        return .ping
+        // An idle ping has an empty queue in front of it — nothing was emitted — so it gets the
+        // flat grace. That is the half-open-socket case, where silence has no excuse.
+        return sendPing(at: now, bytesAhead: 0)
     }
 }

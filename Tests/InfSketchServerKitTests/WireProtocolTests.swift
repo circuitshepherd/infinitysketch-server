@@ -4,6 +4,14 @@ import Testing
 import InfSketchWire
 
 @Suite struct WireProtocolTests {
+    /// Pins the version so a wire ADDITION cannot ship without it. Both decoders throw on an
+    /// unknown `type` rather than ignoring it, so an older peer does not degrade — it passes the
+    /// `hello` gate and then dies on the first message it has never heard of. `ping`/`pong` is
+    /// what took this from 1 to 2; the next addition takes it to 3.
+    @Test func theVersionIsBumpedForPingPong() {
+        #expect(WireProtocol.version == 2)
+    }
+
     @Test func clientMessagesRoundTrip() throws {
         let messages: [ClientMessage] = [
             .hello(protocolVersion: 1, capabilities: ["render"], deviceId: nil),
