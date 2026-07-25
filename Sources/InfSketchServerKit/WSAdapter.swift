@@ -16,17 +16,32 @@ public struct WSAdapter: WSMessageHandler, Sendable {
     }
 
     public func makeMessages(for client: AsyncStream<WSMessage>) async throws -> AsyncStream<WSMessage> {
-        // KNOWN GAP: this output stream is unbounded, and FlyingFox itself
-        // drains it eagerly into another unbounded buffer before the socket
-        // writer — so the session-level bounded-buffer disconnect (DocumentSession)
-        // never engages for a slow *socket*. A stalled client therefore buffers
-        // events in memory until keepalive/reaping (future plan) drops it.
+        // This output stream is unbounded, and bounding it would achieve nothing: FlyingFox's
+        // `WSHandler.start` re-buffers our messages into a default-policy (unbounded)
+        // `AsyncThrowingStream` before the socket writer, so the memory would simply move one
+        // layer down, out of reach. Nor is there any write-completion signal to bound against.
+        //
+        // So the guard is `ConnectionHealth` instead: count bytes emitted since the peer last
+        // spoke, ask it to prove it is reading when that passes `outboundByteBudget`, and drop
+        // it if it will not answer within `keepalivePingGrace`. The same ping on an idle timer
+        // is what reaps a half-open socket whose subscriptions would otherwise hold a document
+        // session open forever. (`DocumentSession`'s own bounded buffer still covers a
+        // different case — a `pump` task that is suspended rather than a socket that is slow.)
         let (output, outputCont) = AsyncStream<WSMessage>.makeStream()
         let connection = Connection(manager: manager, output: outputCont, config: config, broker: broker)
+        let keepalive = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: config.keepaliveTickInterval)
+                if Task.isCancelled { return }
+                await connection.tick()
+            }
+        }
+        await connection.setKeepaliveTask(keepalive)
         Task {
             for await frame in client {
                 await connection.handle(frame)
             }
+            keepalive.cancel()
             await connection.close()
         }
         return output
@@ -45,6 +60,13 @@ actor Connection {
     /// from the live index when the connection closes. All holders are equal; there is no origin.
     private var deviceId: String?
     private var closed = false
+    /// Stall/liveness policy. See `ConnectionHealth` — the short version is that nothing below
+    /// us reports a completed socket write, so bytes emitted since the peer last spoke is the
+    /// only signal available.
+    private var health: ConnectionHealth
+    /// Cancelled by `close()`, so a server-initiated drop stops its own timer instead of leaving
+    /// it ticking against a closed connection until the client's stream happens to end.
+    private var keepaliveTask: Task<Void, Never>?
     private var docSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var watchSubscriptions: [String: (token: UUID, pump: Task<Void, Never>)] = [:]
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
@@ -60,9 +82,17 @@ actor Connection {
         self.output = output
         self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
         self.broker = broker
+        self.health = ConnectionHealth(
+            byteBudget: config.outboundByteBudget,
+            idleInterval: config.keepaliveIdleInterval,
+            pingGrace: config.keepalivePingGrace,
+            now: ContinuousClock.now)
     }
 
     func handle(_ frame: WSMessage) async {
+        // Before every other gate, including hello: a peer that is talking is alive, whatever it
+        // is saying and whether or not the message is even well-formed.
+        act(on: health.noteInbound(now: ContinuousClock.now))
         guard !closed else { return }
         let wire: WireFrame
         switch frame {
@@ -143,6 +173,13 @@ actor Connection {
                 }
             }
             emit(.helloAck(protocolVersion: WireProtocol.version))
+
+        case .pong:
+            // The liveness credit was already taken in `handle` — any inbound frame counts, so
+            // there is nothing further to do here. This case exists so a pong is not answered
+            // with `helloRequired`, which would leave an alive-but-unauthenticated peer unable
+            // to prove itself.
+            break
 
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
@@ -306,6 +343,8 @@ actor Connection {
     func close() async {
         guard !closed else { return }
         closed = true
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         for (docId, sub) in docSubscriptions {
             sub.pump.cancel()
             await manager.unsubscribe(docId: docId, token: sub.token)
@@ -411,11 +450,49 @@ actor Connection {
     /// holds by construction.
     private func emit(_ message: ServerMessage) {
         guard let frames = try? sender.frames(for: message) else { return }
+        var emittedBytes = 0
         for frame in frames {
             switch frame {
-            case .text(let json): output.yield(.text(json))
-            case .binary(let data): output.yield(.data(data))
+            case .text(let json):
+                output.yield(.text(json))
+                emittedBytes += json.utf8.count
+            case .binary(let data):
+                output.yield(.data(data))
+                emittedBytes += data.count
             }
         }
+        // The ping's own bytes are not counted: the accrual must never be fed by the question it
+        // asks, or a silent peer would ping itself into a drop on the byte path rather than on
+        // the grace deadline that is supposed to decide it.
+        if case .ping = message { return }
+        act(on: health.noteEmitted(bytes: emittedBytes, now: ContinuousClock.now))
+    }
+
+    /// Carries out `ConnectionHealth`'s verdict. Kept separate so all three inputs
+    /// (emit / inbound / tick) act identically on the same decision.
+    private func act(on action: ConnectionHealth.Action) {
+        switch action {
+        case .none:
+            break
+        case .ping:
+            emit(.ping)
+        case .drop:
+            // A close code first, so the client learns why rather than seeing a bare EOF;
+            // close() then releases every subscription, watcher, broker registration and
+            // live-index holder entry, which is what lets the grace teardown finally fire.
+            output.yield(.close(.policyViolation))
+            Task { await self.close() }
+        }
+    }
+
+    /// Driven by the per-connection keepalive timer in `WSAdapter.makeMessages`.
+    func tick() {
+        guard !closed else { return }
+        act(on: health.tick(now: ContinuousClock.now))
+    }
+
+    func setKeepaliveTask(_ task: Task<Void, Never>) {
+        guard !closed else { return task.cancel() }
+        keepaliveTask = task
     }
 }
