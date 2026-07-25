@@ -68,6 +68,8 @@ public enum WebUI {
       };
       ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
+        // The server drops a connection that will not prove it is reading.
+        if (m.type === "ping") return ws.send(JSON.stringify({ type: "pong" }));
         if (m.type === "statusEvent") scheduleRefresh();
       };
       ws.onclose = () => {
@@ -143,6 +145,8 @@ public enum WebUI {
           };
           ws.onmessage = (e) => {
             const m = JSON.parse(e.data);
+            // The server drops a connection that will not prove it is reading.
+            if (m.type === "ping") return ws.send(JSON.stringify({ type: "pong" }));
             if (m.type === "frameAvailable" && m.docId === docId) {
               lastSeq = m.seq;
               lastFrameAt = Date.now();
