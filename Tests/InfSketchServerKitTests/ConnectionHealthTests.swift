@@ -149,6 +149,37 @@ struct ConnectionHealthTests {
         #expect(health.tick(now: t0.advanced(by: .seconds(42))) == .drop(reason: .unresponsive))
     }
 
+    /// The same defect the proportional allowance exists to prevent, reached through the IDLE
+    /// door instead of the budget one — the residual hole an independent review of the first fix
+    /// flagged.
+    ///
+    /// `lastProofAt` advances on inbound traffic only, so a connection is "idle" by that timer's
+    /// definition even while a large backlog is still draining outward. Emit UNDER the budget
+    /// (so `noteEmitted` never pings), then let the idle timer fire: its ping is queued behind
+    /// those bytes exactly like a budget ping would be, so it must get the same delivery
+    /// allowance. Passing 0 here would drop a peer that is still legitimately draining.
+    @Test func anIdlePingBehindABacklogAlsoGetsTheProportionalAllowance() {
+        let t0 = ContinuousClock.now
+        var health = makeHealth(now: t0)
+        // 900 B is under the 1000 B budget, so no budget ping — but at 1000 B/s it needs ~0.9 s
+        // to reach the peer. Scale it up to something the flat grace cannot absorb:
+        #expect(health.noteEmitted(bytes: 900, now: t0) == .none, "under budget: no budget ping")
+        #expect(health.noteEmitted(bytes: 60_000, now: t0) == .ping, "budget crossed by the second emission")
+        #expect(health.noteInbound(now: t0.advanced(by: .seconds(1))) == .none, "peer answers; state resets")
+
+        // Now the real shape: emit a large backlog that stays UNDER the budget, so only the idle
+        // timer can fire. 999 B < 1000 B budget.
+        var idleHealth = ConnectionHealth(
+            byteBudget: 1_000_000, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0)
+        #expect(idleHealth.noteEmitted(bytes: 60_000, now: t0) == .none, "well under the 1 MB budget")
+        #expect(idleHealth.tick(now: t0.advanced(by: .seconds(31))) == .ping, "idle timer fires")
+        // 60_000 B at 1000 B/s = 60 s of delivery time, far past the 10 s flat grace.
+        #expect(idleHealth.tick(now: t0.advanced(by: .seconds(60))) == .none,
+                "still delivering the ping through a 60 s backlog")
+        #expect(idleHealth.tick(now: t0.advanced(by: .seconds(95))) == .drop(reason: .unresponsive))
+    }
+
     /// A peer that DOES answer inside its (extended) window resets normally — the proportional
     /// deadline only ever postpones the verdict, it never changes what proof of life means.
     @Test func answeringABudgetPingInsideTheProportionalWindowResetsNormally() {

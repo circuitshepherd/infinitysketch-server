@@ -121,8 +121,20 @@ struct ConnectionHealth {
             return .drop(reason: .unresponsive)
         }
         guard now - lastProofAt > idleInterval else { return .none }
-        // An idle ping has an empty queue in front of it — nothing was emitted — so it gets the
-        // flat grace. That is the half-open-socket case, where silence has no excuse.
-        return sendPing(at: now, bytesAhead: 0)
+        // Same allowance rule as the budget path, and for the same reason: what a ping's deadline
+        // has to cover is the time to DELIVER it, which is however many bytes sit ahead of it in
+        // the FIFO — whichever path emitted it.
+        //
+        // It is tempting to pass 0 here on the grounds that an idle connection has an empty
+        // queue. That is wrong: `lastProofAt` advances on INBOUND traffic only, so a connection
+        // can be "idle" by this timer's definition while a large backlog is still draining
+        // outward. Concretely, ~40 MB pushed to a slow peer never crosses the 64 MB budget, so
+        // `noteEmitted` never pings; the idle timer then fires at 30 s and, with a flat 10 s
+        // grace, drops a peer that is still legitimately draining — the exact defect the
+        // proportional allowance exists to prevent, reached by the other door.
+        //
+        // The genuine half-open socket is unaffected: no traffic means `bytesSinceProof == 0`,
+        // which yields the flat grace, so silence with nothing queued is still reaped promptly.
+        return sendPing(at: now, bytesAhead: bytesSinceProof)
     }
 }
