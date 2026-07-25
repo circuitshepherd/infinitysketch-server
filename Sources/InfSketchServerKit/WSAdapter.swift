@@ -86,6 +86,7 @@ actor Connection {
             byteBudget: config.outboundByteBudget,
             idleInterval: config.keepaliveIdleInterval,
             pingGrace: config.keepalivePingGrace,
+            assumedMinimumDrainRate: config.assumedMinimumDrainRate,
             now: ContinuousClock.now)
     }
 

@@ -57,6 +57,17 @@ public struct SessionConfig: Sendable {
     /// enough to observe `keepalivePingGrace` with reasonable precision — the deadlines
     /// themselves are computed from timestamps, not from tick counts.
     public var keepaliveTickInterval: Duration
+    /// Bytes per second a peer is assumed to be able to drain, used to extend a BUDGET ping's
+    /// deadline by the time it takes the peer to reach the ping through the backlog queued ahead
+    /// of it (see `ConnectionHealth`). It is not a measurement and not a rate limit — it is a
+    /// floor that keeps the deadline from expiring before the question is even deliverable.
+    ///
+    /// 1 MB/s means a full 64 MB budget buys 64 s instead of the flat 10 s grace. A peer slower
+    /// than this floor genuinely cannot keep up with a system whose broadcast events carry whole
+    /// multi-MB documents (Example 1 is ~5.8 MB — six seconds for ONE event at this rate), so
+    /// treating it as stalled is the correct verdict; the point of the floor is only that the
+    /// deadline must at least cover DELIVERING the question.
+    public var assumedMinimumDrainRate: Int
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -70,7 +81,8 @@ public struct SessionConfig: Sendable {
         outboundByteBudget: Int = 64 * 1024 * 1024,
         keepaliveIdleInterval: Duration = .seconds(30),
         keepalivePingGrace: Duration = .seconds(10),
-        keepaliveTickInterval: Duration = .seconds(5)
+        keepaliveTickInterval: Duration = .seconds(5),
+        assumedMinimumDrainRate: Int = 1024 * 1024
     ) {
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
@@ -85,6 +97,7 @@ public struct SessionConfig: Sendable {
         self.keepaliveIdleInterval = keepaliveIdleInterval
         self.keepalivePingGrace = keepalivePingGrace
         self.keepaliveTickInterval = keepaliveTickInterval
+        self.assumedMinimumDrainRate = assumedMinimumDrainRate
     }
 }
 

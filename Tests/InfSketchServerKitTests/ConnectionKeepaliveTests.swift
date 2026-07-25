@@ -17,11 +17,20 @@ struct ConnectionKeepaliveTests {
 
     /// Aggressive but not instant: a budget small enough that one ordinary message crosses it,
     /// and deadlines short enough to keep the suite fast.
-    private static func fastConfig(budget: Int = 64) -> SessionConfig {
+    ///
+    /// The grace is 500 ms, deliberately much larger than the idle interval. It is not a speed
+    /// knob — it is the margin `aPeerThatAnswersPingsIsNeverDropped` has to answer, and that
+    /// test's answering loop polls every 10 ms. At the 60 ms this once used, ONE scheduling stall
+    /// longer than the grace made the server drop a peer the test asserts is never dropped, so
+    /// the test was flaky by margin. Suite duration is set by `keepaliveIdleInterval`, which is
+    /// what paces the pings, so widening the grace costs nothing.
+    private static func fastConfig(
+        budget: Int = 64, idle: Duration = .milliseconds(60)
+    ) -> SessionConfig {
         SessionConfig(
             outboundByteBudget: budget,
-            keepaliveIdleInterval: .milliseconds(60),
-            keepalivePingGrace: .milliseconds(60),
+            keepaliveIdleInterval: idle,
+            keepalivePingGrace: .milliseconds(500),
             keepaliveTickInterval: .milliseconds(10))
     }
 
@@ -156,6 +165,33 @@ struct ConnectionKeepaliveTests {
         #expect(answered >= 3, "the idle timer should have pinged repeatedly; answered \(answered)")
         #expect(await harness.collector.closed == false,
                 "a peer answering every ping must never be dropped")
+    }
+
+    /// The BUDGET path, end to end and in isolation. Both other integration tests reach their
+    /// ping through the IDLE timer (`aSilentPeerIsPingedThenDropped` emits only a 39-byte
+    /// `helloAck` against its 64-byte budget, so it never crosses it;
+    /// `droppingAPeerReleasesItsSubscription` does cross it but asserts nothing about which path
+    /// fired) — so a regression that broke `noteEmitted`'s ping and left `tick`'s intact used to
+    /// pass every integration test.
+    ///
+    /// The isolation is the idle interval: at 60 s, nothing in a test bounded to seconds can
+    /// produce a ping except crossing the byte budget. The bytes are real output — subscribing
+    /// to the seeded doc returns its snapshot, several hundred bytes of base64 — and the
+    /// `helloAck` assertion first pins that the budget was NOT already crossed before it.
+    @Test func crossingTheByteBudgetPingsEvenWhenTheIdleTimerCannotFire() async throws {
+        let manager = try Self.makeManager()
+        let harness = try await Harness(
+            manager: manager, config: Self.fastConfig(budget: 100, idle: .seconds(60)))
+        defer { harness.finish() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+
+        #expect(await harness.wait { await $0.messages.isEmpty == false }, "expected a helloAck")
+        #expect(await harness.collector.pingCount == 0,
+                "the 39-byte helloAck is under the 100-byte budget — nothing should have pinged yet")
+
+        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        #expect(await harness.wait { await $0.pingCount > 0 },
+                "the snapshot pushes emitted bytes past the budget, which must ASK the peer to prove it is reading")
     }
 
     /// A pong must be accepted before hello — it is pure liveness, and answering it with

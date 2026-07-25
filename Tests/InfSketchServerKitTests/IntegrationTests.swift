@@ -163,8 +163,8 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
             return try ServerMessage(jsonText: text)
         }
 
-        try await send(.hello(protocolVersion: 1, capabilities: [], deviceId: nil))
-        #expect(try await receive() == .helloAck(protocolVersion: 1))
+        try await send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        #expect(try await receive() == .helloAck(protocolVersion: WireProtocol.version))
 
         try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
@@ -211,8 +211,8 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
             }
         }
 
-        try await send(.hello(protocolVersion: 1, capabilities: [], deviceId: nil))
-        #expect(try await receive() == .helloAck(protocolVersion: 1))
+        try await send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        #expect(try await receive() == .helloAck(protocolVersion: WireProtocol.version))
         try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
@@ -261,9 +261,9 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // Fake device: hellos with authorStrokes so WSAdapter registers it
         // with the server's real DeviceCommandBroker (the same instance the
         // future stroke-authoring MCP tool, Task 4, will call into).
-        try await send(.hello(protocolVersion: 1, capabilities: ["authorStrokes"], deviceId: nil))
+        try await send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
         guard case .text(let ackText) = try await receiveFrame(),
-              try ServerMessage(jsonText: ackText) == .helloAck(protocolVersion: 1)
+              try ServerMessage(jsonText: ackText) == .helloAck(protocolVersion: WireProtocol.version)
         else { Issue.record("expected helloAck"); return }
 
         let bigBytes = Data((0..<100_000).map { UInt8($0 % 256) })

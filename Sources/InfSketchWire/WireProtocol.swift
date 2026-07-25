@@ -1,7 +1,15 @@
 import Foundation
 
 public enum WireProtocol {
-    public static let version = 1
+    /// 2: `ServerMessage.ping` / `ClientMessage.pong` (WS backpressure + keepalive). The bump is
+    /// mandatory, not cosmetic — both decoders THROW on an unknown `type` rather than ignoring
+    /// it, so a v1 peer does not degrade gracefully: it completes the hello handshake, then dies
+    /// on the first `ping` the server sends. Without the bump the `hello` gate lets exactly the
+    /// two reachable stale peers through — an older installed app binary, which would then flap
+    /// on reconnect backoff forever with no diagnosable reason, and a browser tab opened before a
+    /// server rebuild that reconnects with its old in-memory script. With it they get a clean
+    /// `unsupportedVersion`. Any future wire ADDITION needs the same treatment.
+    public static let version = 2
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
