@@ -113,10 +113,9 @@ public final class InfSketchServer: Sendable {
             summaries.sort { $0.id < $1.id }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            return self.headAware(request, HTTPResponse(
-                statusCode: .ok,
-                headers: [.contentType: "application/json"],
-                body: try encoder.encode(summaries)))
+            return self.headAware(
+                request, headers: [.contentType: "application/json"],
+                body: try encoder.encode(summaries))
         }
 
         await http.appendRoute("GET,HEAD /api/docs/*") { request in
@@ -132,27 +131,21 @@ public final class InfSketchServer: Sendable {
             // "%" (e.g. "50%off" round-trips through the wire as
             // "50%25off" and arrives at `parts[2]` as "50%off" already).
             if let frame = await manager.latestFrame(docId: parts[2]) {
-                return self.headAware(request, HTTPResponse(
-                    statusCode: .ok,
-                    headers: [
-                        .contentType: "image/png",
-                        .cacheControl: "no-store",
-                        HTTPHeader("X-Frame-Stale"): "false",
-                        HTTPHeader("X-Frame-Seq"): "\(frame.seq)",
-                    ],
-                    body: frame.png))
+                return self.headAware(request, headers: [
+                    .contentType: "image/png",
+                    .cacheControl: "no-store",
+                    HTTPHeader("X-Frame-Stale"): "false",
+                    HTTPHeader("X-Frame-Seq"): "\(frame.seq)",
+                ], body: frame.png)
             }
 
             if let bytes = try? store.load(docId: parts[2]),
                let png = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes) {
-                return self.headAware(request, HTTPResponse(
-                    statusCode: .ok,
-                    headers: [
-                        .contentType: "image/png",
-                        .cacheControl: "no-store",
-                        HTTPHeader("X-Frame-Stale"): "true",
-                    ],
-                    body: png))
+                return self.headAware(request, headers: [
+                    .contentType: "image/png",
+                    .cacheControl: "no-store",
+                    HTTPHeader("X-Frame-Stale"): "true",
+                ], body: png)
             }
 
             // M2c-1: a metadata-only doc has no bytes here — serve the thumbnail its holder
@@ -161,14 +154,11 @@ public final class InfSketchServer: Sendable {
             guard let png = await manager.liveEntry(docId: parts[2])?.thumbnail else {
                 return HTTPResponse(statusCode: .notFound)
             }
-            return self.headAware(request, HTTPResponse(
-                statusCode: .ok,
-                headers: [
-                    .contentType: "image/png",
-                    .cacheControl: "no-store",
-                    HTTPHeader("X-Frame-Stale"): "true",
-                ],
-                body: png))
+            return self.headAware(request, headers: [
+                .contentType: "image/png",
+                .cacheControl: "no-store",
+                HTTPHeader("X-Frame-Stale"): "true",
+            ], body: png)
         }
 
         await http.appendRoute("GET,HEAD /doc/*") { request in
@@ -178,10 +168,28 @@ public final class InfSketchServer: Sendable {
             }
             // See the /api/docs/* handler above: parts[1] is already decoded.
             let docId = parts[1]
-            return self.headAware(request, HTTPResponse(
-                statusCode: .ok,
-                headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.docHTML(docId: docId).utf8)))
+            // Only serve a viewer for a document that actually exists somewhere. Without this,
+            // any path under /doc/ answered 200 with a working-looking page for a document that
+            // was never there, so a typo or a stale link rendered an empty viewer that would sit
+            // at "stale (no live client)" forever. `/api/docs/<id>/frame` already 404s.
+            //
+            // "Exists" has THREE sources, and all three are load-bearing — this must be at least
+            // as permissive as the frame route beside it, or a document whose frames that route
+            // happily serves would have no page to show them on:
+            //   - stored bytes;
+            //   - an OPEN SESSION, which a doc has from the moment a client subscribes with
+            //     `createIfMissing` — before any submit puts bytes in the store. Missing this
+            //     404'd a document that was live and rendering frames (caught by
+            //     `IntegrationTests.percentNamedDocServesPageAndFrame`);
+            //   - a connected device's advertisement (M2c metadata-only: no bytes here at all,
+            //     and the frame route serves the thumbnail its holder advertised).
+            let hasSession = await manager.liveInfo()[docId] != nil
+            let advertised = await manager.liveEntry(docId: docId) != nil
+            let known = ((try? store.exists(docId: docId)) ?? false) || hasSession || advertised
+            guard known else { return HTTPResponse(statusCode: .notFound) }
+            return self.headAware(
+                request, headers: [.contentType: "text/html; charset=utf-8"],
+                body: Data(WebUI.docHTML(docId: docId).utf8))
         }
 
         await http.appendRoute(
@@ -196,16 +204,30 @@ public final class InfSketchServer: Sendable {
         await mountMCP(on: http, adapter: mcpAdapter)
 
         await http.appendRoute("GET,HEAD /") { request in
-            self.headAware(request, HTTPResponse(
-                statusCode: .ok,
-                headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.indexHTML.utf8)))
+            self.headAware(
+                request, headers: [.contentType: "text/html; charset=utf-8"],
+                body: Data(WebUI.indexHTML.utf8))
         }
     }
 
     // HTTP: HEAD gets identical headers, no body.
-    private func headAware(_ request: HTTPRequest, _ response: HTTPResponse) -> HTTPResponse {
-        guard request.method == .HEAD else { return response }
-        return HTTPResponse(statusCode: response.statusCode, headers: response.headers, body: Data())
+    //
+    // It takes the body as a parameter rather than an already-built `HTTPResponse` because
+    // `Content-Length` has to be carried across by hand and `HTTPResponse.bodyData` is async —
+    // unreadable from here. Dropping the body without restating the length made the server
+    // compute it from what was left, so a HEAD answered `Content-Length: 0` while the same GET
+    // answered the real size, defeating the main reason to send a HEAD at all (RFC 9110 §9.3.2:
+    // a HEAD response's header fields should be the ones a GET would have sent, and its
+    // Content-Length describes the body the GET *would* have returned).
+    private func headAware(
+        _ request: HTTPRequest, statusCode: HTTPStatusCode = .ok,
+        headers: [HTTPHeader: String], body: Data
+    ) -> HTTPResponse {
+        guard request.method == .HEAD else {
+            return HTTPResponse(statusCode: statusCode, headers: headers, body: body)
+        }
+        var headers = headers
+        headers[.contentLength] = "\(body.count)"
+        return HTTPResponse(statusCode: statusCode, headers: headers, body: Data())
     }
 }
