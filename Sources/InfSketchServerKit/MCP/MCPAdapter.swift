@@ -2550,7 +2550,7 @@ public actor MCPAdapter {
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta),
                    let keys = decoded["keys"] {
-                    summary += "\nkeys: \(keys.joined(separator: ", "))"
+                    summary += "\nids: \(keys.joined(separator: ", "))"
                 }
                 return summary
             }
@@ -3991,7 +3991,7 @@ public actor MCPAdapter {
                 // `out.meta` carries the created elements' fresh keys/ids
                 // (`CopyElements.perform`'s `{"createdStrokeKeys": […],
                 // "createdTextIds": […], "createdImageIds": […]}`, app repo)
-                // — surfaced here the same way draw_strokes surfaces `keys:`,
+                // — surfaced here the same way draw_strokes surfaces `ids:`,
                 // so the agent can act on exactly what was just copied
                 // instead of re-finding it by bounding box. A missing/
                 // undecodable meta degrades to just the seq line.
@@ -3999,7 +3999,7 @@ public actor MCPAdapter {
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta) {
                     if let keys = decoded["createdStrokeKeys"], !keys.isEmpty {
-                        summary += "\nstrokeKeys: \(keys.joined(separator: ", "))"
+                        summary += "\nstrokeIds: \(keys.joined(separator: ", "))"
                     }
                     if let ids = decoded["createdTextIds"], !ids.isEmpty {
                         summary += "\ntextIds: \(ids.joined(separator: ", "))"

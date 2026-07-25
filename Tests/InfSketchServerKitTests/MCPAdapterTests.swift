@@ -4393,7 +4393,7 @@ private actor FakeStrokeOpDevice {
     /// `out.meta`'s created ids (`CopyElements.perform`'s app-side
     /// `{"createdStrokeKeys": […], "createdTextIds": […], "createdImageIds": […]}`
     /// shape) are surfaced in the result text the same way draw_strokes
-    /// surfaces `keys:` — so the agent can act on exactly what was just
+    /// surfaces `ids:` — so the agent can act on exactly what was just
     /// copied instead of re-finding it.
     @Test func copyElementsSurfacesCreatedIds() async throws {
         let targetBytes = Fixtures.docBytes
