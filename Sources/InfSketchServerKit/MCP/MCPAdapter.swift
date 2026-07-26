@@ -712,6 +712,24 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "delete_doc",
+            description: """
+                Delete a document from the server. The document is moved to the server's \
+                .trash directory rather than destroyed, so a mistaken delete is recoverable by \
+                hand. Server-side, no device needed. unknownDoc if the document doesn't exist. \
+                Note the server keeps NO record of the deletion: a device that still holds the \
+                document may re-advertise or re-push it, which brings it back. A device with the \
+                document currently open keeps its copy and stops syncing it.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to delete."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "remove_image",
             description: """
                 Remove a placed image from a document by its id (as returned by add_image or \
@@ -1937,6 +1955,7 @@ public actor MCPAdapter {
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
+        case "delete_doc": return await callDeleteDoc(arguments)
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
         case "set_paper": return await callSetPaper(arguments)
@@ -2297,6 +2316,25 @@ public actor MCPAdapter {
             ) { seq in
                 "removed \(textId) at seq \(seq)"
             }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Unlike every other write tool this takes no CAS: the caller asked for the document to be
+    /// gone, so a write that landed a moment earlier does not make the request stale. The bytes
+    /// are recoverable from the server's .trash directory either way.
+    private func callDeleteDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            do {
+                try await manager.deleteDoc(docId: docId)
+            } catch {
+                return Self.errorResult("unknownDoc")
+            }
+            return Self.textResult("deleted \(docId)")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
