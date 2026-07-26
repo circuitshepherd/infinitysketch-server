@@ -1639,6 +1639,27 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "get_tool",
+            description: """
+                Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, \
+                and when true `inkType`, `width` and `color` (#RRGGBBAA). READ THIS BEFORE \
+                DRAWING and pass the values explicitly to draw_strokes / draw_selection / \
+                render_sketch, so strokes you author match the pen the user is holding unless \
+                they asked for something else. The values are never applied implicitly: you hold \
+                them, so a preview and its commit are the same numbers even if the user switches \
+                tools in between. `isInkingTool` is false for the eraser, lasso, or Bring to \
+                Front — nothing sensible to inherit, so use your own values. Needs no selection. \
+                REQUIRES a connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "Any open document id on the device."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "draw_selection",
             description: """
                 Draw strokes into the user's LIVE rect-select selection AND select them, in one \
@@ -2059,6 +2080,7 @@ public actor MCPAdapter {
         case "get_selection": return await callGetSelection(arguments)
         case "transform_selection": return await callTransformSelection(arguments)
         case "select_all": return await callSelectAll(arguments)
+        case "get_tool": return await callGetTool(arguments)
         case "draw_selection": return await callDrawSelection(arguments)
         case "restyle_selection": return await callRestyleSelection(arguments)
         case "delete_selection": return await callDeleteSelection(arguments)
@@ -3706,6 +3728,17 @@ public actor MCPAdapter {
     /// Both of these act on LIVE selection state, so — like every other selection op — there is no
     /// document CAS and no server-side submit: the device commits in its own authoritative session
     /// and the ordinary mirror push syncs the server.
+    private func callGetTool(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            return await callSelectionOp(docId: docId, envelope: ["op": .string("getTool")])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callDrawSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
