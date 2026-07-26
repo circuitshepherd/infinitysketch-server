@@ -2133,6 +2133,49 @@ private actor FakeStrokeOpDevice {
     /// Task 5's own StrokeSpec decode tests must decode a fixture using
     /// EXACTLY these field names (binding rider carried by the plan). If
     /// this test ever needs changing, both repos change in lockstep.
+    /// THE CROSS-REPO REPLY-META LOCK — the mirror image of
+    /// `drawStrokesSpecEnvelopeMatchesCanonicalShape`, which locks the shape travelling
+    /// server -> device. This locks the shape coming BACK.
+    ///
+    /// That direction had no guard, and it bit: adding `resolvedTool` to the device's draw meta
+    /// silently killed the `ids:` line, because this decoder was `[String: [String]]` — a shape
+    /// that cannot represent an object — and its own comment permits degrading rather than
+    /// throwing. Both suites stayed green, because each repo tests against a fake of the other.
+    ///
+    /// The fixture below is the app's real `DrawMeta` shape, duplicated verbatim (the app half is
+    /// `drawMetaMatchesTheServersCanonicalReplyShape` in StrokeAuthoringTests). Non-vacuous: a
+    /// renamed or re-typed key drops its line from the summary and fails an assertion here.
+    @Test func drawReplyMetaMatchesCanonicalShape() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let canonicalMeta = Data(#"""
+        {"keys":["111-222.5"],"resolvedTool":{"inkType":"marker","width":19.5,"color":"#12AB34FF"}}
+        """#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: canonicalMeta))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": .array([.object([
+                "points": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)])])
+            ])])])
+        #expect(isError != true)
+        let text = toolResultText(content)
+
+        // "keys" -> the ids line. This is the one that silently vanished.
+        #expect(text.contains("ids: 111-222.5"), "the keys field must still reach the reply: \(text)")
+        // "resolvedTool" -> what an omitted colour/width/inkType inherited from the user's picker.
+        #expect(text.contains("marker"), "resolvedTool.inkType must reach the reply: \(text)")
+        #expect(text.contains("19.5"), "resolvedTool.width must reach the reply: \(text)")
+        #expect(text.contains("#12AB34FF"), "resolvedTool.color must reach the reply: \(text)")
+
+        await server.stop()
+    }
+
     @Test func drawStrokesSpecEnvelopeMatchesCanonicalShape() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
