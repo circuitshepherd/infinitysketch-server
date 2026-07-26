@@ -1639,13 +1639,58 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "restyle_selection",
+            description: """
+                Restyle the strokes in the user's LIVE rect-select selection — `color` \
+                (#RRGGBB/#RRGGBBAA), `width` (target peak stroke width), and/or `inkType` \
+                (pen/pencil/marker/monoline). At least one is required; an omitted field is left \
+                alone. Unlike restyle_strokes (which edits document bytes and cannot refresh the \
+                canvas while a selection is open) this drives the app's own reink path, so the \
+                change appears immediately and lands as one undo step. noSelectionActive if \
+                nothing is selected; userBusy mid-gesture. REQUIRES a connected \
+                `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA."]),
+                    "width": .object(["type": "number", "description": "Target peak stroke width."]),
+                    "inkType": .object([
+                        "type": "string",
+                        "description": "pen, pencil, marker, or monoline.",
+                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "delete_selection",
+            description: """
+                Delete everything in the user's LIVE rect-select selection, exactly as the \
+                toolbar's Delete does — one undo step, canvas refreshed immediately. \
+                noSelectionActive if nothing is selected; userBusy mid-gesture. REQUIRES a \
+                connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "select_elements",
             description: """
                 Select specific elements by id on a connected device's live rect-select, replacing \
                 any existing selection. Pass `strokeIds` (stroke ids, from \
                 `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
                 `get_selection` or the document summary) — at least one id across the three arrays \
-                is required (enforced device-side). REQUIRES a connected `controlSelection` device.
+                is required (enforced device-side). By default the selection rectangle is resized \
+                to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee \
+                exactly where they dragged it. REQUIRES a connected `controlSelection` device.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1665,6 +1710,10 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": "Placed-image ids to select.",
                         "items": .object(["type": "string"]),
+                    ]),
+                    "keepRect": .object([
+                        "type": "boolean",
+                        "description": "Keep the existing selection rectangle instead of resizing it to the chosen elements. Defaults to false.",
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
@@ -1982,6 +2031,8 @@ public actor MCPAdapter {
         case "get_selection": return await callGetSelection(arguments)
         case "transform_selection": return await callTransformSelection(arguments)
         case "select_all": return await callSelectAll(arguments)
+        case "restyle_selection": return await callRestyleSelection(arguments)
+        case "delete_selection": return await callDeleteSelection(arguments)
         case "select_elements": return await callSelectElements(arguments)
         case "set_reference_point": return await callSetReferencePoint(arguments)
         case "clear_selection": return await callClearSelection(arguments)
@@ -3623,18 +3674,75 @@ public actor MCPAdapter {
     /// `callTransformSelection`'s conditional `expect`. Deep validation
     /// ("at least one id across the three arrays") is the device's job,
     /// surfaced verbatim as `deviceFailed: <reason>`.
+    /// Both of these act on LIVE selection state, so — like every other selection op — there is no
+    /// document CAS and no server-side submit: the device commits in its own authoritative session
+    /// and the ordinary mirror push syncs the server.
+    private func callRestyleSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            var envelope: [String: Value] = ["op": .string("restyleSelection")]
+            if let c = arguments?["color"], case .string(let hex) = c { envelope["color"] = .string(hex) }
+            if let w = arguments?["width"] { envelope["width"] = w }
+            if let i = arguments?["inkType"], case .string(let ink) = i { envelope["inkType"] = .string(ink) }
+            return await callSelectionOp(docId: docId, envelope: envelope)
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    private func callDeleteSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            return await callSelectionOp(docId: docId, envelope: ["op": .string("deleteSelection")])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Shared relay for the live-selection ops: encode the envelope, hand it to the device's
+    /// `controlSelection` bridge, and pass its selection descriptor straight back.
+    private func callSelectionOp(docId: String, envelope: [String: Value]) async -> CallTool.Result {
+        guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            return Self.errorResult("unknownDoc")
+        }
+        let spec: Data
+        do {
+            spec = try JSONEncoder().encode(Value.object(envelope))
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+        do {
+            let out = try await broker.requestStrokeOp(
+                docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+            let text = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? "ok"
+            return Self.textResult(text)
+        } catch let error as DeviceCommandBroker.DeviceCommandError {
+            return Self.strokeOpErrorResult(error)
+        } catch {
+            return Self.errorResult("deviceFailed")
+        }
+    }
+
     private func callSelectElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds")
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
+            let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
             var envelope: [String: Value] = ["op": .string("selectElements")]
+            if let keepRect {
+                envelope["keepRect"] = .bool(keepRect)
+            }
             if let strokeIds {
                 envelope["strokeIds"] = .array(strokeIds.map(Value.string))
             }
