@@ -208,6 +208,20 @@ actor Connection {
                 await manager.unsubscribe(docId: docId, token: sub.token)
             }
 
+        case .deleteDoc(let docId):
+            // Drop our own subscription first, so tearing the session down does not race the
+            // pump task that is still draining it.
+            if let sub = docSubscriptions.removeValue(forKey: docId) {
+                sub.pump.cancel()
+                await manager.unsubscribe(docId: docId, token: sub.token)
+            }
+            do {
+                try await manager.deleteDoc(docId: docId)
+                emit(.docDeleted(docId: docId))
+            } catch {
+                emit(.error(reason: "unknownDoc"))
+            }
+
         case .op(let docId, let opId, let payload, let expectation):
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))

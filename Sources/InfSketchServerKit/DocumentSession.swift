@@ -339,6 +339,17 @@ actor DocumentSession {
         return .accepted(seq: seq)
     }
 
+    /// Tell every live subscriber the document was deleted on the server, then close their streams.
+    ///
+    /// Their copy is not touched — a subscriber holding the document keeps it and turns it into a
+    /// LOCAL-ONLY document. Without this push a device with the doc open would keep mirroring and
+    /// re-create it on the server within seconds, which looks like the delete silently failing.
+    func announceDeleted() {
+        broadcast(.docDeleted(docId: docId))
+        for (_, continuation) in subscribers { continuation.finish() }
+        subscribers.removeAll()
+    }
+
     private func broadcast(_ message: ServerMessage) {
         for (token, continuation) in subscribers {
             switch continuation.yield(message) {

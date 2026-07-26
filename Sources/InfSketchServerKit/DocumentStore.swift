@@ -28,6 +28,12 @@ public protocol DocumentStore: Sendable {
     /// a fresh `createIfMissing` empty doc from a genuinely-empty saved one,
     /// and `seq` resets on session recycle, so neither can stand in for this.
     func exists(docId: String) throws -> Bool
+    /// Remove the document. Throws `.notFound` if it is not there — deleting is a deliberate user
+    /// action, so a caller asking to delete something absent is told, not silently succeeded.
+    ///
+    /// Nothing is retained afterwards: no tombstone, no record that the id ever existed. A device
+    /// that still holds a copy may re-create it on its next push, which is accepted.
+    func delete(docId: String) throws
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -72,6 +78,14 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func exists(docId: String) throws -> Bool {
         FileManager.default.fileExists(atPath: try fileURL(for: docId).path)
+    }
+
+    public func delete(docId: String) throws {
+        let url = try fileURL(for: docId)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw DocumentStoreError.notFound
+        }
+        try FileManager.default.removeItem(at: url)
     }
 
     private func fileURL(for docId: String) throws -> URL {

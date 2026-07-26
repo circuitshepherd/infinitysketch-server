@@ -184,6 +184,13 @@ public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String], deviceId: String?)
     case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
     case unsubscribe(docId: String)
+    /// Remove the document from the server's store outright.
+    ///
+    /// Unlike `.op`, this is not a document edit and carries no `WriteExpectation`: the user asked
+    /// for the document to be gone, so a write that landed a moment earlier does not make the
+    /// request stale. The server keeps NO record of the deletion — a device that still holds a copy
+    /// and later re-pushes it will simply re-create it, which is accepted behaviour.
+    case deleteDoc(docId: String)
     case op(docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation? = nil)
     case subscribeStatus
     case unsubscribeStatus
@@ -226,6 +233,8 @@ extension ClientMessage: Codable {
                 createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false)
         case "unsubscribe":
             self = .unsubscribe(docId: try c.decode(String.self, forKey: .docId))
+        case "deleteDoc":
+            self = .deleteDoc(docId: try c.decode(String.self, forKey: .docId))
         case "op":
             self = .op(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -317,6 +326,9 @@ extension ClientMessage: Codable {
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
+        case .deleteDoc(let docId):
+            try c.encode("deleteDoc", forKey: .type)
+            try c.encode(docId, forKey: .docId)
         case .op(let docId, let opId, let payload, let expectation):
             try c.encode("op", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -402,6 +414,10 @@ public enum ServerMessage: Equatable, Sendable {
     case createDocRequest(requestId: UInt32, docId: String)
     case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data)
     case subscribeFailed(docId: String, reason: String)
+    /// The document was deleted on the server (by another device). Pushed to every live
+    /// subscriber so a device holding the document can keep its copy as a LOCAL-ONLY document
+    /// rather than silently re-uploading it moments later.
+    case docDeleted(docId: String)
 }
 
 extension ServerMessage: Codable {
@@ -480,6 +496,8 @@ extension ServerMessage: Codable {
                 docId: try c.decode(String.self, forKey: .docId),
                 payload: payload,
                 spec: try c.decode(Data.self, forKey: .spec))
+        case "docDeleted":
+            self = .docDeleted(docId: try c.decode(String.self, forKey: .docId))
         case "subscribeFailed":
             self = .subscribeFailed(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -560,6 +578,9 @@ extension ServerMessage: Codable {
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
             try c.encode(spec, forKey: .spec)
+        case .docDeleted(let docId):
+            try c.encode("docDeleted", forKey: .type)
+            try c.encode(docId, forKey: .docId)
         case .subscribeFailed(let docId, let reason):
             try c.encode("subscribeFailed", forKey: .type)
             try c.encode(docId, forKey: .docId)
