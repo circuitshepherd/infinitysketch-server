@@ -1639,6 +1639,34 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "draw_selection",
+            description: """
+                Draw strokes into the user's LIVE rect-select selection AND select them, in one \
+                step. `strokes` takes the same shape as draw_strokes. Composing draw_strokes + \
+                select_elements does the same thing but leaves a window where the stroke exists \
+                unselected; this is atomic. By default the user's selection rectangle is KEPT (you \
+                are drawing INTO it) — pass `keepRect: false` to shrink it to the new strokes. \
+                Requires an ACTIVE selection: noSelectionActive otherwise, userBusy mid-gesture. \
+                REQUIRES a connected `controlSelection` device.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "strokes": .object([
+                        "type": "array",
+                        "description": "Strokes to draw; same item shape as draw_strokes.",
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "keepRect": .object([
+                        "type": "boolean",
+                        "description": "Keep the user's selection rectangle. Defaults to true.",
+                    ]),
+                ]),
+                "required": .array(["docId", "strokes"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "restyle_selection",
             description: """
                 Restyle the strokes in the user's LIVE rect-select selection — `color` \
@@ -2031,6 +2059,7 @@ public actor MCPAdapter {
         case "get_selection": return await callGetSelection(arguments)
         case "transform_selection": return await callTransformSelection(arguments)
         case "select_all": return await callSelectAll(arguments)
+        case "draw_selection": return await callDrawSelection(arguments)
         case "restyle_selection": return await callRestyleSelection(arguments)
         case "delete_selection": return await callDeleteSelection(arguments)
         case "select_elements": return await callSelectElements(arguments)
@@ -3677,6 +3706,22 @@ public actor MCPAdapter {
     /// Both of these act on LIVE selection state, so — like every other selection op — there is no
     /// document CAS and no server-side submit: the device commits in its own authoritative session
     /// and the ordinary mirror push syncs the server.
+    private func callDrawSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let strokes = arguments?["strokes"], case .array(let items) = strokes, !items.isEmpty else {
+                return Self.errorResult("invalidArgument: strokes")
+            }
+            var envelope: [String: Value] = ["op": .string("drawSelection"), "strokes": .array(items)]
+            if let keep = arguments?["keepRect"] { envelope["keepRect"] = keep }
+            return await callSelectionOp(docId: docId, envelope: envelope)
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callRestyleSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
