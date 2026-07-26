@@ -6,10 +6,14 @@ import InfSketchWire
 @Suite struct WireProtocolTests {
     /// Pins the version so a wire ADDITION cannot ship without it. Both decoders throw on an
     /// unknown `type` rather than ignoring it, so an older peer does not degrade — it passes the
-    /// `hello` gate and then dies on the first message it has never heard of. `ping`/`pong` is
-    /// what took this from 1 to 2; the next addition takes it to 3.
-    @Test func theVersionIsBumpedForPingPong() {
-        #expect(WireProtocol.version == 2)
+    /// `hello` gate and then dies on the first message it has never heard of. `ping`/`pong` took
+    /// this from 1 to 2; `deleteDoc`/`docDeleted` took it from 2 to 3; the next addition takes it
+    /// to 4.
+    ///
+    /// This test earning its keep is not hypothetical: the delete work added both messages and
+    /// left the version at 2, and this is what caught it.
+    @Test func theVersionIsBumpedForEveryWireAddition() {
+        #expect(WireProtocol.version == 3)
     }
 
     @Test func clientMessagesRoundTrip() throws {
