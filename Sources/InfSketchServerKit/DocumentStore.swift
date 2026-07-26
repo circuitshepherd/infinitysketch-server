@@ -80,12 +80,42 @@ public struct DirectoryDocumentStore: DocumentStore {
         FileManager.default.fileExists(atPath: try fileURL(for: docId).path)
     }
 
+    /// Name of the trash subdirectory. It has no `.infsketch` extension and `list()` enumerates
+    /// non-recursively, so trashed documents can never appear in a listing.
+    public static let trashDirectoryName = ".trash"
+
+    /// Move the document into the trash rather than destroying it — the server-side counterpart of
+    /// the app browser's Files trash, so a delete is recoverable on both sides. The document is
+    /// gone from the store either way: `exists` is false and `load` throws afterwards.
+    ///
+    /// The trashed name carries a UTC stamp, so deleting successive documents of the same name
+    /// keeps every one of them instead of the newest silently replacing the last.
+    ///
+    /// Falls back to an outright removal if the move fails — deleting must still work, and leaving
+    /// the document in place would mean the caller's delete silently did nothing.
     public func delete(docId: String) throws {
         let url = try fileURL(for: docId)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw DocumentStoreError.notFound
         }
-        try FileManager.default.removeItem(at: url)
+        let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+            let stamped = "\(docId)__\(Self.trashStamp())"
+            try FileManager.default.moveItem(
+                at: url,
+                to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))
+        } catch {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private static func trashStamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: Date())
     }
 
     private func fileURL(for docId: String) throws -> URL {

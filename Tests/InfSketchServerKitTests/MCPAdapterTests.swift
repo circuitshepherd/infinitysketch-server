@@ -737,7 +737,9 @@ private actor FakeStrokeOpDevice {
     // retire-collision-tools REMOVED the 3 inert collision tools
     // (list_collisions/render_collision/resolve_collision), renaming this
     // from `listToolsContainsAllFortyTwoTools`.
-    @Test func listToolsContainsAllThirtyNineTools() async throws {
+    // delete_doc (agent document delete) added one, renaming this from
+    // `listToolsContainsAllThirtyNineTools`.
+    @Test func listToolsContainsAllFortyTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -756,7 +758,7 @@ private actor FakeStrokeOpDevice {
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
-            "fetch_doc",
+            "fetch_doc", "delete_doc",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -5378,3 +5380,74 @@ private actor FakeStrokeOpDevice {
 }
 
 #endif  // !os(Linux)
+
+@Suite struct DeleteDocToolTests {
+
+    @Test func deleteDocRemovesTheDocumentAndReportsIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // "d" is the harness's seeded document, so it genuinely exists in the store.
+        let (content, isError) = try await client.callTool(
+            name: "delete_doc", arguments: ["docId": "d"])
+
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("deleted d"))
+
+        // And it is really gone: deleting it again no longer finds it.
+        let (_, againError) = try await client.callTool(
+            name: "delete_doc", arguments: ["docId": "d"])
+        #expect(againError == true, "the document should no longer exist")
+
+        await server.stop()
+    }
+
+    @Test func deletingAnUnknownDocumentReportsUnknownDoc() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_doc", arguments: ["docId": "Ghost"])
+
+        #expect(isError == true)
+        #expect(toolResultText(content).contains("unknownDoc"))
+
+        await server.stop()
+    }
+
+    /// An empty docId is an argument error, not a mysterious unknownDoc — and must never reach the
+    /// store, whose id sanitising would be the only thing standing between "" and the directory.
+    @Test func anEmptyDocIdIsRejectedAsAnArgumentError() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "delete_doc", arguments: ["docId": ""])
+
+        #expect(isError == true)
+        #expect(toolResultText(content).contains("invalidArgument"))
+
+        await server.stop()
+    }
+
+    @Test func theToolIsAdvertisedWithItsRecoverabilityAndResurrectionCaveats() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let tools = try await client.listTools().tools
+        let deleteDoc = try #require(tools.first { $0.name == "delete_doc" })
+        // An agent must be told both that the delete is recoverable and that it may not stick.
+        #expect(deleteDoc.description?.contains(".trash") == true)
+        #expect(deleteDoc.description?.contains("re-push") == true)
+
+        await server.stop()
+    }
+}
