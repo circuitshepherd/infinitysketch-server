@@ -738,8 +738,9 @@ private actor FakeStrokeOpDevice {
     // (list_collisions/render_collision/resolve_collision), renaming this
     // from `listToolsContainsAllFortyTwoTools`.
     // delete_doc (agent document delete) added one, renaming this from
-    // `listToolsContainsAllThirtyNineTools`.
-    @Test func listToolsContainsAllFortyTools() async throws {
+    // `listToolsContainsAllThirtyNineTools`. restyle_selection + delete_selection (live-selection
+    // editing) added two more, renaming this from `listToolsContainsAllFortyTools`.
+    @Test func listToolsContainsAllFortyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -758,7 +759,7 @@ private actor FakeStrokeOpDevice {
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
-            "fetch_doc", "delete_doc",
+            "fetch_doc", "delete_doc", "restyle_selection", "delete_selection",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
