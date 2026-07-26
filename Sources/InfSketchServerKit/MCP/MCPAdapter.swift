@@ -2688,10 +2688,25 @@ public actor MCPAdapter {
                 // stroke). A missing/undecodable meta degrades to just the
                 // seq line rather than throwing.
                 var summary = "drew \(strokes.count) stroke(s) at seq \(seq)"
+                // A typed struct, NOT [String: [String]] — that shape cannot decode the
+                // `resolvedTool` object and silently dropped the `ids:` line when the device
+                // started reporting it. The device's meta and this decoder move together.
+                struct DrawMeta: Decodable {
+                    struct Tool: Decodable { let inkType: String; let width: Double; let color: String }
+                    let keys: [String]?
+                    let resolvedTool: Tool?
+                }
                 if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta),
-                   let keys = decoded["keys"] {
-                    summary += "\nids: \(keys.joined(separator: ", "))"
+                   let decoded = try? JSONDecoder().decode(DrawMeta.self, from: meta) {
+                    if let keys = decoded.keys, !keys.isEmpty {
+                        summary += "\nids: \(keys.joined(separator: ", "))"
+                    }
+                    // What an omitted colour/width/inkType actually inherited from the user's
+                    // picker. Pass these back explicitly if you previewed first: the picker is
+                    // live, so omitting the fields twice reads it twice.
+                    if let tool = decoded.resolvedTool {
+                        summary += "\ninherited from the user's tool: inkType \(tool.inkType), width \(tool.width), color \(tool.color)"
+                    }
                 }
                 return summary
             }
