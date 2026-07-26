@@ -529,17 +529,18 @@ public actor MCPAdapter {
             ]),
             "width": .object([
                 "type": "number",
-                "description": "Stroke width. Defaults to 4.",
+                "description": "Peak stroke width. OMIT IT to inherit the width of the tool the user currently has selected (see get_tool).",
             ]),
             "color": .object([
                 "type": "string",
-                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. Defaults to #000000.",
+                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. OMIT IT to inherit the colour of the tool the user currently has selected in the picker (see get_tool); falls back to a paper-contrasting default when no inking tool is selected.",
             ]),
             "inkType": .object([
                 "type": "string",
                 "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
                 "description": """
-                    The ink to draw with. Defaults to pen. Note: monoline \
+                    The ink to draw with. OMIT IT to inherit the ink the user currently has \
+                    selected (see get_tool); pen when no inking tool is selected. Note: monoline \
                     persists as pen — PencilKit's archive format does not \
                     preserve it, so a monoline stroke lists back as pen.
                     """,
