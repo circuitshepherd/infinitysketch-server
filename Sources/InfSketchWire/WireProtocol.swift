@@ -9,7 +9,13 @@ public enum WireProtocol {
     /// on reconnect backoff forever with no diagnosable reason, and a browser tab opened before a
     /// server rebuild that reconnects with its old in-memory script. With it they get a clean
     /// `unsupportedVersion`. Any future wire ADDITION needs the same treatment.
-    public static let version = 2
+    ///
+    /// 3: `ClientMessage.deleteDoc` / `ServerMessage.docDeleted` (document delete). Same reasoning
+    /// as the v2 bump, and the failure it prevents is concrete: a stale v2 app stays connected
+    /// happily until the moment some other device deletes a document it is subscribed to, at which
+    /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
+    /// diagnosable cause, arriving arbitrarily long after the upgrade.
+    public static let version = 3
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
