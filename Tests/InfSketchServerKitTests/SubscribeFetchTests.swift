@@ -14,6 +14,7 @@ private final class CountingStore: DocumentStore, @unchecked Sendable {
     func list() throws -> [StoredDocInfo] { try inner.list() }
     func load(docId: String) throws -> Data { try inner.load(docId: docId) }
     func exists(docId: String) throws -> Bool { try inner.exists(docId: docId) }
+    func delete(docId: String) throws { try inner.delete(docId: docId) }
     func save(docId: String, bytes: Data) throws {
         lock.lock(); _saveCount += 1; lock.unlock()
         try inner.save(docId: docId, bytes: bytes)

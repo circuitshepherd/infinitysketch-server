@@ -174,6 +174,36 @@ public actor SessionManager {
         }
     }
 
+    /// Delete a document from the server: its stored bytes, its live session, and its holder
+    /// index entry. Throws `DocumentStoreError.notFound` if the server holds neither content nor
+    /// an advertisement for it.
+    ///
+    /// Deliberately NOT guarded by a `WriteExpectation` the way writes are — the user asked for
+    /// the document to be gone, so a write that landed a moment before does not make the request
+    /// stale. Equally deliberately, NOTHING is retained afterwards: no tombstone, no deleted-id
+    /// list. A device that still holds a copy may re-advertise or re-push it and bring it back,
+    /// which is accepted behaviour rather than a bug to design against.
+    public func deleteDoc(docId: String) async throws {
+        let hadContent = (try? store.exists(docId: docId)) ?? false
+        let hadAdvertisement = liveIndex[docId] != nil
+        guard hadContent || hadAdvertisement else { throw DocumentStoreError.notFound }
+
+        if hadContent { try store.delete(docId: docId) }
+
+        // Drop the advertisement so the deleting device's own browser does not keep showing the
+        // document as a remote row until the next advertisement refresh. A device that still holds
+        // it re-advertises on its next push, which is the accepted resurrection path.
+        liveIndex.removeValue(forKey: docId)
+
+        if let session = sessions.removeValue(forKey: docId) {
+            await session.announceDeleted()
+            counts.removeValue(forKey: docId)
+            watcherCounts.removeValue(forKey: docId)
+            graceTasks.removeValue(forKey: docId)?.task.cancel()
+            emitStatus(docId: docId, kind: "sessionClosed", seq: nil, count: 0)
+        }
+    }
+
     /// Register a viewer. Opens the session from the store if needed (no
     /// createIfMissing analog — you can't watch a doc that doesn't exist).
     public func watch(docId: String) async throws -> WatchResult {

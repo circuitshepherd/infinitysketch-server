@@ -125,6 +125,9 @@ private final class StaleReadStore: DocumentStore, @unchecked Sendable {
     func exists(docId: String) throws -> Bool {
         docId == self.docId
     }
+
+    /// This fake exists to serve stale reads, not to be mutated; nothing here deletes.
+    func delete(docId: String) throws { throw DocumentStoreError.notFound }
 }
 
 /// A raw MCP-shaped HTTP request (URLSession), for driving paths the SDK
