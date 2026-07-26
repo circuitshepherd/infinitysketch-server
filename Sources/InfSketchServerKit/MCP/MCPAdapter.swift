@@ -401,8 +401,13 @@ public actor MCPAdapter {
     /// create_doc (nothing to compare — its docExists guard is the race's
     /// only meaningful shape) and NOT the read-only tools, which never write:
     /// list_strokes, get_strokes, render_sketch, snap_points, list_fonts.
-    private static let casRejectionSentence =
-        "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
+    /// The two caveats every WRITE tool shares. Attached to the same set of tools, because they
+    /// are the same set: anything that can be CAS-rejected can also be undone by the user.
+    private static let writeToolCaveats =
+        "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. "
+        + "The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: "
+        + "re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. "
+        + "Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes."
 
     // MARK: - Styled text (styled_text branch)
     //
@@ -578,7 +583,7 @@ public actor MCPAdapter {
                 (e.g. a subscript). A whole-field style is the base each span overrides. Styling \
                 needs a connected device; plain text does not. Returns the new text's id so you \
                 can edit it. Colours: #RRGGBB(AA). Font families come from list_fonts — call it \
-                before setting a `family`. \(casRejectionSentence)
+                before setting a `family`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -622,7 +627,7 @@ public actor MCPAdapter {
                 the EXISTING characters (or replaces them with `text`/`spans` if given) and \
                 needs a connected device — plain edits do not. Position-only edits (x and/or y \
                 with no text/style) do not touch formatting. Colours: #RRGGBB(AA). Font \
-                families come from list_fonts. \(casRejectionSentence)
+                families come from list_fonts. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -672,7 +677,7 @@ public actor MCPAdapter {
         ),
         Tool(
             name: "remove_text",
-            description: "Removes a placed text entry from a document by id. \(casRejectionSentence)",
+            description: "Removes a placed text entry from a document by id. \(writeToolCaveats)",
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
@@ -735,7 +740,7 @@ public actor MCPAdapter {
             description: """
                 Remove a placed image from a document by its id (as returned by add_image or \
                 reported by get_selection). unknownDoc if the document doesn't exist; \
-                imageNotFound if no placed image has that id. \(casRejectionSentence)
+                imageNotFound if no placed image has that id. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -755,7 +760,7 @@ public actor MCPAdapter {
                 unpinned content and is skipped by rect-select. Server-side, no device needed. \
                 Atomic: if any id isn't a text or image in the document it fails with \
                 elementNotFound and nothing changes. unknownDoc if the document doesn't exist. \
-                \(casRejectionSentence)
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -781,7 +786,7 @@ public actor MCPAdapter {
                 automatic light<->dark derivation). Server-side, no device needed; applies \
                 live to an open document with no banner. unknownDoc if the document doesn't \
                 exist; invalidSpec on a bad hex colour; invalidArguments if no field is given. \
-                \(casRejectionSentence)
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -799,7 +804,7 @@ public actor MCPAdapter {
             description: """
                 Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
                 exist. The bytes are opaque to the server — the agent owns their validity, \
-                the same trust any other writer on the network has. \(casRejectionSentence)
+                the same trust any other writer on the network has. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -852,7 +857,7 @@ public actor MCPAdapter {
                 noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in \
                 time, opInProgress if another stroke operation on this document is already in \
                 flight, and deviceFailed: <reason> if the device rejects the strokes (e.g. \
-                malformed points). \(casRejectionSentence)
+                malformed points). \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -890,7 +895,7 @@ public actor MCPAdapter {
                 connected, deviceTimeout if it doesn't respond in time, opInProgress if \
                 another stroke operation on this document is already in flight, and \
                 deviceFailed: <reason> if a key doesn't match any stroke. The result names the \
-                seq the write was assigned. \(casRejectionSentence)
+                seq the write was assigned. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1006,7 +1011,7 @@ public actor MCPAdapter {
                 device — fails with noDeviceAvailable if none is connected and deviceTimeout \
                 if it doesn't respond in time. unknownDoc if the document doesn't exist; \
                 invalidSpec if `color` isn't valid hex or `type` isn't one of the four \
-                recognized strings. \(casRejectionSentence)
+                recognized strings. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1047,7 +1052,7 @@ public actor MCPAdapter {
                 connected device — fails with noDeviceAvailable if none is connected and \
                 deviceTimeout if it doesn't respond in time. gridNotFound if no grid has \
                 that id; unknownDoc if the document doesn't exist; invalidSpec if `color`/ \
-                `type` aren't recognized. \(casRejectionSentence)
+                `type` aren't recognized. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1084,7 +1089,7 @@ public actor MCPAdapter {
                 Removes a grid from a document by its id, authored by a connected \
                 InfinitySketch device. The grid array may legitimately reach zero, as in the \
                 app. gridNotFound if no grid has that id; unknownDoc if the document doesn't \
-                exist. \(casRejectionSentence)
+                exist. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1105,7 +1110,7 @@ public actor MCPAdapter {
                 with noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. unknownDoc if the document doesn't exist; gridNotFound/ \
                 invalidSpec if orderedIds isn't a valid permutation of the document's grid ids. \
-                \(casRejectionSentence)
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1128,7 +1133,7 @@ public actor MCPAdapter {
                 through (x, y): the offset is recomputed so the grid stays anchored there. \
                 No snap — use snap_points first if you want a lattice point. Authored by a \
                 connected InfinitySketch device. gridNotFound if no grid has that id; \
-                unknownDoc if the document doesn't exist. \(casRejectionSentence)
+                unknownDoc if the document doesn't exist. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1387,7 +1392,7 @@ public actor MCPAdapter {
                 of its line families — one family constrains a single direction, e.g. a \
                 wire's y while its x stays put) you actually mean; with no enabled grid \
                 (and no snapTo), snapToGrid is a no-op. A snap alone, with no translate/ \
-                scale/rotate, is a legal request. \(casRejectionSentence)
+                scale/rotate, is a legal request. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1477,7 +1482,7 @@ public actor MCPAdapter {
                 value the user drew with is not recorded anywhere and cannot be \
                 recovered from the stroke (a colour-only restyle, and any stroke the \
                 user HAS width-edited, are unaffected). Note: monoline persists as pen \
-                — PencilKit's archive format does not preserve it. \(casRejectionSentence)
+                — PencilKit's archive format does not preserve it. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1531,7 +1536,7 @@ public actor MCPAdapter {
                 Attributes you OMIT on a point are resampled from the ORIGINAL stroke \
                 along the new path — so straightening a wobbly line with plain [x, y] \
                 pairs keeps its pressure taper. Supply attributes explicitly to \
-                override that. \(casRejectionSentence)
+                override that. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1918,7 +1923,7 @@ public actor MCPAdapter {
                 REQUIRES a connected device with the mergeDocs capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: <reason> if the device rejects \
-                the merge. \(casRejectionSentence)
+                the merge. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1950,7 +1955,7 @@ public actor MCPAdapter {
                 REQUIRES a connected device with the copyElements capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: elementNotFound if an id \
-                isn't found in `source`. \(casRejectionSentence)
+                isn't found in `source`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1994,7 +1999,7 @@ public actor MCPAdapter {
                 with noDeviceAvailable if none is connected, deviceTimeout if it doesn't \
                 respond in time, unknownDoc if the document doesn't exist, and \
                 deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. \
-                \(casRejectionSentence)
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
