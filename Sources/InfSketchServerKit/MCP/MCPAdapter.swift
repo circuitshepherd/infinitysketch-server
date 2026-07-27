@@ -428,8 +428,12 @@ public actor MCPAdapter {
     /// True iff any style/spans argument is present (and not an explicit
     /// JSON null) — the plain-vs-styled routing decision for
     /// `callAddText`/`callEditText`.
+    ///
+    /// `name` is in the list even though it is not a style: an element name lives in
+    /// `elementNames`, which the server-side `DocJSON` path does not write, so a named
+    /// `add_text` must take the device path or the name would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        styleArgKeys.contains { key in
+        (styleArgKeys + ["name"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
@@ -658,6 +662,65 @@ public actor MCPAdapter {
                     ].merging(textStyleProperties) { current, _ in current }
                 ),
                 "required": .array(["docId", "textId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "tag_elements",
+            description: """
+                Give an element a durable NAME, so you can find it again later — the stroke you \
+                drew for an axis, the text that titles a chart. Names live in the DOCUMENT, so \
+                they outlast this task, this session and this agent, which the ids returned by \
+                draw_strokes do not.
+
+                THE POINT: with a name you can update your own work in place (find_elements -> \
+                reshape_strokes) instead of deleting and redrawing, which is what destroys the \
+                user's own annotations and hand-adjusted spacing.
+
+                A name identifies exactly ONE element, so `name` requires exactly one id. \
+                Assigning a name that is already taken MOVES it — the previous holder stays on \
+                the canvas, unnamed, and the reply says which it was, so you can delete it if \
+                this was a replacement. To CLEAR names, pass `name: null` with any number of ids. \
+                Names are 1-128 characters; use whatever reads well ("fft.axis.h", "Achse H"). \
+                \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "ids": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Element ids (stroke id, text id or image id). Exactly one when setting a name; any number when clearing.",
+                    ]),
+                    "name": .object([
+                        "type": "string",
+                        "description": "The name to assign. Omit or pass null to CLEAR the names of the given ids.",
+                    ]),
+                ]),
+                "required": .array(["docId", "ids"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "find_elements",
+            description: """
+                Resolve element NAMES to ids, so you can act on them with any tool that takes \
+                ids. Read-only, and cheap: no document payload comes back, just \
+                `{name: id}` for the names that resolve.
+
+                A name whose element no longer exists is simply ABSENT from the reply rather \
+                than a dangling id — so an empty answer means "that element is gone", not "the \
+                lookup failed". Names are set with tag_elements, or at creation time by \
+                draw_strokes / add_text / add_image.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                    "names": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "The names to resolve.",
+                    ]),
+                ]),
+                "required": .array(["docId", "names"].map(Value.string)),
             ])
         ),
         Tool(
@@ -2160,6 +2223,8 @@ public actor MCPAdapter {
     private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
         case "list_open_docs": return await callListOpenDocs()
+        case "tag_elements": return await callTagElements(arguments)
+        case "find_elements": return await callFindElements(arguments)
         case "add_text": return await callAddText(arguments)
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
@@ -2272,7 +2337,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "x", "y", "pinned", "color", "fontSize", "bold", "italic", "family", "spans"] {
+            for key in ["text", "x", "y", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "name"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -2345,6 +2410,7 @@ public actor MCPAdapter {
             if let width { envelope["width"] = .double(width) }
             if let height { envelope["height"] = .double(height) }
             if let opacity { envelope["opacity"] = .double(opacity) }
+            if let name = try Self.optionalStringArg(arguments, "name") { envelope["name"] = .string(name) }
 
             let spec: Data
             do {
@@ -2805,6 +2871,9 @@ public actor MCPAdapter {
                     struct Tool: Decodable { let inkType: String; let width: Double; let color: String }
                     let keys: [String]?
                     let resolvedTool: Tool?
+                    /// Parallel to `keys`; an empty entry means that stroke's name displaced
+                    /// nothing. Absent entirely when no supplied name took over.
+                    let displacedNames: [String]?
                 }
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode(DrawMeta.self, from: meta) {
@@ -2816,6 +2885,14 @@ public actor MCPAdapter {
                     // live, so omitting the fields twice reads it twice.
                     if let tool = decoded.resolvedTool {
                         summary += "\ninherited from the user's tool: inkType \(tool.inkType), width \(tool.width), color \(tool.color)"
+                    }
+                    // A name that was already taken MOVES to the new stroke. The element it came
+                    // from is still on the canvas, now unnamed — reported so you can delete it if
+                    // this draw was meant to replace it.
+                    if let displaced = decoded.displacedNames {
+                        for taken in displaced where !taken.isEmpty {
+                            summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
+                        }
                     }
                 }
                 return summary
@@ -3335,6 +3412,89 @@ public actor MCPAdapter {
             ) { seq in
                 "moved \(count) element(s) to \(mode) in \(docId) at seq \(seq)"
             }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `tag_elements` — set or clear a durable element name
+    /// (spec 2026-07-27-element-names-design.md). Device-relayed because validating that an id
+    /// EXISTS means enumerating stroke composite keys, and only PencilKit can decode a drawing.
+    private func callTagElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
+            let name = try Self.optionalStringArg(arguments, "name")
+            // A name belongs to ONE element: naming several at once has no meaning, and naming
+            // only the first would be a trap. Clearing many is unambiguous, so it is allowed.
+            if name != nil && ids.count != 1 { return Self.errorResult("invalidArguments") }
+
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            var fields: [String: Value] = [
+                "op": .string("tagElements"),
+                "ids": .array(ids.map(Value.string)),
+            ]
+            if let name { fields["name"] = .string(name) }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(fields)) }
+            catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "tagElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            // The device reports which element lost the name, if any — surfaced verbatim so the
+            // agent can delete the displaced element if this was meant as a replacement.
+            let displaced = out.meta
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }?["displaced"]
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in
+                guard let name else { return "cleared \(ids.count) name(s) in \(docId) at seq \(seq)" }
+                guard let displaced else { return "named \(ids[0]) \"\(name)\" in \(docId) at seq \(seq)" }
+                return "named \(ids[0]) \"\(name)\" in \(docId) at seq \(seq); the name moved from \(displaced), "
+                     + "which is still on the canvas and now unnamed"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `find_elements` — resolve names to ids. Read-only: no submit, no seq, nothing to retry.
+    private func callFindElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let names = try Self.nonEmptyStringArrayArg(arguments, "names")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("findElements"),
+                    "names": .array(names.map(Value.string)),
+                ]))
+            } catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "tagElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            guard let meta = out.meta, let text = String(data: meta, encoding: .utf8) else {
+                return Self.errorResult("deviceFailed: no lookup result")
+            }
+            return Self.textResult(text)
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {

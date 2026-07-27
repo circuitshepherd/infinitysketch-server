@@ -741,8 +741,9 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllThirtyNineTools`. restyle_selection + delete_selection (live-selection
     // editing) added two more, renaming this from `listToolsContainsAllFortyTools`.
     // list_open_docs (the "which document am I talking to?" listing) added one, renaming this
-    // from `listToolsContainsAllFortyFourTools`.
-    @Test func listToolsContainsAllFortyFiveTools() async throws {
+    // from `listToolsContainsAllFortyFourTools`. tag_elements + find_elements (durable element
+    // names) added two more, renaming this from `listToolsContainsAllFortyFiveTools`.
+    @Test func listToolsContainsAllFortySevenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -754,7 +755,8 @@ private actor FakeStrokeOpDevice {
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
-            "snap_points", "list_fonts", "list_open_docs", "get_selection", "transform_selection",
+            "snap_points", "list_fonts", "list_open_docs", "tag_elements", "find_elements",
+            "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
             "merge_docs",
@@ -5042,6 +5044,152 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - tag_elements / find_elements (element names, 2026-07-27)
+
+    /// The naming ops are device-relayed for the same reason `list_strokes` is: validating that an
+    /// id EXISTS means enumerating stroke composite keys, and only PencilKit can decode a drawing.
+    /// This pins the envelope the device decodes (`ElementNaming.TagSpec`, app repo) — a plain
+    /// `Decodable`, so a field-name drift here would fail SILENTLY on one side of the wire.
+    @Test func tagElementsRelaysSpecAndCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"named"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1"], "name": "fft.axis.h"])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains(#"named k1 "fft.axis.h" in d"#))
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "tagElements")
+        #expect(spec["ids"] as? [String] == ["k1"])
+        #expect(spec["name"] as? String == "fft.axis.h")
+    }
+
+    /// A name identifies ONE element, so setting one takes exactly one id — rejected HERE, before
+    /// the device is contacted, because the shape is wrong rather than the content.
+    @Test func tagElementsRejectsSeveralIdsWhenSettingAName() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1", "k2"], "name": "both"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("invalidArguments"))
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// Clearing many at once IS meaningful ("un-name all of these"), so the same argument shape
+    /// with no `name` is accepted and relayed with the field absent.
+    @Test func tagElementsClearsManyIdsAtOnce() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"cleared"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1", "k2"]])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("cleared 2 name(s) in d"))
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["name"] == nil)
+    }
+
+    /// A name that was already taken MOVES to the new element. The reply names the element it came
+    /// from — still on the canvas, now unnamed — so the agent can delete it if this was a
+    /// replacement. The alternative (deleting it here) is a write that removes something the
+    /// caller never named.
+    @Test func tagElementsReportsTheElementANameMovedFrom() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","marker":"named"}"#.utf8),
+                                      meta: Data(#"{"displaced":"old-key"}"#.utf8)),
+            capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1"], "name": "fft.axis.h"])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("the name moved from old-key"))
+        #expect(text.contains("still on the canvas and now unnamed"))
+    }
+
+    @Test func tagElementsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "ghost", "ids": ["k1"], "name": "x"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `find_elements` is a READ: the device's answer rides in `meta` and is passed through as the
+    /// tool's text. Nothing is submitted, so there is no seq and nothing to retry.
+    @Test func findElementsReturnsTheNameToIdMap() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Fixtures.docBytes,
+                                      meta: Data(#"{"fft.axis.h":"3969691072-806790281"}"#.utf8)),
+            capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "names": ["fft.axis.h"]])
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"{"fft.axis.h":"3969691072-806790281"}"#)
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "findElements")
+        #expect(spec["names"] as? [String] == ["fft.axis.h"])
+    }
+
+    @Test func findElementsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "ghost", "names": ["x"]])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
