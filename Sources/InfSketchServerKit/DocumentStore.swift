@@ -39,10 +39,19 @@ public protocol DocumentStore: Sendable {
 public struct DirectoryDocumentStore: DocumentStore {
     public static let fileExtension = "infsketch"
     private let directory: URL
+    /// How long a deleted document stays recoverable in `.trash` before pruning removes it.
+    /// 30 days, matching the iOS "Recently Deleted" window the app's own delete lands in — both
+    /// sides of a delete answer "how long do I have to change my mind?" the same way. Injected so
+    /// tests can pin the boundary instead of waiting a month.
+    private let trashRetention: TimeInterval
 
-    public init(directory: URL) {
+    public init(directory: URL, trashRetention: TimeInterval = 30 * 24 * 60 * 60) {
         self.directory = directory
+        self.trashRetention = trashRetention
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Sweep once here as well as after each delete, so a server that runs for weeks without
+        // deleting anything still clears out what expired while it was up.
+        pruneTrash()
     }
 
     public func list() throws -> [StoredDocInfo] {
@@ -108,14 +117,53 @@ public struct DirectoryDocumentStore: DocumentStore {
         } catch {
             try FileManager.default.removeItem(at: url)
         }
+        // Tidying, after the part the user actually asked for. Never allowed to fail the delete.
+        pruneTrash()
     }
 
-    private static func trashStamp() -> String {
+    /// Remove trashed documents past `trashRetention`
+    /// (spec 2026-07-27-server-trash-pruning-design.md). Best-effort throughout: every failure
+    /// leaves the file in place, which is the safe direction for content someone may still want.
+    private func pruneTrash(now: Date = Date()) {
+        let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: trashDir.path) else { return }
+        for name in names {
+            // No parseable stamp -> KEEP. A hand-placed file, or a naming scheme older than this
+            // code, is not something to delete on a guess.
+            guard let trashedAt = Self.trashDate(fromTrashedBasename: (name as NSString).deletingPathExtension)
+            else { continue }
+            guard now.timeIntervalSince(trashedAt) > trashRetention else { continue }
+            try? FileManager.default.removeItem(at: trashDir.appendingPathComponent(name))
+        }
+    }
+
+    private static let trashStampFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+
+    private static func trashStampFormatter() -> DateFormatter {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+        f.dateFormat = trashStampFormat
         f.timeZone = TimeZone(identifier: "UTC")
         f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: Date())
+        return f
+    }
+
+    /// Internal rather than private so tests can plant a trashed file of a chosen age.
+    static func trashStamp(for date: Date = Date()) -> String {
+        trashStampFormatter().string(from: date)
+    }
+
+    /// When a trashed file was deleted, read from the stamp `delete` wrote into its name.
+    ///
+    /// NOT the file's modification date: `moveItem` PRESERVES it, so a trashed file's mtime is
+    /// when the document was last edited. A document written in spring and deleted today would
+    /// look months old and be pruned on the spot.
+    ///
+    /// Splits on the LAST `__`, so a docId that itself contains `__` is dated from its stamp and
+    /// not from part of its own name. Returns nil for anything that does not parse — the caller
+    /// keeps those.
+    static func trashDate(fromTrashedBasename basename: String) -> Date? {
+        guard let separator = basename.range(of: "__", options: .backwards) else { return nil }
+        return trashStampFormatter().date(from: String(basename[separator.upperBound...]))
     }
 
     private func fileURL(for docId: String) throws -> URL {
