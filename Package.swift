@@ -14,6 +14,9 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/swhitty/FlyingFox.git", .upToNextMajor(from: "0.27.0")),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
+        // SHA-256 for the `.matchHash` write expectation. On InfSketchServerKit ONLY —
+        // InfSketchWire carries the digest as opaque bytes and stays dependency-free.
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
     ],
     targets: [
         .target(name: "InfSketchWire"),
@@ -24,6 +27,7 @@ let package = Package(
                 .product(name: "FlyingFox", package: "FlyingFox"),
                 .product(name: "FlyingSocks", package: "FlyingFox"),
                 .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         .executableTarget(

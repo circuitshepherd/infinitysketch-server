@@ -15,7 +15,7 @@ public enum WireProtocol {
     /// happily until the moment some other device deletes a document it is subscribed to, at which
     /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
-    public static let version = 3
+    public static let version = 4
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -42,6 +42,14 @@ public enum BulkPayload: Equatable, Sendable {
 public enum WriteExpectation: Equatable, Sendable {
     case none
     case matchBytes(Data)
+    /// SHA-256 of the content the writer expects to find. Same guarantee as `matchBytes`, but
+    /// 32 bytes instead of a second copy of the document — which is what makes it usable by the
+    /// APP's ordinary settle-push, where `matchBytes` would double every upload
+    /// (spec 2026-07-27-app-push-write-expectation-design.md).
+    ///
+    /// The digest is opaque here: this module carries it and never computes one, which is how
+    /// InfSketchWire keeps its zero dependencies.
+    case matchHash(Data)
     case absent
 }
 
@@ -57,6 +65,8 @@ extension WriteExpectation: Codable {
             self = .absent
         case "match":
             self = .matchBytes(try c.decode(Data.self, forKey: .bytes))
+        case "hash":
+            self = .matchHash(try c.decode(Data.self, forKey: .bytes))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: c, debugDescription: "unknown WriteExpectation kind: \(other)")
@@ -73,6 +83,9 @@ extension WriteExpectation: Codable {
         case .matchBytes(let bytes):
             try c.encode("match", forKey: .kind)
             try c.encode(bytes, forKey: .bytes)
+        case .matchHash(let digest):
+            try c.encode("hash", forKey: .kind)
+            try c.encode(digest, forKey: .bytes)
         }
     }
 }

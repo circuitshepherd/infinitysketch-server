@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 import InfSketchWire
 
 public struct SessionConfig: Sendable {
@@ -319,6 +320,14 @@ actor DocumentSession {
             break
         case .matchBytes(let expected):
             if bytes != expected {
+                return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
+            }
+        case .matchHash(let expected):
+            // The same guarantee as `.matchBytes` — this session's current content is what the
+            // writer read — with a digest standing in for the bytes, so the APP can afford to
+            // carry it on every settle-push (spec 2026-07-27-app-push-write-expectation-design).
+            // Same actor turn, same position above `store.save`, same rejection reason.
+            if Data(SHA256.hash(data: bytes)) != expected {
                 return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
             }
         case .absent:
