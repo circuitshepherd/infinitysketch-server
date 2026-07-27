@@ -831,7 +831,7 @@ private actor FakeStrokeOpDevice {
             name: "add_text",
             arguments: ["docId": "ghost", "text": "hi", "x": 1, "y": 2])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -1176,7 +1176,7 @@ private actor FakeStrokeOpDevice {
             name: "add_text",
             arguments: ["docId": "d", "x": 0, "y": 0, "color": "#FF0000"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -1251,7 +1251,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "remove_image", arguments: ["docId": "ghost", "imageId": "IMG-X"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -1315,7 +1315,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "set_pinned", arguments: ["docId": "ghost", "ids": ["x"], "pinned": true])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -1814,7 +1814,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "create_doc", arguments: ["docId": "NoDevice"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
 
         await server.stop()
     }
@@ -1982,7 +1982,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_texts", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -2002,7 +2002,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_texts", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -2049,7 +2049,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_images", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -2069,7 +2069,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_images", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -2315,7 +2315,7 @@ private actor FakeStrokeOpDevice {
             name: "draw_strokes",
             arguments: ["docId": "d", "strokes": Self.minimalCanonicalStrokes])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
 
         await server.stop()
     }
@@ -2579,7 +2579,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "render_sketch", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -2610,7 +2610,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "render_sketch", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
 
         await server.stop()
     }
@@ -2945,7 +2945,7 @@ private actor FakeStrokeOpDevice {
             "docId": "d", "points": .array([.array([.double(1), .double(1)])]),
         ])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
 
         await server.stop()
     }
@@ -2962,7 +2962,7 @@ private actor FakeStrokeOpDevice {
             "docId": "ghost", "points": .array([.array([.double(1), .double(1)])]),
         ])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -3317,7 +3317,7 @@ private actor FakeStrokeOpDevice {
         for (name, args) in calls {
             let (content, isError) = try await client.callTool(name: name, arguments: args)
             #expect(isError == true, "\(name)")
-            #expect(toolResultText(content) == "unknownDoc", "\(name)")
+            #expect(toolResultText(content).hasPrefix("unknownDoc"), "\(name)")
         }
 
         // The ordering proof: a CONNECTED device that received ZERO requests.
@@ -3598,7 +3598,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "get_selection", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -3615,7 +3615,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "get_selection", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -3942,7 +3942,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "preview_selection", arguments: ["docId": "d", "ops": opsArg])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -3960,7 +3960,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "preview_selection", arguments: ["docId": "ghost", "ops": opsArg])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -4125,7 +4125,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "duplicate_selection", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -4142,7 +4142,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "duplicate_selection", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }
@@ -4159,7 +4159,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "duplicate_selection", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "deviceFailed: noSelectionActive")
+        #expect(toolResultText(content).hasPrefix("deviceFailed: noSelectionActive"))
 
         await server.stop()
     }
@@ -4622,7 +4622,7 @@ private actor FakeStrokeOpDevice {
             name: "add_image",
             arguments: ["docId": "ghost", "bytes": .string(Data([0x01, 0x02]).base64EncodedString()), "x": 0, "y": 0])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4690,7 +4690,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_grids", arguments: ["docId": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "noDeviceAvailable")
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -4710,7 +4710,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "list_grids", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4770,7 +4770,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "add_grid", arguments: ["docId": "ghost"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4826,7 +4826,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "update_grid", arguments: ["docId": "ghost", "id": "GRID-1", "spacing": 40])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4876,7 +4876,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "remove_grid", arguments: ["docId": "ghost", "id": "GRID-1"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4930,7 +4930,7 @@ private actor FakeStrokeOpDevice {
             name: "set_grid_origin",
             arguments: ["docId": "ghost", "id": "GRID-1", "x": 0, "y": 0])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -4985,7 +4985,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "reorder_grids", arguments: ["docId": "ghost", "orderedIds": ["id1"]])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         // Fast-fail: the device must never be contacted for an unknown doc.
         #expect(await device.receivedRequests.isEmpty)
@@ -5090,7 +5090,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "reorder_elements", arguments: ["docId": "ghost", "strokeIds": ["k1"], "mode": "front"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
@@ -5178,7 +5178,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "set_paper", arguments: ["docId": "ghost", "light": "#112233"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
         await server.stop()
     }
 
@@ -5369,7 +5369,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "fetch_doc", arguments: ["docId": "TotallyUnknown"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "unknownDoc")
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
         await server.stop()
     }

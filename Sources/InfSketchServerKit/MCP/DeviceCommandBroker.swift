@@ -99,6 +99,14 @@ public actor DeviceCommandBroker {
                                       capabilities: capabilities, send: send))
     }
 
+    /// How many devices are connected, and the union of what they can do. Read only to make
+    /// `noDeviceAvailable` say WHY (spec 2026-07-27-actionable-tool-errors-design.md): "no device
+    /// is connected" and "a device is connected but none offers `controlSelection`" are different
+    /// problems with different fixes, and the bare reason string tells them apart for nobody.
+    public func connectionSummary() -> (count: Int, capabilities: Set<String>) {
+        (connections.count, connections.reduce(into: Set<String>()) { $0.formUnion($1.capabilities) })
+    }
+
     /// WSAdapter calls on connection close. Fails that connection's pending
     /// requests immediately with .deviceTimeout.
     public func unregister(connectionId: UUID) {

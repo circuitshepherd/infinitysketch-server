@@ -2053,7 +2053,85 @@ public actor MCPAdapter {
         ListTools.Result(tools: Self.tools)
     }
 
+    /// Every tool call, with one post-processing step: an error that names only a SYMPTOM gets
+    /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
+        await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
+                            arguments: arguments)
+    }
+
+    /// Turn a dead-end error into a self-correcting one.
+    ///
+    /// The failure this exists for: a document renamed while open keeps the mirror `docId` it was
+    /// registered under (the filename stem at `beginMirroring`), so an agent aiming at the name
+    /// the user now sees misses the live session and is told `noSelectionActive` — with no way to
+    /// learn that `grok2 test` and `Untitled 16 1 1` are the same open document. The server knows
+    /// both. Saying so costs nothing and removes the guesswork.
+    ///
+    /// Applied at THIS seam rather than at the ~57 `errorResult("unknownDoc")` call sites: one
+    /// place to keep correct, and it also catches the device-relayed `deviceFailed:
+    /// noSelectionActive` string, which no call-site edit could reach. Anything else — every
+    /// other error, and every success — passes through untouched.
+    private func enrichedError(_ result: CallTool.Result,
+                               arguments: [String: Value]?) async -> CallTool.Result {
+        guard result.isError == true,
+              let first = result.content.first,
+              case .text(let text, _, _) = first
+        else { return result }
+
+        if text == "unknownDoc" {
+            let named = (arguments?["docId"]?.stringValue).map { " named \"\($0)\"" } ?? ""
+            let ids = ((try? await manager.listDocuments()) ?? []).map(\.id).sorted()
+            return Self.errorResult("unknownDoc: no document\(named). \(Self.documentsClause(ids))")
+        }
+
+        if text == "noDeviceAvailable" {
+            // Two different problems wear this one word: nothing connected at all, or something
+            // connected that cannot do this particular job.
+            let (count, capabilities) = await broker.connectionSummary()
+            let clause = count == 0
+                ? "no device is connected to this server (open the app with the mirror enabled)"
+                : "\(count) device(s) connected, none offering the capability this tool needs "
+                  + "(offered: \(capabilities.sorted().joined(separator: ", ")))"
+            return Self.errorResult("\(text) — \(clause)")
+        }
+
+        if text == "noSelectionActive" || text.hasSuffix("noSelectionActive") {
+            // The rule is about what the SERVER can verify, not about who produced the reason.
+            //
+            // A device answers `deviceFailed: noSelectionActive` in two very different
+            // situations: the document the agent named is open and nothing is selected (literal,
+            // and the device is authoritative — say nothing), or the agent named a document this
+            // device does not have open at all (the renamed-document case — say which one it
+            // does). Only the server can tell those apart, from its own subscriber set, and
+            // getting this backwards means either lying about an open document or staying silent
+            // in exactly the case the message exists for. Both were live at different points
+            // while writing this.
+            let live = await manager.liveInfo()
+                .filter { $0.value.subscriberCount > 0 }
+                .keys.sorted()
+            if let named = arguments?["docId"]?.stringValue, live.contains(named) {
+                return result          // it IS open: `noSelectionActive` means what it says
+            }
+            let clause = live.isEmpty
+                ? "no document is open on any connected device"
+                : "open on a connected device: " + live.map { "\"\($0)\"" }.joined(separator: ", ")
+            return Self.errorResult("\(text) — \(clause)")
+        }
+
+        return result
+    }
+
+    /// "Documents: a, b, c" — capped, because a store with dozens of documents should not answer
+    /// a mistyped name with a wall of text.
+    private static func documentsClause(_ ids: [String], limit: Int = 12) -> String {
+        guard !ids.isEmpty else { return "This server holds no documents." }
+        let shown = ids.prefix(limit).map { "\"\($0)\"" }.joined(separator: ", ")
+        let more = ids.count > limit ? " (+\(ids.count - limit) more)" : ""
+        return "Documents: \(shown)\(more)"
+    }
+
+    private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
         case "add_text": return await callAddText(arguments)
         case "add_image": return await callAddImage(arguments)
