@@ -740,7 +740,9 @@ private actor FakeStrokeOpDevice {
     // delete_doc (agent document delete) added one, renaming this from
     // `listToolsContainsAllThirtyNineTools`. restyle_selection + delete_selection (live-selection
     // editing) added two more, renaming this from `listToolsContainsAllFortyTools`.
-    @Test func listToolsContainsAllFortyFourTools() async throws {
+    // list_open_docs (the "which document am I talking to?" listing) added one, renaming this
+    // from `listToolsContainsAllFortyFourTools`.
+    @Test func listToolsContainsAllFortyFiveTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -752,7 +754,7 @@ private actor FakeStrokeOpDevice {
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
-            "snap_points", "list_fonts", "get_selection", "transform_selection",
+            "snap_points", "list_fonts", "list_open_docs", "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
             "merge_docs",

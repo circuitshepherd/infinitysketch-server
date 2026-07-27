@@ -661,6 +661,32 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_open_docs",
+            description: """
+                What is OPEN right now, and on what. Read-only, no device round trip, no docId \
+                needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, seq, \
+                subscribers}]}`.
+
+                CALL THIS INSTEAD OF GUESSING A docId FROM CONVERSATION. A document's `docId` is \
+                its filename stem captured when the app opened it, so a rename mid-session leaves \
+                the name a human says ("grok2 test") different from the live id ("Untitled 16 1 \
+                1") until the document is reopened — and every tool aimed at the spoken name \
+                fails against a device that is working perfectly. `openDocs` is the truth: those \
+                are the ids the selection tools, and every write to an open document, will accept.
+
+                An empty `openDocs` with `devices.count == 0` means no device is connected at all \
+                (open the app with the mirror enabled, and check it points at THIS server's port). \
+                An empty `openDocs` with a non-zero count means a device is connected but has no \
+                document open — ask the user to open one; no amount of retrying will help. \
+                `capabilities` is the union of what the connected devices can do, which is what \
+                every `noDeviceAvailable` is ultimately about.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([:]),
+            ])
+        ),
+        Tool(
             name: "list_fonts",
             description: """
                 The font families installed on the connected device, sorted. Call this before \
@@ -2133,6 +2159,7 @@ public actor MCPAdapter {
 
     private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
+        case "list_open_docs": return await callListOpenDocs()
         case "add_text": return await callAddText(arguments)
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
@@ -4443,6 +4470,37 @@ public actor MCPAdapter {
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
         }
+    }
+
+    /// `list_open_docs` — the answer to "which document am I actually talking to?", which agents
+    /// were guessing at from conversation (spec 2026-07-27-list-open-docs-design.md).
+    ///
+    /// Everything here is already in hand: `liveInfo()` for the sessions and the broker summary
+    /// for the devices. No device round trip, so it stays cheap enough to call before anything
+    /// else — which is the point, since the failure it prevents is aiming a whole batch of writes
+    /// at a name no session answers to.
+    ///
+    /// OPEN means a session with at least one subscriber. A session with none exists whenever any
+    /// server-side tool has touched a document, and listing those would answer the question with
+    /// documents nobody has on screen — the opposite of useful.
+    private func callListOpenDocs() async -> CallTool.Result {
+        let (deviceCount, capabilities) = await broker.connectionSummary()
+        let open = await manager.liveInfo()
+            .filter { $0.value.subscriberCount > 0 }
+            .map { (docId, info) in
+                ["docId": docId, "seq": info.seq, "subscribers": info.subscriberCount] as [String: Any]
+            }
+            .sorted { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
+
+        let payload: [String: Any] = [
+            "devices": ["count": deviceCount, "capabilities": capabilities.sorted()],
+            "openDocs": open,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return Self.errorResult("internalError: could not encode the open-document listing")
+        }
+        return Self.textResult(text)
     }
 
     private static func errorResult(_ reason: String) -> CallTool.Result {
