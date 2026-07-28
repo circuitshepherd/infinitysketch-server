@@ -862,10 +862,13 @@ public actor MCPAdapter {
                 drawn).
 
                 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
-                genuinely large — the reply tells you how many were made. And a fill does not \
-                follow its outline: reshape the boundary afterwards and the fill stays where it \
-                was. Past 2 000 strokes the call fails and names the spacing that would fit, \
-                rather than handing back a half-filled shape. \(writeToolCaveats)
+                genuinely large — the reply tells you how many were made, and past 4 000 passes \
+                the call fails and names the spacing that would fit rather than handing back a \
+                half-filled shape. And a fill does not RESHAPE: move, scale, rotate and restyle \
+                all take the fill and its border together, because they are one stroke, but \
+                changing the boundary to a different SHAPE does not re-fill it. You hold the \
+                outline, so give the fill a `name` and reshape it by deleting it and filling the \
+                new outline under that same name. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -878,6 +881,16 @@ public actor MCPAdapter {
                             "type": "array", "items": .object(["type": "number"]),
                             "minItems": 2, "maxItems": 2,
                         ]),
+                    ]),
+                    "name": .object([
+                        "type": "string",
+                        "description": """
+                            A durable name for the filled area, so you can find it again with \
+                            find_elements after this call's ids are gone — which is how you \
+                            reshape a fill: delete it and fill the new outline under the same \
+                            name. Only for a SOLID fill, which is one stroke; a hatched fill is \
+                            several and a name identifies one element, so it is refused there.
+                            """,
                     ]),
                     "color": .object([
                         "type": "string",
@@ -5087,7 +5100,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border"] {
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "name"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
