@@ -854,6 +854,13 @@ public actor MCPAdapter {
                 the passes overlap and it reads solid (default 0.8), above 1 you get visible \
                 hatching, and `angleDeg` turns the hatch.
 
+                A SOLID fill is ONE stroke: the passes are joined into a serpentine, so you can \
+                select, name, restyle or move the filled area as a single thing. It also traces \
+                its own boundary, centred, at the same `stampWidth` — that border is what you see \
+                at the edge. Pass `border: false` when part of your outline is construction rather \
+                than a real edge (a silhouette closed along a base line does not want that line \
+                drawn).
+
                 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
                 genuinely large — the reply tells you how many were made. And a fill does not \
                 follow its outline: reshape the boundary afterwards and the fill stays where it \
@@ -892,6 +899,16 @@ public actor MCPAdapter {
                     "angleDeg": .object([
                         "type": "number",
                         "description": "Direction of the passes; 0 is horizontal.",
+                    ]),
+                    "border": .object([
+                        "type": "boolean",
+                        "description": """
+                            Trace the boundary, centred on it, at stampWidth. Default true — it \
+                            covers the scalloped edge the round pass-ends leave. Set FALSE when \
+                            part of your boundary is CONSTRUCTION rather than a real edge: a \
+                            mountain silhouette closed along a base line does not want that base \
+                            line drawn across the picture.
+                            """,
                     ]),
                 ]),
                 "required": .array(["docId", "canvasPoints"].map(Value.string)),
@@ -5070,7 +5087,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg"] {
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
