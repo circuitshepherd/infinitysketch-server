@@ -93,9 +93,14 @@ enum AgentGuide {
     - **`pen`** — tapers with force; the everyday line.
     - **`pencil`** — textured, goes finest (minimum width 1.2 against 2.5 for the rest).
 
-    Below its ink's minimum a stroke is effectively invisible, so a `stampWidth` under it is raised and \
-    the reply says so. There is no fill primitive: solid regions are built from closely spaced \
-    strokes, which works but costs a lot of them.
+    Below its ink's minimum a stroke is effectively invisible, so a `stampWidth` under it is raised \
+    and the reply says so.
+
+    **Use `fill_region` for a solid area** — one call, and the device generates the passes. Do not \
+    hand-roll scanlines: that is what it replaces. Concave shapes fill correctly, `spacingRatio` \
+    above 1 turns it into hatching, and the reply tells you how many strokes it cost. Two honest \
+    limits: the document still carries them all, and a fill does not follow its outline if you \
+    reshape the boundary afterwards.
 
     ## Working alongside a person
 

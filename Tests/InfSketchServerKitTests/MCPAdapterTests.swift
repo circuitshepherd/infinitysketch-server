@@ -778,8 +778,9 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllFortySevenTools`. transform_elements (geometry for texts and images,
     // not only strokes) added one, renaming this from `listToolsContainsAllFortyEightTools`.
     // undo_last_edit (an agent taking back its own write) added one, renaming this from
-    // `listToolsContainsAllFortyNineTools`.
-    @Test func listToolsContainsAllFiftyTools() async throws {
+    // `listToolsContainsAllFortyNineTools`. fill_region (one call for a solid area) added one,
+    // renaming this from `listToolsContainsAllFiftyTools`.
+    @Test func listToolsContainsAllFiftyOneTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -792,7 +793,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
-            "transform_elements", "undo_last_edit",
+            "transform_elements", "undo_last_edit", "fill_region",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
@@ -5081,6 +5082,76 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - fill_region (2026-07-28 fill design)
+
+    /// The envelope the device decodes. Relayed verbatim like `draw_strokes`, so the boundary and
+    /// every optional keep their names across the seam.
+    @Test func fillRegionRelaysItsEnvelopeAndReportsTheStrokeCount() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1","b-2","c-3"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+            "spacingRatio": .double(0.5),
+            "angleDeg": .double(45),
+        ])
+        #expect(isError != true)
+        // The count is the cost the caller just took on, so it is in the reply rather than
+        // discovered later in list_strokes.
+        #expect(toolResultText(content).contains("3 stroke(s)"))
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "fillRegion")
+        #expect((spec["canvasPoints"] as? [Any])?.count == 3)
+        #expect(spec["spacingRatio"] as? Double == 0.5)
+        #expect(spec["angleDeg"] as? Double == 45)
+    }
+
+    @Test func fillRegionUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "fill_region",
+            arguments: ["docId": "ghost",
+                        "canvasPoints": .array([.array([.int(0), .int(0)])])])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    @Test func fillRegionWithNoBoundaryErrors() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "fill_region", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).contains("canvasPoints"))
 
         await server.stop()
     }

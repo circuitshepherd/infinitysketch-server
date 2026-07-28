@@ -836,6 +836,68 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "fill_region",
+            description: """
+                Fill a closed path with a solid area — one call instead of the hundreds of \
+                closely spaced strokes you would otherwise compute yourself. The strokes are \
+                generated on the device and are ORDINARY strokes: the user can erase part of the \
+                fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, \
+                exactly like anything they drew.
+
+                `canvasPoints` is the boundary in canvas coordinates, closed by repeating the \
+                first point (an unclosed path is closed for you). Concave shapes fill correctly, \
+                and a path that returns through itself leaves a hole rather than blocking it out.
+
+                `inkType` defaults to **monoline** on purpose: marker is TRANSLUCENT and builds up \
+                where passes overlap, so a fill made from it shows the paper through. \
+                `spacingRatio` is the scanline spacing as a fraction of the stroke width — below 1 \
+                the passes overlap and it reads solid (default 0.8), above 1 you get visible \
+                hatching, and `angleDeg` turns the hatch.
+
+                TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
+                genuinely large — the reply tells you how many were made. And a fill does not \
+                follow its outline: reshape the boundary afterwards and the fill stays where it \
+                was. Past 2 000 strokes the call fails and names the spacing that would fit, \
+                rather than handing back a half-filled shape. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "The boundary, in canvas coordinates; at least 3 points.",
+                        "items": .object([
+                            "type": "array", "items": .object(["type": "number"]),
+                            "minItems": 2, "maxItems": 2,
+                        ]),
+                    ]),
+                    "color": .object([
+                        "type": "string",
+                        "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                    ]),
+                    "stampWidth": .object([
+                        "type": "number",
+                        "description": "Width of each pass. Also sets the spacing, via spacingRatio.",
+                    ]),
+                    "inkType": .object([
+                        "type": "string",
+                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                        "description": "Defaults to monoline, which is opaque and uniform.",
+                    ]),
+                    "spacingRatio": .object([
+                        "type": "number",
+                        "description": "Spacing as a fraction of the width. < 1 solid (default 0.8), > 1 hatched.",
+                    ]),
+                    "angleDeg": .object([
+                        "type": "number",
+                        "description": "Direction of the passes; 0 is horizontal.",
+                    ]),
+                ]),
+                "required": .array(["docId", "canvasPoints"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "list_docs",
             description: """
                 Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, \
@@ -2392,6 +2454,7 @@ public actor MCPAdapter {
         switch name {
         case "transform_elements": return await callTransformElements(arguments)
         case "undo_last_edit": return await callUndoLastEdit(arguments)
+        case "fill_region": return await callFillRegion(arguments)
         case "list_docs": return await callListDocs()
         case "list_open_docs": return await callListOpenDocs()
         case "tag_elements": return await callTagElements(arguments)
@@ -4986,6 +5049,53 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in "transformed elements in \(docId) at seq \(seq)" }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `fill_region` — the device generates the strokes that fill a closed path
+    /// (spec 2026-07-28-fill-region-design.md). Relays the arguments verbatim and writes back what
+    /// comes home, exactly like `draw_strokes`, whose reply shape it shares.
+    private func callFillRegion(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = [
+                "op": .string("fillRegion"),
+                "canvasPoints": .array(points),
+            ]
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg"] {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            // The device answers with `draw`'s meta, so the count comes from the keys it made —
+            // and the caller should see it, since those strokes are the cost it just took on.
+            struct FillMeta: Decodable { let keys: [String]? }
+            let created = out.meta
+                .flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }?.keys?.count
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                guard let created else { return "filled the region in \(docId) at seq \(seq)" }
+                return "filled the region in \(docId) with \(created) stroke(s) at seq \(seq)"
+            }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
