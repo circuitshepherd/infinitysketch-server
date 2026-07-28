@@ -753,8 +753,9 @@ private actor FakeStrokeOpDevice {
     // from `listToolsContainsAllFortyFourTools`. tag_elements + find_elements (durable element
     // names) added two more, renaming this from `listToolsContainsAllFortyFiveTools`. list_docs
     // ("what documents exist?", which no tool could answer) added one, renaming this from
-    // `listToolsContainsAllFortySevenTools`.
-    @Test func listToolsContainsAllFortyEightTools() async throws {
+    // `listToolsContainsAllFortySevenTools`. transform_elements (geometry for texts and images,
+    // not only strokes) added one, renaming this from `listToolsContainsAllFortyEightTools`.
+    @Test func listToolsContainsAllFortyNineTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -767,6 +768,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
+            "transform_elements",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",

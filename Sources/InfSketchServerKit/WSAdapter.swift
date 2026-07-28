@@ -165,7 +165,7 @@ actor Connection {
             let caps = Set(capabilities)
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
-                "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements",
+                "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
                 "provideContent",
             ]) {
                 registeredWithBroker = true

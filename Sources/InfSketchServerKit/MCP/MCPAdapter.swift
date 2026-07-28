@@ -724,6 +724,61 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "transform_elements",
+            description: """
+                Move, scale or rotate named strokes, texts AND images together — on ANY document, \
+                open or not. This is how you reposition a placed image: transform_strokes takes \
+                strokes only, and edit_text can move a text but not turn or resize it, so before \
+                this an image could be named, pinned, reordered, copied and deleted but never \
+                nudged without the document being open and a live selection running.
+
+                Ops are named, never a raw matrix, and mean exactly what they mean on \
+                transform_strokes: `scale` then `rotate`, both about `anchor`, then `translate`. \
+                `anchor` defaults to the centre of the whole set's bounding box across all three \
+                kinds. Identity survives — a stroke keeps its id and its width-edit history, texts \
+                and images keep theirs; this is a MOVE, not a copy.
+
+                ATOMIC: every id must resolve or nothing moves, so a set can never end up sheared \
+                half-way. Use transform_strokes when you want grid snapping (`snapToGrid` / \
+                `snapTo`), which is stroke-lattice specific and stays there. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "strokeIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Stroke ids, as returned by list_strokes or draw_strokes.",
+                    ]),
+                    "textIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Placed-text ids, as returned by list_texts.",
+                    ]),
+                    "imageIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Placed-image ids, as returned by list_images.",
+                    ]),
+                    "translate": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[dx, dy] in canvas points.",
+                    ]),
+                    "scale": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[sx, sy] about the anchor; non-zero.",
+                    ]),
+                    "rotate": .object([
+                        "type": "number",
+                        "description": "Degrees about the anchor; positive = clockwise on screen.",
+                    ]),
+                    "anchor": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[x, y]. Defaults to the centre of the whole set's bounding box.",
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "list_docs",
             description: """
                 Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, \
@@ -2250,6 +2305,7 @@ public actor MCPAdapter {
 
     private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
+        case "transform_elements": return await callTransformElements(arguments)
         case "list_docs": return await callListDocs()
         case "list_open_docs": return await callListOpenDocs()
         case "tag_elements": return await callTagElements(arguments)
@@ -4686,6 +4742,42 @@ public actor MCPAdapter {
     /// OPEN means a session with at least one subscriber. A session with none exists whenever any
     /// server-side tool has touched a document, and listing those would answer the question with
     /// documents nobody has on screen — the opposite of useful.
+    /// `transform_elements` — geometry for every element kind, on a document that need not be open
+    /// (2026-07-28 usage-session finding 6). Relays the whole argument set verbatim; the device
+    /// validates, exactly as `draw_strokes` does with its stroke specs.
+    private func callTransformElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string("transformElements")]
+            for key in ["strokeIds", "textIds", "imageIds", "translate", "scale", "rotate", "anchor"] {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
+                                                       capability: "transformElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in "transformed elements in \(docId) at seq \(seq)" }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     /// `list_docs` — what documents exist at all (2026-07-28 usage-session finding 1).
     ///
     /// The information was already here, but only as the `infsketch://docs` RESOURCE, which is a
