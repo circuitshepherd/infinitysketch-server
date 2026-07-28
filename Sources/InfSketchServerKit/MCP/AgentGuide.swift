@@ -47,7 +47,8 @@ enum AgentGuide {
 
     ## Coordinates: every field name tells you its space
 
-    **`canvas*` is what the user sees** — transform applied, the space you can point at.
+    **`canvas*` is CANVAS SPACE — what the user sees**, transform applied, the space you can \
+    point at.
     **`stamp*` is a stroke's own ink size**, which a transform does NOT scale. Nothing is implicit;
     if a name has neither prefix it is not a geometry field.
 
