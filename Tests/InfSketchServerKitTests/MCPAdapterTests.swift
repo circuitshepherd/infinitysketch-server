@@ -372,7 +372,11 @@ private actor FakeStrokeOpDevice {
     ///   `DeviceCommandBroker.requestStrokeOp`'s `capability:` argument
     ///   actually gates connection selection — not just that SOME device
     ///   answers.
-    init(port: UInt16, autoReply: AutoReply?, capabilities: Set<String> = ["authorStrokes"]) async throws {
+    /// `subscribeTo` makes the device a real SUBSCRIBER of that document, which is what "open"
+    /// means to the server — a session with someone watching it, as opposed to the session any
+    /// server-side tool opens merely by touching a document.
+    init(port: UInt16, autoReply: AutoReply?, capabilities: Set<String> = ["authorStrokes"],
+         subscribeTo: String? = nil) async throws {
         self.autoReply = autoReply
         let ws = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         self.ws = ws
@@ -381,6 +385,11 @@ private actor FakeStrokeOpDevice {
         let ack = try await Self.receiveOne(ws)
         guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
+        }
+        if let subscribeTo {
+            try await ws.send(.string(ClientMessage.subscribe(
+                docId: subscribeTo, fromSeq: nil, createIfMissing: false).jsonText()))
+            _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }
     }
@@ -742,8 +751,10 @@ private actor FakeStrokeOpDevice {
     // editing) added two more, renaming this from `listToolsContainsAllFortyTools`.
     // list_open_docs (the "which document am I talking to?" listing) added one, renaming this
     // from `listToolsContainsAllFortyFourTools`. tag_elements + find_elements (durable element
-    // names) added two more, renaming this from `listToolsContainsAllFortyFiveTools`.
-    @Test func listToolsContainsAllFortySevenTools() async throws {
+    // names) added two more, renaming this from `listToolsContainsAllFortyFiveTools`. list_docs
+    // ("what documents exist?", which no tool could answer) added one, renaming this from
+    // `listToolsContainsAllFortySevenTools`.
+    @Test func listToolsContainsAllFortyEightTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -755,7 +766,7 @@ private actor FakeStrokeOpDevice {
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
-            "snap_points", "list_fonts", "list_open_docs", "tag_elements", "find_elements",
+            "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
@@ -5044,6 +5055,50 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - list_docs (2026-07-28 usage-session finding 1)
+
+    /// Every tool takes a `docId`, and until this one no TOOL could tell you what they are — the
+    /// listing existed only as the `infsketch://docs` RESOURCE, so the tool-shaped way to discover
+    /// a document was to guess wrong and read `unknownDoc`'s error.
+    @Test func listDocsReportsEveryDocumentOnTheServer() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "list_docs", arguments: [:])
+        #expect(isError != true)
+        let rows = try #require(
+            JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [[String: Any]])
+        #expect(rows.contains { $0["id"] as? String == "d" })
+        let seeded = try #require(rows.first { $0["id"] as? String == "d" })
+        #expect(seeded["hasContent"] as? Bool == true)
+        // Nothing has subscribed, so nothing is on anyone's screen.
+        #expect(seeded["open"] as? Bool == false)
+        #expect(seeded["sizeBytes"] != nil)
+        #expect(seeded["modifiedAt"] != nil)
+
+        await server.stop()
+    }
+
+    /// `open` is the field that says "your writes will land on the user's canvas right now".
+    @Test func listDocsMarksADocumentThatIsOpen() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["authorStrokes"], subscribeTo: "d")
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "list_docs", arguments: [:])
+        let rows = try #require(
+            JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [[String: Any]])
+        #expect(rows.first { $0["id"] as? String == "d" }?["open"] as? Bool == true)
 
         await server.stop()
     }

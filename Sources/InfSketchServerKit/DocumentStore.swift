@@ -74,7 +74,7 @@ public struct DirectoryDocumentStore: DocumentStore {
     }
 
     public func load(docId: String) throws -> Data {
-        let url = try fileURL(for: docId)
+        let url = try resolvedFileURL(for: docId)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw DocumentStoreError.notFound
         }
@@ -82,11 +82,11 @@ public struct DirectoryDocumentStore: DocumentStore {
     }
 
     public func save(docId: String, bytes: Data) throws {
-        try bytes.write(to: try fileURL(for: docId), options: .atomic)
+        try bytes.write(to: try resolvedFileURL(for: docId), options: .atomic)
     }
 
     public func exists(docId: String) throws -> Bool {
-        FileManager.default.fileExists(atPath: try fileURL(for: docId).path)
+        FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
     }
 
     /// Name of the trash subdirectory. It has no `.infsketch` extension and `list()` enumerates
@@ -171,6 +171,37 @@ public struct DirectoryDocumentStore: DocumentStore {
               !docId.contains("/"), !docId.contains("\\"), !docId.contains("..")
         else { throw DocumentStoreError.invalidDocId }
         return directory.appendingPathComponent(docId).appendingPathExtension(Self.fileExtension)
+    }
+
+    /// The file a docId names, matching an existing document's case when the exact name misses.
+    ///
+    /// WHY THIS EXISTS: a docId resolved straight to `<docId>.infsketch`, so lookup inherited the
+    /// HOST FILESYSTEM's case rules. On macOS (APFS, case-insensitive by default) `RAINFALL` found
+    /// `Rainfall`; on Linux it would not — so an agent's calls behaved differently on the
+    /// development machine and on a deployment, and the same `save` created one file there and two
+    /// here. This server is cross-platform on purpose, so the resolution is now the server's own
+    /// and identical everywhere.
+    ///
+    /// Case-insensitive was chosen over exact-match because it is what macOS users already
+    /// experience and what the app's own browser assumes (it dedupes documents by name stem, so
+    /// "Chart" and "chart" were never really two documents).
+    ///
+    /// The scan only runs when the exact name MISSES, so the ordinary hit — every repeat call on a
+    /// document, including the byte-CAS `exists` check on every write — still costs one
+    /// `fileExists` and no directory enumeration.
+    private func resolvedFileURL(for docId: String) throws -> URL {
+        let exact = try fileURL(for: docId)
+        if FileManager.default.fileExists(atPath: exact.path) { return exact }
+
+        let wanted = docId.lowercased()
+        let match = ((try? list()) ?? [])
+            .map(\.docId)
+            .filter { $0.lowercased() == wanted }
+            // Two files differing only in case can exist on a case-sensitive filesystem. Pick the
+            // same one every time rather than whatever the directory happens to enumerate first.
+            .min()
+        guard let match else { return exact }
+        return try fileURL(for: match)
     }
 }
 

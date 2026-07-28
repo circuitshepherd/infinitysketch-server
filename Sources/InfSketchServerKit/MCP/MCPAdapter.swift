@@ -724,6 +724,24 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_docs",
+            description: """
+                Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, \
+                newest-modified first. START HERE when you do not already have a docId — every \
+                other tool takes one, and this is the tool that tells you what they are.
+
+                `open` means a device has it on screen right now, so your writes land live on the \
+                user's canvas; use list_open_docs when you want the device and capability detail \
+                as well. `hasContent: false` means the bytes live on a device rather than here — \
+                every content tool fetches those for you automatically, or call fetch_doc to pull \
+                one explicitly. An empty list means the server holds no documents at all.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([:]),
+            ])
+        ),
+        Tool(
             name: "list_open_docs",
             description: """
                 What is OPEN right now, and on what. Read-only, no device round trip, no docId \
@@ -2232,6 +2250,7 @@ public actor MCPAdapter {
 
     private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
+        case "list_docs": return await callListDocs()
         case "list_open_docs": return await callListOpenDocs()
         case "tag_elements": return await callTagElements(arguments)
         case "find_elements": return await callFindElements(arguments)
@@ -3860,10 +3879,24 @@ public actor MCPAdapter {
 
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device (Task 2, write CAS) — never a fresh re-read.
+            // The device counts vertices that WOULD have been sharp if these points had been read
+            // as a polyline, for items that did not say which reading they meant. It is the
+            // commonest way to get a surprising result out of this tool — the same point list that
+            // draws a rectangle in draw_strokes reshapes into a rounded blob here — and until now
+            // the only sign was the picture.
+            let roundedCorners = out.meta
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Int] }?["roundedCorners"]
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                "reshaped \(items.count) stroke(s) at seq \(seq)"
+                var summary = "reshaped \(items.count) stroke(s) at seq \(seq)"
+                if let roundedCorners, roundedCorners > 0 {
+                    summary += "\nnote: \(roundedCorners) sharp corner(s) were ROUNDED. Points are "
+                             + "spline knots here by default (the opposite of draw_strokes) so a "
+                             + "stroke a human drew keeps its curve. Pass \"smooth\": false to read "
+                             + "them as a polyline and keep the corners."
+                }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4653,6 +4686,38 @@ public actor MCPAdapter {
     /// OPEN means a session with at least one subscriber. A session with none exists whenever any
     /// server-side tool has touched a document, and listing those would answer the question with
     /// documents nobody has on screen — the opposite of useful.
+    /// `list_docs` — what documents exist at all (2026-07-28 usage-session finding 1).
+    ///
+    /// The information was already here, but only as the `infsketch://docs` RESOURCE, which is a
+    /// separate mechanism a client may surface weakly or not at all. So every tool took a `docId`
+    /// while no TOOL could tell you one, and the tool-shaped way to discover a document was to
+    /// guess wrong and read `unknownDoc`'s listing. This is that listing, asked for on purpose.
+    private func callListDocs() async -> CallTool.Result {
+        let entries: [DocListEntry]
+        do { entries = try await manager.listDocuments() }
+        catch { return Self.errorResult("internalError: could not list documents") }
+
+        // Which of them a device actually has on screen — the first thing you want to know after
+        // "what is there", and free here (the same in-memory read `list_open_docs` does).
+        let live = await manager.liveInfo()
+        let payload = entries
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .map { entry -> [String: Any] in
+                [
+                    "id": entry.id,
+                    "sizeBytes": entry.sizeBytes,
+                    "modifiedAt": ISO8601DateFormatter().string(from: entry.modifiedAt),
+                    "hasContent": entry.hasContent,
+                    "open": (live[entry.id]?.subscriberCount ?? 0) > 0,
+                ]
+            }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return Self.errorResult("internalError: could not encode the document listing")
+        }
+        return Self.textResult(text)
+    }
+
     private func callListOpenDocs() async -> CallTool.Result {
         let (deviceCount, capabilities) = await broker.connectionSummary()
         let open = await manager.liveInfo()
