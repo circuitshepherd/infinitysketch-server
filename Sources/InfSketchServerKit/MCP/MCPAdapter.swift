@@ -836,6 +836,61 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "draw_dots",
+            description: """
+                Draw solid round dots — junction dots on a schematic, plotted data points, \
+                bullets, the centre of a pivot. Each dot is ONE stroke you can select, name, \
+                move, restyle or delete as a single thing.
+
+                `diameter` is what you would measure on the canvas, ink included, and defaults \
+                to 8. It is honoured exactly for any dot bigger than the ink can draw as a line; \
+                a smaller one is raised to that minimum and the reply says which.
+
+                Do NOT fake a dot with a short wide stroke: round caps at each end of a segment \
+                make a STADIUM (length + width) × width, which is visibly oval at the sizes a \
+                dot is used at. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "dots": .object([
+                        "type": "array",
+                        "description": "The dots to draw.",
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "canvasX": .object(["type": "number", "description": "Centre x, canvas coordinates."]),
+                                "canvasY": .object(["type": "number", "description": "Centre y, canvas coordinates."]),
+                                "diameter": .object([
+                                    "type": "number",
+                                    "description": "Outer diameter on the canvas, ink included. Default 8.",
+                                ]),
+                                "color": .object([
+                                    "type": "string",
+                                    "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                                ]),
+                                "inkType": .object([
+                                    "type": "string",
+                                    "description": """
+                                        Default monoline, which is opaque and uniform. marker is \
+                                        TRANSLUCENT, so a dot drawn with it shows a darker core \
+                                        where the centre and the rim overlap.
+                                        """,
+                                ]),
+                                "name": .object([
+                                    "type": "string",
+                                    "description": "A durable name, so find_elements can reach this dot later.",
+                                ]),
+                            ]),
+                            "required": .array([.string("canvasX"), .string("canvasY")]),
+                        ]),
+                    ]),
+                ]),
+                "required": .array([.string("docId"), .string("dots")]),
+            ])
+        ),
+        .init(
             name: "fill_region",
             description: """
                 Fill a closed path with a solid area — one call instead of the hundreds of \
@@ -2484,6 +2539,7 @@ public actor MCPAdapter {
         switch name {
         case "transform_elements": return await callTransformElements(arguments)
         case "undo_last_edit": return await callUndoLastEdit(arguments)
+        case "draw_dots": return await callDrawDots(arguments)
         case "fill_region": return await callFillRegion(arguments)
         case "list_docs": return await callListDocs()
         case "list_open_docs": return await callListOpenDocs()
@@ -5079,6 +5135,57 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in "transformed elements in \(docId) at seq \(seq)" }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `draw_dots` — a solid round dot as ONE stroke, generated on the device
+    /// (spec 2026-07-28-draw-dots-design.md). Relays verbatim like `fill_region`; the dot's
+    /// geometry is the device's business because only it knows each ink's minimum width.
+    private func callDrawDots(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let dots = try Self.nonEmptyValueArrayArg(arguments, "dots")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("drawDots"), "dots": .array(dots),
+                ]))
+            } catch { return Self.errorResult("invalidArguments") }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            // `draw`'s meta, plus the diameters the ink could not draw that small. Reported for
+            // the same reason `draw_strokes` reports clamped widths: a caller that asked for a
+            // 2 pt dot and silently got a 3 pt one would never find out.
+            struct DotMeta: Decodable {
+                let keys: [String]?
+                let clampedDiameters: [Double]?
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(DotMeta.self, from: $0) }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var reply = "drew \(meta?.keys?.count ?? dots.count) dot(s) in \(docId) at seq \(seq)"
+                if let clamped = meta?.clampedDiameters, !clamped.isEmpty {
+                    reply += "\nraised to the smallest this ink can draw: "
+                        + clamped.map { String(format: "%g", $0) }.joined(separator: ", ")
+                }
+                if let keys = meta?.keys { reply += "\nids: " + keys.joined(separator: ", ") }
+                return reply
+            }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {

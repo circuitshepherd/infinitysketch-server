@@ -779,8 +779,9 @@ private actor FakeStrokeOpDevice {
     // not only strokes) added one, renaming this from `listToolsContainsAllFortyEightTools`.
     // undo_last_edit (an agent taking back its own write) added one, renaming this from
     // `listToolsContainsAllFortyNineTools`. fill_region (one call for a solid area) added one,
-    // renaming this from `listToolsContainsAllFiftyTools`.
-    @Test func listToolsContainsAllFiftyOneTools() async throws {
+    // renaming this from `listToolsContainsAllFiftyTools`. draw_dots (a solid round dot as one
+    // stroke) added one, renaming this from `listToolsContainsAllFiftyOneTools`.
+    @Test func listToolsContainsAllFiftyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -793,7 +794,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
-            "transform_elements", "undo_last_edit", "fill_region",
+            "transform_elements", "undo_last_edit", "fill_region", "draw_dots",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
@@ -5081,6 +5082,90 @@ private actor FakeStrokeOpDevice {
         #expect(isError == true)
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
+        #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - draw_dots (2026-07-28 dot design)
+
+    /// The envelope the device decodes. Relayed verbatim, so every per-dot field keeps its name
+    /// across the seam — the half-rename that shipped `reshape_strokes` broken once.
+    @Test func drawDotsRelaysItsEnvelopeAndReportsTheCount() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1","b-2"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([
+                .object(["canvasX": .int(10), "canvasY": .int(20), "diameter": .double(6)]),
+                .object(["canvasX": .int(30), "canvasY": .int(40), "name": .string("node.b")]),
+            ]),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("2 dot(s)"))
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "drawDots")
+        let dots = try #require(spec["dots"] as? [[String: Any]])
+        #expect(dots.count == 2)
+        #expect(dots[0]["canvasX"] as? Double == 10)
+        #expect(dots[0]["diameter"] as? Double == 6)
+        #expect(dots[1]["name"] as? String == "node.b")
+
+        await server.stop()
+    }
+
+    /// A diameter the ink cannot draw that small is RAISED, and the caller is told — the same
+    /// contract `draw_strokes` has for widths. A plot whose markers quietly grew would not match
+    /// its own legend.
+    @Test func drawDotsReportsADiameterItHadToRaise() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"],"clampedDiameters":[1.5]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0),
+                                     "diameter": .double(1.5)])]),
+        ])
+        #expect(toolResultText(content).contains("1.5"))
+        #expect(toolResultText(content).lowercased().contains("raised"))
+
+        await server.stop()
+    }
+
+    @Test func drawDotsUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_dots",
+            arguments: ["docId": "ghost",
+                        "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0)])])])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
         #expect(await device.receivedRequests.isEmpty)
 
         await server.stop()
