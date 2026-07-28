@@ -2007,10 +2007,26 @@ public actor MCPAdapter {
         Tool(
             name: "get_selection",
             description: """
-                Read the user's CURRENT live rect-select selection on a connected device: which \
-                strokes/texts/images are selected (by id), the reference point they placed, the \
-                selection bounds, and an opaque `signature` to pass back as transform_selection's \
-                `expect`. REQUIRES a connected device with an active selection.
+                Read the user's CURRENT live rect-select selection on a connected device. \
+                REQUIRES a connected device with the document open.
+
+                THE REPLY'S KEYS, because guessing them wastes a round trip and fails SILENTLY \
+                (absent JSON keys read as nothing, not as an error):
+
+                - `elements` — what is selected. NOT "strokes": each entry is \
+                  `{kind: "stroke"|"text"|"image", id, canvasBounds, pinned}`, so one list covers \
+                  all three kinds.
+                - `canvasBounds` — the union of the selected elements. NOT "bounds".
+                - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the \
+                  user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
+                - `canvasReferencePoint` — the pivot the user placed, absent if they have not.
+                - `active` — something is selected. `sessionActive` — select mode is ON. These \
+                  DIFFER: a user in select mode who has not swiped yet, or whose swipe was \
+                  perfectly straight (a zero-height marquee selects nothing), gives \
+                  `sessionActive: true` with `active: false`.
+                - `uncommittedCopy` — a duplicate or paste that will be DELETED if you clear the \
+                  selection rather than committing it.
+                - `signature` — opaque; pass back as transform_selection's `expect`.
                 """,
             inputSchema: .object([
                 "type": "object",
