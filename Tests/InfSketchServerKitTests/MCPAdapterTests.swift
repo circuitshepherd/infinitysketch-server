@@ -5089,6 +5089,53 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - reply shapes are documented (2026-07-29 drive finding)
+
+    /// Every tool that answers with structured JSON must NAME its reply's keys in its own
+    /// description.
+    ///
+    /// This exists because `get_selection` did not, and the natural guesses were all wrong — it
+    /// returns `elements`/`canvasBounds`/`canvasRect`, not `strokes`/`bounds`/`rect`. Reading an
+    /// absent JSON key yields nothing rather than an error, so a wrong guess is indistinguishable
+    /// from an empty selection: I read "0 strokes" twice while three elements were selected and
+    /// nearly filed a bug against the swipe handling.
+    ///
+    /// The keys below were taken from LIVE replies, not from the source. The rename that broke
+    /// this the first time (`bbox` → `canvasInkBounds` and friends) would fail here now.
+    @Test func everyStructuredReplyNamesItsKeys() async throws {
+        let expected: [String: [String]] = [
+            "list_strokes": ["canvasInkBounds", "canvasPathBounds", "stampWidth", "tags"],
+            "get_strokes": ["canvasPoints", "canvasPathBounds", "localToCanvasTransform"],
+            "list_texts": ["canvasBounds", "pinned", "opacity", "tags"],
+            "list_images": ["canvasBounds", "pinned", "opacity", "tags"],
+            "list_tags": ["roof"],
+            "find_elements": ["roof"],
+            "list_docs": ["sizeBytes", "modifiedAt", "hasContent", "open"],
+            "snap_points": ["canvasPoint", "candidates", "canvasPosition", "distance", "kind", "parents"],
+            "list_grids": ["families", "drawSpacing", "snapSpacing", "lineAngleDeg"],
+            "get_selection": ["elements", "canvasBounds", "canvasRect", "canvasReferencePoint",
+                              "active", "sessionActive", "uncommittedCopy"],
+            "get_tool": ["inkType", "toolWidth", "stampWidth"],
+            "list_open_docs": ["openDocs", "docId", "capabilities"],
+        ]
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (tools, _) = try await client.listTools()
+
+        for (name, keys) in expected {
+            let tool = try #require(tools.first { $0.name == name }, "no tool named \(name)")
+            let description = tool.description ?? ""
+            for key in keys {
+                #expect(description.contains(key),
+                        "\(name)'s description never mentions its reply key \(key)")
+            }
+        }
+
+        await server.stop()
+    }
+
     // MARK: - draw_dots (2026-07-28 dot design)
 
     /// The envelope the device decodes. Relayed verbatim, so every per-dot field keeps its name

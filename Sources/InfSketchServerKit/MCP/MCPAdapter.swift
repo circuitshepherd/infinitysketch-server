@@ -751,6 +751,10 @@ public actor MCPAdapter {
                 lookup failed". Tags are set with tag_elements, or at creation time by \
                 draw_strokes / add_text / add_image / fill_region / draw_dots. Use list_tags to \
                 see what a document already has.
+
+                REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. \
+                `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object \
+                rather than present-and-empty, so check for the key before indexing it.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -772,6 +776,9 @@ public actor MCPAdapter {
                 This is how you pick up work you did earlier: the ids you were handed are gone, \
                 and guessing a tag is indistinguishable from the tag having been deleted. Start \
                 here, then find_elements to turn a tag into ids.
+
+                REPLY: an OBJECT mapping each tag to how many LIVE elements carry it, e.g. \
+                `{"roof": 7, "sky": 1}`. `{}` means nothing is tagged yet.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1028,6 +1035,8 @@ public actor MCPAdapter {
                 as well. `hasContent: false` means the bytes live on a device rather than here — \
                 every content tool fetches those for you automatically, or call fetch_doc to pull \
                 one explicitly. An empty list means the server holds no documents at all.
+
+                REPLY: an ARRAY of `{id, sizeBytes, modifiedAt, hasContent, open}`, newest first.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1343,6 +1352,11 @@ public actor MCPAdapter {
                 pen/pencil/marker (fountain pen, watercolour, crayon…) lists under that \
                 ink's name but cannot be re-drawn with draw_strokes, whose inkType enum \
                 covers only the four names above.
+
+                REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, \
+                stampWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
+                antialias included) and `canvasPathBounds` is the control points' box — use the \
+                latter to verify placement, the former for true on-screen size.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1361,6 +1375,9 @@ public actor MCPAdapter {
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
+
+                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags}`. The box is \
+                `canvasBounds`, NOT `bounds`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1379,6 +1396,9 @@ public actor MCPAdapter {
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
+
+                REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags}`. The box is \
+                `canvasBounds`, NOT `bounds`. An empty array means the document has no images.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1403,6 +1423,10 @@ public actor MCPAdapter {
                 deviceTimeout if it doesn't respond in time. Returns the device's listing \
                 verbatim as text; this call never writes to the document. unknownDoc if the \
                 document doesn't exist.
+
+                REPLY: an ARRAY of `{id, type, spacing, snap, rotation, offset, color, thickness, \
+                visible, enabled, families}` in DRAW order, where each family is \
+                `{id, label, normal, lineAngleDeg, phase, drawSpacing, snapSpacing}`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1703,6 +1727,10 @@ public actor MCPAdapter {
                 This tool does not report grids — render_sketch's metadata does, \
                 including each grid's id (what snap_points' gridIds and \
                 transform_strokes' snapTo refer to). Read-only.
+
+                REPLY: an ARRAY of `{id, canvasPoints, canvasPathBounds, localToCanvasTransform, \
+                color, inkType, stampWidth, pointCount}`. NOTE there is no `canvasInkBounds` here \
+                — only list_strokes reports it.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1755,6 +1783,12 @@ public actor MCPAdapter {
                 need. REQUIRES a connected device — fails with noDeviceAvailable if none \
                 is connected and deviceTimeout if it doesn't respond in time. Read-only: \
                 no write, no seq bump.
+
+                REPLY: an ARRAY, one entry per point you asked about, each \
+                `{canvasPoint, candidates}` where a candidate is \
+                `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid \
+                line, or an intersection of two families) and `parents` names the grid(s) and \
+                families it came from.
                 """,
             inputSchema: .object([
                 "type": "object",
