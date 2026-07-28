@@ -562,24 +562,25 @@ public actor MCPAdapter {
             ]),
             "inkType": .object([
                 "type": "string",
-                "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
                 "description": """
                     The ink to draw with. OMIT IT to inherit the ink the user currently has \
                     selected (see get_tool); pen when no inking tool is selected.
 
                     THEY DIFFER IN CHARACTER, not only in name, and you cannot see that from a \
-                    listing: `monoline` is opaque and uniform — reach for it for solid fills, \
-                    flat colour, and anything you layer; `marker` is wide and TRANSLUCENT, so \
-                    colours build where strokes overlap and whatever is underneath shows through \
+                    listing: `pen` is opaque and even — reach for it for solid fills, flat \
+                    colour, and anything you layer; `marker` is wide and TRANSLUCENT, so colours \
+                    build where strokes overlap and whatever is underneath shows through \
                     (painting a solid area in marker leaves the paper visible between passes); \
-                    `pen` tapers with force and is the everyday line; `pencil` is textured and \
-                    goes finest, with a minimum width of 1.2 against 2.5 for the others. Below \
-                    that minimum a stroke is effectively INVISIBLE, so widths under it are raised \
-                    and the reply says so.
+                    `pencil` is textured and goes finest, with a minimum width of 1.2 against 2.5 \
+                    for the others; `fountainPen`, `watercolor` and `crayon` are expressive — try \
+                    them and look. Below an ink's minimum a stroke is effectively INVISIBLE, so \
+                    widths under it are raised and the reply says so.
 
-                    Note: monoline \
-                    persists as pen — PencilKit's archive format does not \
-                    preserve it, so a monoline stroke lists back as pen.
+                    `monoline` is accepted and READS BACK AS `pen`. Nothing went wrong: PencilKit \
+                    records it as pen when the document is saved, and the two are pixel-identical \
+                    for strokes you author — monoline means "hold the width constant whatever the \
+                    pressure", which yours already do.
                     """,
             ]),
             "smooth": .object([
@@ -902,7 +903,7 @@ public actor MCPAdapter {
                                 "inkType": .object([
                                     "type": "string",
                                     "description": """
-                                        Default monoline, which is opaque and uniform. marker is \
+                                        Default pen, which is opaque and even. marker is \
                                         TRANSLUCENT, so a dot drawn with it shows a darker core \
                                         where the centre and the rim overlap.
                                         """,
@@ -932,7 +933,7 @@ public actor MCPAdapter {
                 first point (an unclosed path is closed for you). Concave shapes fill correctly, \
                 and a path that returns through itself leaves a hole rather than blocking it out.
 
-                `inkType` defaults to **monoline** on purpose: marker is TRANSLUCENT and builds up \
+                `inkType` defaults to **pen** on purpose: marker is TRANSLUCENT and builds up \
                 where passes overlap, so a fill made from it shows the paper through. \
                 `spacingRatio` is the scanline spacing as a fraction of the stroke width — below 1 \
                 the passes overlap and it reads solid (default 0.8), above 1 you get visible \
@@ -990,8 +991,8 @@ public actor MCPAdapter {
                     ]),
                     "inkType": .object([
                         "type": "string",
-                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
-                        "description": "Defaults to monoline, which is opaque and uniform.",
+                        "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
+                        "description": "Defaults to pen, which is opaque and even. monoline is accepted and reads back as pen.",
                     ]),
                     "spacingRatio": .object([
                         "type": "number",
@@ -1697,8 +1698,8 @@ public actor MCPAdapter {
                 decimated by the server — use list_strokes' pointCount to price a \
                 fetch first, and maxPoints if you want a guard of your own; a request \
                 over that guard fails with pointBudgetExceeded(<actual>), naming the \
-                real total. Note: monoline persists as pen — PencilKit's archive \
-                format does not preserve it, so a monoline stroke lists back as pen. \
+                real total. Note: a stroke asked for in `monoline` lists back as `pen` — \
+                PencilKit records it that way and the two are identical on the page. \
                 This tool does not report grids — render_sketch's metadata does, \
                 including each grid's id (what snap_points' gridIds and \
                 transform_strokes' snapTo refer to). Read-only.
@@ -1895,7 +1896,7 @@ public actor MCPAdapter {
                 stroke's original width only APPROXIMATELY, because the tool-slider \
                 value the user drew with is not recorded anywhere and cannot be \
                 recovered from the stroke (a colour-only restyle, and any stroke the \
-                user HAS width-edited, are unaffected). Note: monoline persists as pen \
+                user HAS width-edited, are unaffected). Note: `monoline` reads back as `pen` \
                 — PencilKit's archive format does not preserve it. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -1927,10 +1928,10 @@ public actor MCPAdapter {
                     ]),
                     "inkType": .object([
                         "type": "string",
-                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                        "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
                         "description": """
-                            Note: monoline persists as pen — PencilKit's archive format \
-                            does not preserve it.
+                            Note: `monoline` reads back as `pen` — PencilKit records it \
+                            that way, and the two are identical on the page.
                             """,
                     ]),
                 ]),
@@ -2159,7 +2160,7 @@ public actor MCPAdapter {
                     "inkType": .object([
                         "type": "string",
                         "description": "pen, pencil, marker, or monoline.",
-                        "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
+                        "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
