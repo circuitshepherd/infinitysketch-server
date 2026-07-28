@@ -507,9 +507,12 @@ public actor MCPAdapter {
                 "properties": .object([
                     "x": .object(["type": "number"]),
                     "y": .object(["type": "number"]),
-                    "size": .object([
+                    "stampSize": .object([
                         "type": "array",
-                        "description": "[width, height] of the point's stamp, both > 0.",
+                        "description": """
+                            [width, height] of the point's own STAMP, both > 0 — the ink it lays \
+                            down, which a transform does NOT scale. Canvas coordinates are x/y.
+                            """,
                         "items": .object(["type": "number"]),
                         "minItems": 2,
                         "maxItems": 2,
@@ -537,7 +540,7 @@ public actor MCPAdapter {
     private static let strokeItemSchema: Value = .object([
         "type": "object",
         "properties": .object([
-            "points": .object([
+            "canvasPoints": .object([
                 "type": "array",
                 "description": """
                     The stroke's polyline; at least 2 points. Each point is \
@@ -545,9 +548,13 @@ public actor MCPAdapter {
                     """,
                 "items": pointSchema,
             ]),
-            "width": .object([
+            "stampWidth": .object([
                 "type": "number",
-                "description": "Peak stroke width. OMIT IT to inherit the width of the tool the user currently has selected (see get_tool).",
+                "description": """
+                    Peak STAMP width — the stroke's own ink size, which a transform does NOT \
+                    scale (canvasInkBounds shows its true on-screen extent). OMIT IT to inherit \
+                    the width of the tool the user currently has selected (see get_tool).
+                    """,
             ]),
             "color": .object([
                 "type": "string",
@@ -594,7 +601,7 @@ public actor MCPAdapter {
                     """,
             ]),
         ]),
-        "required": .array(["points"].map(Value.string)),
+        "required": .array(["canvasPoints"].map(Value.string)),
     ])
 
     private static let tools: [Tool] = [
@@ -616,8 +623,8 @@ public actor MCPAdapter {
                     [
                         "docId": .object(["type": "string", "description": "The document id to modify."]),
                         "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
-                        "x": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
-                        "y": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
+                        "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
                         "pinned": .object([
                             "type": "boolean",
                             "description": "Excludes the text from selection transforms. Defaults to false.",
@@ -669,8 +676,8 @@ public actor MCPAdapter {
                                 replaces the characters with the new style instead.
                                 """,
                         ]),
-                        "x": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
-                        "y": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
+                        "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
                         "spans": .object([
                             "type": "array",
                             "description": """
@@ -779,7 +786,7 @@ public actor MCPAdapter {
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Placed-image ids, as returned by list_images.",
                     ]),
-                    "translate": .object([
+                    "canvasTranslate": .object([
                         "type": "array", "items": .object(["type": "number"]),
                         "description": "[dx, dy] in canvas points.",
                     ]),
@@ -791,7 +798,7 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": "Degrees about the anchor; positive = clockwise on screen.",
                     ]),
-                    "anchor": .object([
+                    "canvasAnchor": .object([
                         "type": "array", "items": .object(["type": "number"]),
                         "description": "[x, y]. Defaults to the centre of the whole set's bounding box.",
                     ]),
@@ -914,15 +921,15 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
                     "bytes": .object(["type": "string", "description": "Base64-encoded PNG/JPEG/GIF image data."]),
-                    "x": .object(["type": "number", "description": "Canvas-space x of the placement's top-left corner."]),
-                    "y": .object(["type": "number", "description": "Canvas-space y of the placement's top-left corner."]),
-                    "width": .object([
+                    "canvasX": .object(["type": "number", "description": "Canvas-space x of the placement's top-left corner."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas-space y of the placement's top-left corner."]),
+                    "canvasWidth": .object([
                         "type": "number",
-                        "description": "Canvas-point width. Omit both width and height for natural pixel size; give one to preserve aspect ratio.",
+                        "description": "Canvas-point width. Omit both for the image's natural pixel size; give one to preserve aspect ratio.",
                     ]),
-                    "height": .object([
+                    "canvasHeight": .object([
                         "type": "number",
-                        "description": "Canvas-point height. Omit both width and height for natural pixel size; give one to preserve aspect ratio.",
+                        "description": "Canvas-point height. Omit both for the image's natural pixel size; give one to preserve aspect ratio.",
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
                 ]),
@@ -1363,8 +1370,8 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
                     "id": .object(["type": "string", "description": "The id of the grid to set the origin of, as returned by add_grid/list_grids."]),
-                    "x": .object(["type": "number", "description": "Canvas-space x the lattice should pass through."]),
-                    "y": .object(["type": "number", "description": "Canvas-space y the lattice should pass through."]),
+                    "canvasX": .object(["type": "number", "description": "Canvas-space x the lattice should pass through."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas-space y the lattice should pass through."]),
                 ]),
                 "required": .array(["docId", "id", "x", "y"].map(Value.string)),
             ])
@@ -1437,7 +1444,7 @@ public actor MCPAdapter {
                         // comment on strokeItemSchema above.
                         "items": strokeItemSchema,
                     ]),
-                    "rect": .object([
+                    "canvasRect": .object([
                         "type": "array",
                         "description": """
                             [x, y, w, h] in canvas coordinates. Omit for auto-fit: the \
@@ -1568,7 +1575,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to query."]),
-                    "points": .object([
+                    "canvasPoints": .object([
                         "type": "array",
                         "description": "Canvas-space [x, y] points to find snap candidates for.",
                         "items": .object([
@@ -1590,7 +1597,7 @@ public actor MCPAdapter {
                         "description": "Per point; default 64. The cap drops the FARTHEST candidates.",
                     ]),
                 ]),
-                "required": .array(["docId", "points"].map(Value.string)),
+                "required": .array(["docId", "canvasPoints"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1626,7 +1633,7 @@ public actor MCPAdapter {
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
-                    "translate": .object([
+                    "canvasTranslate": .object([
                         "type": "array",
                         "description": "[dx, dy] in canvas points.",
                         "items": .object(["type": "number"]),
@@ -1642,7 +1649,7 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": "Degrees about the anchor; positive = clockwise on screen.",
                     ]),
-                    "anchor": .object([
+                    "canvasAnchor": .object([
                         "type": "array",
                         "description": "[x, y]. Defaults to the centre of the ids' union bounding box.",
                         "items": .object(["type": "number"]),
@@ -1720,11 +1727,11 @@ public actor MCPAdapter {
                         "type": "string",
                         "description": "#RRGGBB or #RRGGBBAA.",
                     ]),
-                    "width": .object([
+                    "stampWidth": .object([
                         "type": "number",
                         "description": """
-                            Target PEAK stroke width (> 0) — the same quantity \
-                            get_strokes/list_strokes report, not a tool-slider value. \
+                            Target PEAK STAMP width (> 0) — the stroke's own ink size, the same \
+                            quantity get_strokes/list_strokes report, not a tool-slider value. \
                             Clamped to what the target ink can express (pen tops out \
                             around peak 6; marker cannot go below roughly 7.5) — \
                             get_strokes reports the actual resulting peak.
@@ -1775,7 +1782,7 @@ public actor MCPAdapter {
                                     "type": "string",
                                     "description": "The id of the stroke to reshape.",
                                 ]),
-                                "points": .object([
+                                "canvasPoints": .object([
                                     "type": "array",
                                     "description": """
                                         The new polyline; at least 2 points. Each point is \
@@ -1801,7 +1808,7 @@ public actor MCPAdapter {
                                         """,
                                 ]),
                             ]),
-                            "required": .array(["id", "points"].map(Value.string)),
+                            "required": .array(["id", "canvasPoints"].map(Value.string)),
                         ]),
                     ]),
                 ]),
@@ -1961,7 +1968,7 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA."]),
-                    "width": .object(["type": "number", "description": "Target peak stroke width."]),
+                    "stampWidth": .object(["type": "number", "description": "Target peak STAMP width — the stroke's own ink size."]),
                     "inkType": .object([
                         "type": "string",
                         "description": "pen, pencil, marker, or monoline.",
@@ -2038,8 +2045,8 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id."]),
-                    "x": .object(["type": "number", "description": "Canvas-space x. Not snapped."]),
-                    "y": .object(["type": "number", "description": "Canvas-space y. Not snapped."]),
+                    "canvasX": .object(["type": "number", "description": "Canvas-space x. Not snapped."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas-space y. Not snapped."]),
                 ]),
                 "required": .array(["docId", "x", "y"].map(Value.string)),
             ])
@@ -2112,7 +2119,7 @@ public actor MCPAdapter {
                             metadata is still reported).
                             """,
                     ]),
-                    "rect": .object([
+                    "canvasRect": .object([
                         "type": "array",
                         "description": """
                             [x, y, w, h] in canvas coordinates. Omit for auto-fit.
@@ -2457,8 +2464,8 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let text = try Self.stringArg(arguments, "text")
-            let x = try Self.doubleArg(arguments, "x")
-            let y = try Self.doubleArg(arguments, "y")
+            let x = try Self.doubleArg(arguments, "canvasX")
+            let y = try Self.doubleArg(arguments, "canvasY")
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
@@ -2502,7 +2509,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "x", "y", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "name"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "name"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -2558,10 +2565,10 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytesB64 = try Self.stringArg(arguments, "bytes")  // relay verbatim as base64
-            let x = try Self.doubleArg(arguments, "x")
-            let y = try Self.doubleArg(arguments, "y")
-            let width = try Self.optionalDoubleArg(arguments, "width")
-            let height = try Self.optionalDoubleArg(arguments, "height")
+            let x = try Self.doubleArg(arguments, "canvasX")
+            let y = try Self.doubleArg(arguments, "canvasY")
+            let width = try Self.optionalDoubleArg(arguments, "canvasWidth")
+            let height = try Self.optionalDoubleArg(arguments, "canvasHeight")
             let opacity = try Self.optionalDoubleArg(arguments, "opacity")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
@@ -2570,10 +2577,10 @@ public actor MCPAdapter {
 
             var envelope: [String: Value] = [
                 "op": .string("addImage"), "imageBytes": .string(bytesB64),
-                "x": .double(x), "y": .double(y),
+                "canvasX": .double(x), "canvasY": .double(y),
             ]
-            if let width { envelope["width"] = .double(width) }
-            if let height { envelope["height"] = .double(height) }
+            if let width { envelope["canvasWidth"] = .double(width) }
+            if let height { envelope["canvasHeight"] = .double(height) }
             if let opacity { envelope["opacity"] = .double(opacity) }
             if let name = try Self.optionalStringArg(arguments, "name") { envelope["name"] = .string(name) }
 
@@ -2627,8 +2634,8 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
             let newText = try Self.optionalStringArg(arguments, "text")
-            let x = try Self.optionalDoubleArg(arguments, "x")
-            let y = try Self.optionalDoubleArg(arguments, "y")
+            let x = try Self.optionalDoubleArg(arguments, "canvasX")
+            let y = try Self.optionalDoubleArg(arguments, "canvasY")
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -2666,7 +2673,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "x", "y", "color", "fontSize", "bold", "italic", "family", "spans"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3038,7 +3045,16 @@ public actor MCPAdapter {
                 // `resolvedTool` object and silently dropped the `ids:` line when the device
                 // started reporting it. The device's meta and this decoder move together.
                 struct DrawMeta: Decodable {
-                    struct Tool: Decodable { let inkType: String; let width: Double; let color: String }
+                    struct Tool: Decodable {
+                        let inkType: String
+                        let width: Double
+                        let color: String
+                        enum CodingKeys: String, CodingKey {
+                            case inkType
+                            case width = "stampWidth"
+                            case color
+                        }
+                    }
                     let keys: [String]?
                     let resolvedTool: Tool?
                     /// Parallel to `keys`; an empty entry means that stroke's name displaced
@@ -3451,8 +3467,8 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
-            let x = try Self.doubleArg(arguments, "x")
-            let y = try Self.doubleArg(arguments, "y")
+            let x = try Self.doubleArg(arguments, "canvasX")
+            let y = try Self.doubleArg(arguments, "canvasY")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -3461,7 +3477,7 @@ public actor MCPAdapter {
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("setGridOrigin"), "id": .string(id), "x": .double(x), "y": .double(y),
+                    "op": .string("setGridOrigin"), "id": .string(id), "canvasX": .double(x), "canvasY": .double(y),
                 ]))
             } catch {
                 return Self.errorResult("invalidArguments")
@@ -3772,7 +3788,7 @@ public actor MCPAdapter {
     /// verbatim into the op-spec envelope alongside `"op": "render"` — every
     /// one of them optional; see `callRenderSketch`.
     private static let renderSpecParameterNames = [
-        "include", "strokeIds", "strokes", "rect", "padding", "background", "axes", "maxPixels",
+        "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -3854,7 +3870,7 @@ public actor MCPAdapter {
     private func callSnapPoints(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let points = try Self.nonEmptyValueArrayArg(arguments, "points")
+            let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -3862,7 +3878,7 @@ public actor MCPAdapter {
 
             var envelope: [String: Value] = [
                 "op": .string("snap"),
-                "points": .array(points),
+                "canvasPoints": .array(points),
             ]
             // Only the keys the caller actually supplied — deep validation
             // (unknown gridId, maxCandidates <= 0) is the device's job,
@@ -3915,7 +3931,7 @@ public actor MCPAdapter {
             // (finite values, non-zero scale, at-least-one-op, unknown
             // gridId/familyIds on snapTo) is the device's job, surfaced
             // verbatim as `deviceFailed: <reason>`.
-            for name in ["translate", "scale", "rotate", "anchor", "snapToGrid", "snapTo"] {
+            for name in ["canvasTranslate", "scale", "rotate", "canvasAnchor", "snapToGrid", "snapTo"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -3965,7 +3981,7 @@ public actor MCPAdapter {
                 "op": .string("restyle"),
                 "ids": .array(ids.map(Value.string)),
             ]
-            for name in ["color", "width", "inkType"] {
+            for name in ["color", "stampWidth", "inkType"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -4239,7 +4255,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             var envelope: [String: Value] = ["op": .string("restyleSelection")]
             if let c = arguments?["color"], case .string(let hex) = c { envelope["color"] = .string(hex) }
-            if let w = arguments?["width"] { envelope["width"] = w }
+            if let w = arguments?["stampWidth"] { envelope["stampWidth"] = w }
             if let i = arguments?["inkType"], case .string(let ink) = i { envelope["inkType"] = .string(ink) }
             return await callSelectionOp(docId: docId, envelope: envelope)
         } catch let error as ArgumentError {
@@ -4346,8 +4362,8 @@ public actor MCPAdapter {
     private func callSetReferencePoint(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let x = try? Self.doubleArg(arguments, "x"),
-                let y = try? Self.doubleArg(arguments, "y")
+            guard let x = try? Self.doubleArg(arguments, "canvasX"),
+                let y = try? Self.doubleArg(arguments, "canvasY")
             else {
                 return Self.errorResult("invalidArguments: x and y are required")
             }
@@ -4449,7 +4465,7 @@ public actor MCPAdapter {
             if let include {
                 envelope["include"] = .string(include)
             }
-            for key in ["rect", "includePoints", "duplicate"] {
+            for key in ["canvasRect", "includePoints", "duplicate"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4952,7 +4968,7 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
-            for key in ["strokeIds", "textIds", "imageIds", "translate", "scale", "rotate", "anchor"] {
+            for key in ["strokeIds", "textIds", "imageIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data

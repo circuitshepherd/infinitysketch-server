@@ -38,29 +38,32 @@ enum AgentGuide {
     nowhere near the origin. **Drawing at (100, 100) because it seems reasonable puts your work \
     tens of thousands of points off-screen.**
 
-    `render_sketch`'s metadata reports `viewport.visibleRect` — the canvas rect the user can \
+    `render_sketch`'s metadata reports `viewport.canvasVisibleRect` — the canvas rect the user can \
     actually see, with the toolbar and tool picker already subtracted. Compose inside it. It is \
     absent when nobody has the document open, which is the honest answer rather than a guess.
 
     Sizing matters as much as position: a phone shows roughly 440 × 810 points. A layout built for \
     an imagined 800-point width arrives cropped, and you will not find that out from any reply.
 
-    ## Coordinates
+    ## Coordinates: every field name tells you its space
 
-    Every coordinate on this API is CANVAS space, both directions. `get_strokes` returns points \
-    with the stroke's transform ALREADY applied; `reshape_strokes` inverts it for you. The \
-    `transform` array on a response is informational — never something you apply yourself.
+    **`canvas*` is what the user sees** — transform applied, the space you can point at.
+    **`stamp*` is a stroke's own ink size**, which a transform does NOT scale. Nothing is implicit;
+    if a name has neither prefix it is not a geometry field.
 
-    **The one exception is `width`**, which is the stroke's own stamp size and does NOT include \
-    its transform. This is deliberate: it is the same quantity `restyle_strokes` sets, so reading \
-    a width and writing it back is a no-op rather than something that multiplies the stroke by its \
-    own scale each time.
+    So `canvasPoints`, `canvasInkBounds`, `canvasPathBounds`, `canvasRect`, `canvasTranslate`, \
+    `canvasX`/`canvasY` — against `stampWidth` and a point's `stampSize`. Inside a `canvasPoints` \
+    array the points are plain `x`/`y`: the container already declared the space.
 
-    It also could not be otherwise. Three strokes all reporting `width: 4`: one scaled 3× (renders \
-    thick), one horizontal stretched 6× sideways (renders unchanged — the stretch runs along its \
-    length), and one VERTICAL under that same stretch (renders six times fatter). Rendered \
-    thickness depends on a stroke's direction at every point. **Use `bbox` for true on-screen \
-    extent; `width` only compares meaningfully between strokes with the same transform.**
+    `get_strokes` returns points with the transform ALREADY applied and \
+    `reshape_strokes` inverts it for you, so a fetch → alter → put-back needs no matrix work. The \
+    `localToCanvasTransform` array is informational — never something you apply yourself.
+
+    **Why `stampWidth` is not canvas-scaled:** it is the same quantity `restyle_strokes` sets, so \
+    reading it and writing it back is a no-op rather than something that multiplies the stroke by \
+    its own scale each time. And no honest canvas width exists — three strokes all reporting \
+    `stampWidth: 4` rendered thick, unchanged, and six times fatter, because thickness depends on \
+    a stroke's direction under the transform. **Use `canvasInkBounds` for true on-screen extent.**
 
     ## Points, and the one asymmetry that will bite you
 
@@ -82,7 +85,7 @@ enum AgentGuide {
     - **`pen`** — tapers with force; the everyday line.
     - **`pencil`** — textured, goes finest (minimum width 1.2 against 2.5 for the rest).
 
-    Below its ink's minimum a stroke is effectively invisible, so widths under it are raised and \
+    Below its ink's minimum a stroke is effectively invisible, so a `stampWidth` under it is raised and \
     the reply says so. There is no fill primitive: solid regions are built from closely spaced \
     strokes, which works but costs a lot of them.
 

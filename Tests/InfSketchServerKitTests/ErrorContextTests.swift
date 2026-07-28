@@ -124,7 +124,7 @@ struct ErrorContextTests {
         let c = try await client(port); defer { Task { await c.disconnect() } }
 
         let (content, isError) = try await c.callTool(
-            name: "add_text", arguments: ["docId": "d", "text": "hi", "x": 10, "y": 20])
+            name: "add_text", arguments: ["docId": "d", "text": "hi", "canvasX": 10, "canvasY": 20])
 
         #expect(isError != true)
         let t = text(content)
