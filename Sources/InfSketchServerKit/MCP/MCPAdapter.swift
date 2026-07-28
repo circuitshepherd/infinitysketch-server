@@ -553,7 +553,19 @@ public actor MCPAdapter {
                 "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
                 "description": """
                     The ink to draw with. OMIT IT to inherit the ink the user currently has \
-                    selected (see get_tool); pen when no inking tool is selected. Note: monoline \
+                    selected (see get_tool); pen when no inking tool is selected.
+
+                    THEY DIFFER IN CHARACTER, not only in name, and you cannot see that from a \
+                    listing: `monoline` is opaque and uniform — reach for it for solid fills, \
+                    flat colour, and anything you layer; `marker` is wide and TRANSLUCENT, so \
+                    colours build where strokes overlap and whatever is underneath shows through \
+                    (painting a solid area in marker leaves the paper visible between passes); \
+                    `pen` tapers with force and is the everyday line; `pencil` is textured and \
+                    goes finest, with a minimum width of 1.2 against 2.5 for the others. Below \
+                    that minimum a stroke is effectively INVISIBLE, so widths under it are raised \
+                    and the reply says so.
+
+                    Note: monoline \
                     persists as pen — PencilKit's archive format does not \
                     preserve it, so a monoline stroke lists back as pen.
                     """,
@@ -3016,6 +3028,7 @@ public actor MCPAdapter {
                     /// Parallel to `keys`; an empty entry means that stroke's name displaced
                     /// nothing. Absent entirely when no supplied name took over.
                     let displacedNames: [String]?
+                    let clampedWidths: [Double]?
                 }
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode(DrawMeta.self, from: meta) {
@@ -3031,6 +3044,14 @@ public actor MCPAdapter {
                     // A name that was already taken MOVES to the new stroke. The element it came
                     // from is still on the canvas, now unnamed — reported so you can delete it if
                     // this draw was meant to replace it.
+                    // A width below the ink's floor renders as almost nothing, so it is raised
+                    // rather than silently drawn invisible (art-session finding 12).
+                    if let clamped = decoded.clampedWidths, !clamped.isEmpty {
+                        summary += "\nnote: \(clamped.count) stroke(s) asked for a width "
+                                 + "(\(clamped.map { String(format: "%.1f", $0) }.joined(separator: ", "))) "
+                                 + "below what that ink can render, and were raised to its minimum "
+                                 + "(2.5, or 1.2 for pencil). Below it a stroke is effectively invisible."
+                    }
                     if let displaced = decoded.displacedNames {
                         for taken in displaced where !taken.isEmpty {
                             summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
