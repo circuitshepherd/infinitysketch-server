@@ -45,6 +45,13 @@ enum AgentGuide {
     Sizing matters as much as position: a phone shows roughly 440 × 810 points. A layout built for \
     an imagined 800-point width arrives cropped, and you will not find that out from any reply.
 
+    **If the grid is visible, ANCHOR TO IT — the visible rect is not a grid reference.** Its origin \
+    comes from the toolbar's height, so it has an arbitrary phase against the lattice: on one \
+    device that y was 20142, two points off a 20-point grid, and a technical drawing laid out from \
+    it sat two points off every line. Round the rect onto the lattice first \
+    (`ceil(y / spacing) * spacing`), then work in multiples of the spacing inside it. \
+    `render_sketch`'s grid metadata gives you `drawSpacing` and `phase` for exactly this.
+
     ## Coordinates: every field name tells you its space
 
     **`canvas*` is CANVAS SPACE — what the user sees**, transform applied, the space you can \
