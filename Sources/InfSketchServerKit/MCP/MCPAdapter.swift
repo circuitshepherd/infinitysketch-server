@@ -1126,7 +1126,18 @@ public actor MCPAdapter {
                 antialias bleed, so it reads WIDER than what you placed — e.g. pins placed 80 \
                 pt apart show a bbox around 86); pathBounds is the box of the stroke's \
                 points — what you actually placed. Use pathBounds to verify geometry you \
-                positioned. This tool does not report grids — render_sketch's metadata does, \
+                positioned.
+
+                `width` is the stroke's own STAMP width and does NOT include any transform it \
+                carries, while its coordinates DO — so a stroke that was scaled up reports \
+                tripled bounds and an unchanged width, and two strokes both reporting `width: 4` \
+                can render three times apart. That matters for exactly one intent: matching a new \
+                stroke to an existing one. Call get_strokes for that stroke — it reports the \
+                `transform`, and stamp width times its scale is what you see. \
+                (This is deliberate: `width` is the same quantity restyle_strokes SETS, so \
+                reading one and writing it back is consistent.)
+
+                This tool does not report grids — render_sketch's metadata does, \
                 including each grid's id (what snap_points' gridIds and transform_strokes' \
                 snapTo refer to). REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
