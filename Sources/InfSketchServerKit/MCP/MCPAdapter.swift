@@ -943,7 +943,11 @@ public actor MCPAdapter {
                 its own boundary, centred, at the same `stampWidth` — that border is what you see \
                 at the edge. Pass `border: false` when part of your outline is construction rather \
                 than a real edge (a silhouette closed along a base line does not want that line \
-                drawn).
+                drawn) — but note it is ALL OR NOTHING: with it off, EVERY edge shows the \
+                scalloping the round pass-ends leave, not just the construction one. Measured: a \
+                plain rectangle drawn with border:false has visibly wavy sides. If only one edge \
+                is construction, keep the border and cover that edge, or draw the edges you want \
+                yourself with draw_strokes.
 
                 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
                 genuinely large — the reply tells you how many were made, and past 4 000 passes \
