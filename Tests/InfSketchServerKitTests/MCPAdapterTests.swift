@@ -5278,6 +5278,51 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - the agent guide resource
+
+    /// Everything learned about this surface was going into the repository's CLAUDE.md, which an
+    /// agent driving the MCP API never reads. The guide puts the cross-cutting parts where they
+    /// can actually be found. Listed FIRST, because it is the one to read before picking a tool.
+    @Test func theGuideIsListedFirstAndReadable() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (resources, _) = try await client.listResources()
+        #expect(resources.first?.uri == "infsketch://guide")
+        #expect(resources.first?.mimeType == "text/markdown")
+
+        let contents = try await client.readResource(uri: "infsketch://guide")
+        let text = try #require(contents.compactMap(\.text).first)
+        #expect(text.count > 1000, "a guide short enough to be useless is not worth serving")
+
+        // The traps that actually cost time, each of which must survive an edit of the guide.
+        // Case-insensitive: the guide capitalises some of these for emphasis, and a test that
+        // pins the emphasis rather than the content would fight every future edit.
+        let lowered = text.lowercased()
+        for essential in ["40 000", "viewport", "canvas space", "width", "polyline",
+                          "translucent", "undo_last_edit", "snap_points"] {
+            #expect(lowered.contains(essential.lowercased()),
+                    "the guide no longer mentions \(essential)")
+        }
+
+        await server.stop()
+    }
+
+    @Test func anUnknownResourceIsStillRejected() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        await #expect(throws: (any Error).self) {
+            _ = try await client.readResource(uri: "infsketch://guidebook")
+        }
+
+        await server.stop()
+    }
+
     // MARK: - list_docs (2026-07-28 usage-session finding 1)
 
     /// Every tool takes a `docId`, and until this one no TOOL could tell you what they are — the

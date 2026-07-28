@@ -291,6 +291,11 @@ public actor MCPAdapter {
         }
 
         switch parsed {
+        case .guide:
+            return ReadResource.Result(contents: [
+                .text(AgentGuide.markdown, uri: uri, mimeType: "text/markdown")
+            ])
+
         case .docsList:
             let entries = try await manager.listDocuments()
             return ReadResource.Result(contents: [
@@ -5286,6 +5291,7 @@ private struct FixedSessionIDGenerator: SessionIDGenerator {
 /// enforces this), and this keeps the parser Linux-safe with no Foundation
 /// URL-parsing surface.
 enum ResourceURI: Equatable {
+    case guide
     case docsList
     case docSummary(docId: String)
     case docRaw(docId: String)
@@ -5299,6 +5305,8 @@ enum ResourceURI: Equatable {
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
         switch parts {
+        case ["guide"]:
+            self = .guide
         case ["docs"]:
             self = .docsList
         case let p where p.count == 2 && p[0] == "doc":
@@ -5314,6 +5322,7 @@ enum ResourceURI: Equatable {
 
     var uriString: String {
         switch self {
+        case .guide: return "\(Self.scheme)guide"
         case .docsList: return "\(Self.scheme)docs"
         case .docSummary(let docId): return "\(Self.scheme)doc/\(docId)"
         case .docRaw(let docId): return "\(Self.scheme)doc/\(docId)/raw"
@@ -5327,6 +5336,12 @@ enum ResourceURI: Equatable {
     /// appended separately, one per `manager.listDocuments()` result.
     static var templateResources: [Resource] {
         [
+            // First, deliberately: it is the one an agent should read before picking a tool.
+            Resource(
+                name: "guide", uri: "\(scheme)guide",
+                description: "READ FIRST — where to place work so the user can see it, how "
+                    + "coordinates and ink behave, and the traps that cost previous agents an hour",
+                mimeType: "text/markdown"),
             Resource(
                 name: "docs", uri: "\(scheme)docs",
                 description: "All documents on the server", mimeType: "application/json"),
