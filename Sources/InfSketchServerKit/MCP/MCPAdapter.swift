@@ -1737,13 +1737,23 @@ public actor MCPAdapter {
             name: "get_tool",
             description: """
                 Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, \
-                and when true `inkType`, `width` and `color` (#RRGGBBAA). READ THIS BEFORE \
-                DRAWING and pass the values explicitly to draw_strokes / draw_selection / \
-                render_sketch, so strokes you author match the pen the user is holding unless \
-                they asked for something else. The values are never applied implicitly: you hold \
-                them, so a preview and its commit are the same numbers even if the user switches \
-                tools in between. `isInkingTool` is false for the eraser, lasso, or Bring to \
-                Front — nothing sensible to inherit, so use your own values. Needs no selection. \
+                and when true `inkType`, `width`, `toolWidth`, `peakWidth` and `color` \
+                (#RRGGBBAA). READ THIS BEFORE DRAWING and pass the values explicitly to \
+                draw_strokes / draw_selection / render_sketch, so strokes you author match the \
+                pen the user is holding unless they asked for something else. The values are \
+                never applied implicitly: you hold them, so a preview and its commit are the same \
+                numbers even if the user switches tools in between. `isInkingTool` is false for \
+                the eraser, lasso, or Bring to Front — nothing sensible to inherit, so use your \
+                own values.
+
+                TWO WIDTHS, and they are DIFFERENT NUMBERS. `peakWidth` is what the pen actually \
+                lays down — the same quantity list_strokes / get_strokes report and \
+                draw_* / restyle_* accept — and `width` is an alias of it, so copying `width` \
+                straight into a draw call is correct. `toolWidth` is the picker DIAL, reported \
+                for completeness (it is the unit stroke anchors record); do NOT pass it to \
+                draw_*. They coincide only for marker: monoline draws `dial + 2`, and pen and \
+                pencil follow a non-linear curve, so a dial of 2 on monoline draws a 4. Omitting \
+                width entirely inherits `peakWidth` for you. Needs no selection. \
                 REQUIRES a connected `controlSelection` device.
                 """,
             inputSchema: .object([
