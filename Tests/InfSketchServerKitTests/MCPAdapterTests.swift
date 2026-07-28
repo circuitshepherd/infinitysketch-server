@@ -37,6 +37,17 @@ private func startServer(
     return (server, port, task)
 }
 
+/// A document's current bytes, read the way any client can — through the raw resource — so an
+/// assertion about content needs no test-only hole in the server.
+private func rawDocument(_ client: Client, _ docId: String) async throws -> Data {
+    let contents = try await client.readResource(uri: "infsketch://doc/\(docId)/raw")
+    for content in contents {
+        if let blob = content.blob, let data = Data(base64Encoded: blob) { return data }
+        if let text = content.text { return Data(text.utf8) }
+    }
+    return Data()
+}
+
 /// Task 2 review (I1): the same harness over an INJECTED store, so a test can
 /// make the document's live bytes differ from what a tool handler read — with
 /// no timing, no device, and no concurrency (see `StaleReadStore`).
@@ -317,6 +328,17 @@ private actor FakeCreateDocDevice {
     /// Manually answers a recorded request — for tests that stall the
     /// device (autoReplyBytes: nil) to hold a request in flight, then
     /// release it at a moment of their choosing.
+    /// An APP-style push: straight up the WS `op` path, exactly as the mirror's settle-push
+    /// arrives — NOT through any MCP tool. What `theAppsOwnPushIsNotUndoable` needs.
+    func push(docId: String, bytes: Data) async throws {
+        try await ws.send(.string(ClientMessage.subscribe(
+            docId: docId, fromSeq: nil, createIfMissing: true).jsonText()))
+        _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
+        try await ws.send(.string(ClientMessage.op(
+            docId: docId, opId: "app-push-\(UUID().uuidString)",
+            payload: OpPayload(type: "fullDoc", data: bytes)).jsonText()))
+    }
+
     func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
         try await ws.send(.string(ClientMessage.createDocReply(
             requestId: requestId, docId: docId,
@@ -755,7 +777,9 @@ private actor FakeStrokeOpDevice {
     // ("what documents exist?", which no tool could answer) added one, renaming this from
     // `listToolsContainsAllFortySevenTools`. transform_elements (geometry for texts and images,
     // not only strokes) added one, renaming this from `listToolsContainsAllFortyEightTools`.
-    @Test func listToolsContainsAllFortyNineTools() async throws {
+    // undo_last_edit (an agent taking back its own write) added one, renaming this from
+    // `listToolsContainsAllFortyNineTools`.
+    @Test func listToolsContainsAllFiftyTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -768,7 +792,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
-            "transform_elements",
+            "transform_elements", "undo_last_edit",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
@@ -5057,6 +5081,199 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - undo_last_edit (2026-07-28 agent-undo design)
+
+    /// THE ONE THAT MATTERS MOST. Recording lives at the MCP layer, not in
+    /// `DocumentSession.submit`, because that is shared with the APP's own settle-push — and
+    /// recording those would make "undo the last edit" capable of reverting the user's drawing.
+    /// Mutation-verify by moving the record call into `submit`: this must fail.
+    @Test func theAppsOwnPushIsNotUndoable() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // An APP push: straight up the WS `op` path, exactly as the mirror's settle-push arrives.
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: nil)
+        defer { Task { await device.close() } }
+        try await device.push(docId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","m":"app"}"#.utf8))
+        try await Task.sleep(for: .milliseconds(200))
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
+
+        await server.stop()
+    }
+
+    /// With nothing recorded at all, undo says so rather than doing something surprising.
+    @Test func undoWithNoRecordedEditReportsNothingToUndo() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
+
+        await server.stop()
+    }
+
+    @Test func undoOnAnUnknownDocErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "ghost"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"))
+
+        await server.stop()
+    }
+
+    @Test func undoRejectsAStepCountBelowOne() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d", "steps": 0])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArguments")
+
+        await server.stop()
+    }
+
+    /// An AGENT write IS undoable, and — with nothing changed since — the document comes back
+    /// byte-for-byte, on the server's fast path with no device round trip for the merge.
+    @Test func anAgentWriteIsUndoneExactly() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"agent wrote this"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified),
+                                                  capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let before = try await rawDocument(client, "d")
+        let (_, drewError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": [["points": [[0, 0], [10, 10]]]]])
+        #expect(drewError != true)
+        #expect(try await rawDocument(client, "d") == modified)
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content).hasPrefix("undid 1 edit(s) in d"))
+        #expect(try await rawDocument(client, "d") == before)
+
+        await server.stop()
+    }
+
+    /// Repeated undo WALKS BACK — it does not ping-pong. The undo's own write is deliberately
+    /// not recorded: recording it would make this second call reverse the FIRST UNDO instead of
+    /// the edit before it, which contradicts one-undo-is-one-tool-call. Found by testing.
+    @Test func repeatedUndoWalksBackRatherThanUndoingTheUndo() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let original = try await rawDocument(client, "d")
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["points": [[0, 0], [10, 10]]]]])
+        _ = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(try await rawDocument(client, "d") == original)
+
+        // Only one edit was ever recorded, so there is nothing further back to reach — and
+        // crucially the document does NOT bounce forward to the post-draw state.
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
+        #expect(try await rawDocument(client, "d") == original, "undo must not ping-pong")
+
+        await server.stop()
+    }
+
+    /// Two agent edits, two undos, back to the start — the model the granularity decision implies.
+    @Test func twoUndosWalkBackTwoEdits() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"first"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        let original = try await rawDocument(client, "d")
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["points": [[0, 0], [1, 1]]]]])
+        let afterFirst = try await rawDocument(client, "d")
+        await device.close()
+
+        let second = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"second"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await second.close() } }
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["points": [[2, 2], [3, 3]]]]])
+
+        _ = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(try await rawDocument(client, "d") == afterFirst)
+        _ = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(try await rawDocument(client, "d") == original)
+
+        await server.stop()
+    }
+
+    /// Deleting a document forgets what the agent did to it. Without this a recycled name
+    /// inherits the previous document's history, and an undo reaches content that was never in
+    /// THIS document — found by an E2E whose second run saw the first run's edits.
+    @Test func deletingADocumentForgetsItsUndoHistory() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["points": [[0, 0], [1, 1]]]]])
+        _ = try await client.callTool(name: "delete_doc", arguments: ["docId": "d"])
+        // Re-create under the SAME name — a different document that happens to share it. An app
+        // push is the honest way to do that here: it is how a device re-creating a deleted
+        // document actually arrives.
+        let app = try await FakeCreateDocDevice(port: port, autoReplyBytes: nil)
+        defer { Task { await app.close() } }
+        try await app.push(docId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","m":"reborn"}"#.utf8))
+        try await Task.sleep(for: .milliseconds(200))
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
 
         await server.stop()
     }

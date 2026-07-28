@@ -57,6 +57,10 @@ public actor MCPAdapter {
     /// the same instance `WSAdapter` registers capability-tagged connections
     /// with); `callCreateDoc` awaits `broker.requestCreation` on it.
     private let broker: DeviceCommandBroker
+    /// What each agent tool call changed, so `undo_last_edit` can take one back. Deliberately NOT
+    /// on `DocumentSession` — see the type's own doc comment for why agent scope has to hold by
+    /// construction here rather than by a flag inside `submit`.
+    private let history = AgentEditHistory()
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -773,6 +777,35 @@ public actor MCPAdapter {
                     "anchor": .object([
                         "type": "array", "items": .object(["type": "number"]),
                         "description": "[x, y]. Defaults to the centre of the whole set's bounding box.",
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "undo_last_edit",
+            description: """
+                Take back YOUR OWN last write to a document — the one you just made and wish you \
+                had not. Reaches edits made whether or not the document is open, which the user's \
+                own Undo cannot.
+
+                Only YOUR writes are recorded, never the user's own drawing, so this can never \
+                reverse their work. One undo = one tool call, the same unit the app registers, and \
+                `steps` walks further back one call at a time.
+
+                If the document changed after your write, it is MERGED rather than refused: your \
+                change is reversed and everything that happened since is kept. That path needs a \
+                connected device; an unchanged document does not. There is no redo — but an undo \
+                is itself a write, so undoing it again does the obvious thing. History is bounded \
+                and in memory, so a much older edit answers `nothingToUndo`.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to undo an edit in."]),
+                    "steps": .object([
+                        "type": "integer",
+                        "description": "How many of your own edits to take back, newest first. Default 1.",
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
@@ -2306,6 +2339,7 @@ public actor MCPAdapter {
     private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         switch name {
         case "transform_elements": return await callTransformElements(arguments)
+        case "undo_last_edit": return await callUndoLastEdit(arguments)
         case "list_docs": return await callListDocs()
         case "list_open_docs": return await callListOpenDocs()
         case "tag_elements": return await callTagElements(arguments)
@@ -2698,6 +2732,11 @@ public actor MCPAdapter {
             } catch {
                 return Self.errorResult("unknownDoc")
             }
+            // The bytes are gone, so its undo history is meaningless — and an undo that
+            // resurrected a deleted document would be a surprise, not a service. It also stops a
+            // recycled name inheriting the previous document's history, which is how an undo
+            // could otherwise reach content that was never in THIS document at all.
+            await history.forget(docId: docId)
             return Self.textResult("deleted \(docId)")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4701,9 +4740,14 @@ public actor MCPAdapter {
     /// read-then-check-then-write race a manual `docExists` pre-check leaves
     /// open — see `DocumentSession.submit`'s `.absent` branch for where the
     /// guard actually lives (same actor turn as `store.save`).
+    /// `recordForUndo: false` is for the UNDO's own write. Recording it would make a second
+    /// `undo_last_edit` reverse the FIRST UNDO rather than walk one edit further back — turning
+    /// repeated undo into a ping-pong, which contradicts the one-undo-is-one-tool-call model.
+    /// (Found by testing, not by design: the spec originally claimed recording it gave redo for
+    /// free. It does, at the cost of the primary behaviour, so it does not.)
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectation: WriteExpectation, successText: (Int) -> String
+        expectation: WriteExpectation, recordForUndo: Bool = true, successText: (Int) -> String
     ) async -> CallTool.Result {
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
@@ -4712,12 +4756,113 @@ public actor MCPAdapter {
             expectation: expectation
         ) {
         case .accepted(let seq):
+            // Record what this tool call changed, so `undo_last_edit` can take it back. HERE and
+            // not in `DocumentSession.submit`: that is shared with the app's own settle-push, and
+            // recording those would let an undo revert the USER's drawing. `expectation` already
+            // carries the pre-write bytes for the byte-CAS, so nothing extra is read or computed.
+            if recordForUndo, case .matchBytes(let before) = expectation {
+                await history.record(docId: docId, before: before, after: bytes)
+            }
             return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
         case .rejected(let message):
             guard case .reject(_, _, let reason, _) = message else {
                 return Self.errorResult("unexpectedServerResponse")
             }
             return Self.errorResult(reason)
+        }
+    }
+
+    /// `undo_last_edit` — take back the agent's own last write (spec 2026-07-28-agent-undo-design).
+    private func callUndoLastEdit(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let steps = try Self.optionalIntArg(arguments, "steps") ?? 1
+            guard steps >= 1 else { return Self.errorResult("invalidArguments") }
+            guard await manager.currentBytesOrFetch(docId: docId) != nil else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            var undone = 0
+            var lastSeqText = ""
+            for _ in 0..<steps {
+                guard let entry = await history.mostRecent(docId: docId) else {
+                    // Some steps may already have landed; say how far it got rather than
+                    // pretending the whole call failed.
+                    if undone > 0 { break }
+                    return Self.errorResult("nothingToUndo: no recorded edit for \"\(docId)\"")
+                }
+                guard let current = await manager.currentBytesOrFetch(docId: docId) else {
+                    return Self.errorResult("unknownDoc")
+                }
+
+                let restored: Data
+                if current == entry.after {
+                    // Nothing has changed since. A three-way merge with `mine == base` resolves to
+                    // `theirs` for every element and every field — which is `before` exactly — so
+                    // this IS the merge's own answer, computed without a device round trip. It is
+                    // what keeps undo working with no device connected in the common case.
+                    // Pinned by `AgentUndoMergeTests` in the app repo.
+                    restored = entry.before
+                } else {
+                    // Genuinely contended: reverse the agent's change while keeping whatever
+                    // happened since. Needs the app — `DocMergeEngine` is where PencilKit is.
+                    switch await revertMerge(docId: docId, base: entry.after, mine: current,
+                                             theirs: entry.before) {
+                    case .merged(let merged): restored = merged
+                    case .failed(let result): return result
+                    }
+                }
+
+                let result = await submitAndRespond(
+                    docId: docId, createIfMissing: false, fullDoc: restored,
+                    expectation: .matchBytes(current), recordForUndo: false
+                ) { seq in "seq \(seq)" }
+                if result.isError == true { return result }
+                // Consumed only once the undo has actually landed, so a rejected write or an
+                // unreachable device leaves the history intact and the agent can try again.
+                await history.consumeMostRecent(docId: docId)
+                undone += 1
+                for content in result.content {
+                    if case .text(let text, _, _) = content { lastSeqText = text }
+                }
+            }
+            return Self.textResult("undid \(undone) edit(s) in \(docId) at \(lastSeqText)")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The contended path: hand all three versions to the device and let `DocMergeEngine` reverse
+    /// the agent's change without discarding what landed since.
+    enum RevertOutcome {
+        case merged(Data)
+        /// The device could not be reached or refused — surfaced verbatim to the caller.
+        case failed(CallTool.Result)
+    }
+
+    private func revertMerge(docId: String, base: Data, mine: Data, theirs: Data)
+        async -> RevertOutcome
+    {
+        let spec: Data
+        do {
+            spec = try JSONEncoder().encode(Value.object([
+                "op": .string("revertMerge"),
+                "base": .string(base.base64EncodedString()),
+                "theirs": .string(theirs.base64EncodedString()),
+            ]))
+        } catch { return .failed(Self.errorResult("invalidArguments")) }
+
+        do {
+            // `mine` rides as the request's docBytes, the shape every relayed op already uses.
+            let out = try await broker.requestStrokeOp(docId: docId, docBytes: mine, spec: spec,
+                                                       capability: "mergeDocs")
+            return .merged(out.bytes)
+        } catch let error as DeviceCommandBroker.DeviceCommandError {
+            return .failed(Self.strokeOpErrorResult(error))
+        } catch {
+            return .failed(Self.errorResult("deviceFailed: \(error)"))
         }
     }
 
@@ -4864,6 +5009,17 @@ public actor MCPAdapter {
         guard let value = arguments?[key] else { throw ArgumentError.missing(key) }
         guard case .string(let s) = value else { throw ArgumentError.invalidType(key) }
         return s
+    }
+
+    /// An optional whole-number argument. Accepts an integer, or a double that IS one (a client
+    /// that JSON-encodes `1` as `1.0` means 1); anything else is the caller's mistake.
+    private static func optionalIntArg(_ arguments: [String: Value]?, _ key: String) throws -> Int? {
+        guard let value = arguments?[key], !value.isNull else { return nil }
+        if let int = value.intValue { return int }
+        if let double = value.doubleValue, double.rounded() == double, double.magnitude < 1e9 {
+            return Int(double)
+        }
+        throw ArgumentError.invalidType(key)
     }
 
     private static func optionalStringArg(_ arguments: [String: Value]?, _ key: String) throws -> String? {
