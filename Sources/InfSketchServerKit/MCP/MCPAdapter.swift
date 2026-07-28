@@ -442,7 +442,7 @@ public actor MCPAdapter {
     /// `elementNames`, which the server-side `DocJSON` path does not write, so a named
     /// `add_text` must take the device path or the name would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        (styleArgKeys + ["name"]).contains { key in
+        (styleArgKeys + ["tags"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
@@ -625,6 +625,10 @@ public actor MCPAdapter {
                         "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
                         "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "tags": .object([
+                            "type": "array", "items": .object(["type": "string"]),
+                            "description": "Durable tags for this text, so find_elements can reach it later.",
+                        ]),
                         "pinned": .object([
                             "type": "boolean",
                             "description": "Excludes the text from selection transforms. Defaults to false.",
@@ -695,21 +699,21 @@ public actor MCPAdapter {
         Tool(
             name: "tag_elements",
             description: """
-                Give an element a durable NAME, so you can find it again later — the stroke you \
-                drew for an axis, the text that titles a chart. Names live in the DOCUMENT, so \
-                they outlast this task, this session and this agent, which the ids returned by \
-                draw_strokes do not.
+                Give elements durable TAGS, so you can find your own work again later — the \
+                strokes that make up a roof, the series of markers on a plot, the text that \
+                titles a chart. Tags live in the DOCUMENT, so they outlast this task, this \
+                session and this agent, which the ids returned by draw_strokes do not.
 
-                THE POINT: with a name you can update your own work in place (find_elements -> \
-                reshape_strokes) instead of deleting and redrawing, which is what destroys the \
-                user's own annotations and hand-adjusted spacing.
+                THE POINT: with a tag you can update your own work in place (find_elements -> \
+                the tools that take ids) instead of deleting and redrawing, which is what \
+                destroys the user's own annotations and hand-adjusted spacing.
 
-                A name identifies exactly ONE element, so `name` requires exactly one id. \
-                Assigning a name that is already taken MOVES it — the previous holder stays on \
-                the canvas, unnamed, and the reply says which it was, so you can delete it if \
-                this was a replacement. To CLEAR names, pass `name: null` with any number of ids. \
-                Names are 1-128 characters; use whatever reads well ("fft.axis.h", "Achse H"). \
-                \(writeToolCaveats)
+                Many-to-many: an element carries any number of tags and a tag covers any number \
+                of elements, so overlapping sets are fine — the strokes of "sky" can also be \
+                "background". `mode` is add (default), remove, or replace; `replace` with an \
+                empty `tags` clears. Tags are 1-128 characters, at most 32 per element; use \
+                whatever reads well ("roof", "fft.axis.h", "Achse H"). Clones inherit their \
+                tags, so a duplicated roof tile is still part of the roof. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -717,11 +721,15 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
                     "ids": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "Element ids (stroke id, text id or image id). Exactly one when setting a name; any number when clearing.",
+                        "description": "Element ids (stroke id, text id or image id). Any number.",
                     ]),
-                    "name": .object([
-                        "type": "string",
-                        "description": "The name to assign. Omit or pass null to CLEAR the names of the given ids.",
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "The tags to add, remove, or replace with.",
+                    ]),
+                    "mode": .object([
+                        "type": "string", "enum": .array([.string("add"), .string("remove"), .string("replace")]),
+                        "description": "add (default) / remove / replace. replace with an empty tags clears.",
                     ]),
                 ]),
                 "required": .array(["docId", "ids"].map(Value.string)),
@@ -730,25 +738,46 @@ public actor MCPAdapter {
         Tool(
             name: "find_elements",
             description: """
-                Resolve element NAMES to ids, so you can act on them with any tool that takes \
-                ids. Read-only, and cheap: no document payload comes back, just \
-                `{name: id}` for the names that resolve.
+                Resolve TAGS to element ids, so you can act on them with any tool that takes \
+                ids. Read-only and cheap: no document payload comes back, just \
+                `{tag: [ids]}` for the tags that resolve.
 
-                A name whose element no longer exists is simply ABSENT from the reply rather \
-                than a dangling id — so an empty answer means "that element is gone", not "the \
-                lookup failed". Names are set with tag_elements, or at creation time by \
-                draw_strokes / add_text / add_image.
+                Ids come back in DOCUMENT order — strokes in drawing order, then texts, then \
+                images — so a tagged series is returned in a stable, meaningful sequence.
+
+                A tag whose elements no longer exist is simply ABSENT from the reply rather than \
+                a dangling id, so an empty answer means "those elements are gone", not "the \
+                lookup failed". Tags are set with tag_elements, or at creation time by \
+                draw_strokes / add_text / add_image / fill_region / draw_dots. Use list_tags to \
+                see what a document already has.
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to query."]),
-                    "names": .object([
+                    "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "The names to resolve.",
+                        "description": "The tags to resolve.",
                     ]),
                 ]),
-                "required": .array(["docId", "names"].map(Value.string)),
+                "required": .array(["docId", "tags"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_tags",
+            description: """
+                Every tag in a document, with how many live elements carry it. Read-only.
+
+                This is how you pick up work you did earlier: the ids you were handed are gone, \
+                and guessing a tag is indistinguishable from the tag having been deleted. Start \
+                here, then find_elements to turn a tag into ids.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                ]),
+                "required": .array([.string("docId")]),
             ])
         ),
         Tool(
@@ -878,9 +907,9 @@ public actor MCPAdapter {
                                         where the centre and the rim overlap.
                                         """,
                                 ]),
-                                "name": .object([
-                                    "type": "string",
-                                    "description": "A durable name, so find_elements can reach this dot later.",
+                                "tags": .object([
+                                    "type": "array", "items": .object(["type": "string"]),
+                                    "description": "Durable tags, so find_elements can reach this again later.",
                                 ]),
                             ]),
                             "required": .array([.string("canvasX"), .string("canvasY")]),
@@ -937,14 +966,14 @@ public actor MCPAdapter {
                             "minItems": 2, "maxItems": 2,
                         ]),
                     ]),
-                    "name": .object([
-                        "type": "string",
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
                         "description": """
-                            A durable name for the filled area, so you can find it again with \
+                            Durable tags for the filled area, so you can find it again with \
                             find_elements after this call's ids are gone — which is how you \
                             reshape a fill: delete it and fill the new outline under the same \
-                            name. Only for a SOLID fill, which is one stroke; a hatched fill is \
-                            several and a name identifies one element, so it is refused there.
+                            tag. A hatched fill gets them too: it is several strokes, and a tag \
+                            is a set.
                             """,
                     ]),
                     "color": .object([
@@ -1077,6 +1106,10 @@ public actor MCPAdapter {
                     "canvasHeight": .object([
                         "type": "number",
                         "description": "Canvas-point height. Omit both for the image's natural pixel size; give one to preserve aspect ratio.",
+                    ]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for this image, so find_elements can reach it later.",
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
                 ]),
@@ -1884,6 +1917,10 @@ public actor MCPAdapter {
                             get_strokes reports the actual resulting peak.
                             """,
                     ]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for this stroke, so find_elements can reach it later.",
+                    ]),
                     "inkType": .object([
                         "type": "string",
                         "enum": .array(["pen", "pencil", "marker", "monoline"].map(Value.string)),
@@ -2545,6 +2582,7 @@ public actor MCPAdapter {
         case "list_open_docs": return await callListOpenDocs()
         case "tag_elements": return await callTagElements(arguments)
         case "find_elements": return await callFindElements(arguments)
+        case "list_tags": return await callListTags(arguments)
         case "add_text": return await callAddText(arguments)
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
@@ -2657,7 +2695,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "name"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -2730,7 +2768,7 @@ public actor MCPAdapter {
             if let width { envelope["canvasWidth"] = .double(width) }
             if let height { envelope["canvasHeight"] = .double(height) }
             if let opacity { envelope["opacity"] = .double(opacity) }
-            if let name = try Self.optionalStringArg(arguments, "name") { envelope["name"] = .string(name) }
+            if let tags = try Self.optionalStringArrayArg(arguments, "tags") { envelope["tags"] = .array(tags.map(Value.string)) }
 
             let spec: Data
             do {
@@ -3762,27 +3800,32 @@ public actor MCPAdapter {
         }
     }
 
-    /// `tag_elements` — set or clear a durable element name
-    /// (spec 2026-07-27-element-names-design.md). Device-relayed because validating that an id
+    /// `tag_elements` — add, remove or replace durable element tags
+    /// (spec 2026-07-28-element-tags-design.md). Device-relayed because validating that an id
     /// EXISTS means enumerating stroke composite keys, and only PencilKit can decode a drawing.
     private func callTagElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
-            let name = try Self.optionalStringArg(arguments, "name")
-            // A name belongs to ONE element: naming several at once has no meaning, and naming
-            // only the first would be a trap. Clearing many is unambiguous, so it is allowed.
-            if name != nil && ids.count != 1 { return Self.errorResult("invalidArguments") }
+            let mode = try Self.optionalStringArg(arguments, "mode") ?? "add"
+            guard ["add", "remove", "replace"].contains(mode) else {
+                return Self.errorResult("invalidArgument: mode")
+            }
+            let tags = try Self.optionalStringArrayArg(arguments, "tags") ?? []
+            // Only `replace` means anything with no tags — it clears. add/remove of nothing is a
+            // caller mistake worth naming rather than a silent no-op.
+            if tags.isEmpty && mode != "replace" { return Self.errorResult("invalidArgument: tags") }
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
-            var fields: [String: Value] = [
-                "op": .string("tagElements"),
-                "ids": .array(ids.map(Value.string)),
-            ]
-            if let name { fields["name"] = .string(name) }
             let spec: Data
-            do { spec = try JSONEncoder().encode(Value.object(fields)) }
-            catch { return Self.errorResult("invalidArguments") }
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("tagElements"),
+                    "ids": .array(ids.map(Value.string)),
+                    "tags": .array(tags.map(Value.string)),
+                    "mode": .string(mode),
+                ]))
+            } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
@@ -3792,18 +3835,12 @@ public actor MCPAdapter {
             } catch {
                 return Self.errorResult("deviceFailed: \(error)")
             }
-
-            // The device reports which element lost the name, if any — surfaced verbatim so the
-            // agent can delete the displaced element if this was meant as a replacement.
-            let displaced = out.meta
-                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }?["displaced"]
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
-                guard let name else { return "cleared \(ids.count) name(s) in \(docId) at seq \(seq)" }
-                guard let displaced else { return "named \(ids[0]) \"\(name)\" in \(docId) at seq \(seq)" }
-                return "named \(ids[0]) \"\(name)\" in \(docId) at seq \(seq); the name moved from \(displaced), "
-                     + "which is still on the canvas and now unnamed"
+                let verb = ["add": "added", "remove": "removed", "replace": "replaced"][mode] ?? mode
+                let what = tags.isEmpty ? "cleared the tags of" : "\(verb) \(tags.count) tag(s) on"
+                return "\(what) \(ids.count) element(s) in \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -3812,19 +3849,30 @@ public actor MCPAdapter {
         }
     }
 
-    /// `find_elements` — resolve names to ids. Read-only: no submit, no seq, nothing to retry.
+    /// `find_elements` — resolve tags to ids. Read-only: no submit, no seq, nothing to retry.
     private func callFindElements(_ arguments: [String: Value]?) async -> CallTool.Result {
+        await relayTagRead(arguments, op: "findElements", listKey: "tags")
+    }
+
+    /// `list_tags` — what tags this document has, and how many elements carry each. Read-only.
+    private func callListTags(_ arguments: [String: Value]?) async -> CallTool.Result {
+        await relayTagRead(arguments, op: "listTags", listKey: nil)
+    }
+
+    /// The shared body of the two read-only tag relays: the device answers in `meta`, which is
+    /// passed straight through as the tool's text.
+    private func relayTagRead(_ arguments: [String: Value]?, op: String,
+                              listKey: String?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let names = try Self.nonEmptyStringArrayArg(arguments, "names")
+            var fields: [String: Value] = ["op": .string(op)]
+            if let listKey {
+                fields[listKey] = .array(try Self.nonEmptyStringArrayArg(arguments, listKey).map(Value.string))
+            }
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
-            do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("findElements"),
-                    "names": .array(names.map(Value.string)),
-                ]))
-            } catch { return Self.errorResult("invalidArguments") }
+            do { spec = try JSONEncoder().encode(Value.object(fields)) }
+            catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
@@ -5207,7 +5255,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "name"] {
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data

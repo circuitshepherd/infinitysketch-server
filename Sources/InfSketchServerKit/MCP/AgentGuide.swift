@@ -104,10 +104,11 @@ enum AgentGuide {
 
     ## Working alongside a person
 
-    - **Name what you may need again.** `tag_elements`, or `name` at creation. Names live in the \
-      document, so they outlast this task and this session — `find_elements` resolves them later. \
-      Without one you cannot find your own axis again and will redraw the chart, taking the \
-      user's annotations with it.
+    - **Tag what you may need again.** `tag_elements`, or `tags` at creation. Tags live in the \
+      document, so they outlast this task and this session — `find_elements` resolves them later, \
+      and `list_tags` says what a document already holds. A tag covers a SET, so tag the whole \
+      roof, not just one stroke of it. Without one you cannot find your own axis again and will \
+      redraw the chart, taking the user's annotations with it.
     - **Edit in place; never rebuild.** `reshape_strokes`, `restyle_strokes`, `transform_elements` \
       keep an element's identity and its history. Deleting and redrawing loses both.
     - **Snap candidates are ranked by DISTANCE, not by suitability.** `snap_points` returns every \

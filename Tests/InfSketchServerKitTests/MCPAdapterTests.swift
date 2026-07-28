@@ -780,8 +780,10 @@ private actor FakeStrokeOpDevice {
     // undo_last_edit (an agent taking back its own write) added one, renaming this from
     // `listToolsContainsAllFortyNineTools`. fill_region (one call for a solid area) added one,
     // renaming this from `listToolsContainsAllFiftyTools`. draw_dots (a solid round dot as one
-    // stroke) added one, renaming this from `listToolsContainsAllFiftyOneTools`.
-    @Test func listToolsContainsAllFiftyTwoTools() async throws {
+    // stroke) added one, renaming this from `listToolsContainsAllFiftyOneTools`. list_tags (what
+    // tags a document has, so an agent can pick up earlier work) added one, renaming this from
+    // `listToolsContainsAllFiftyTwoTools`.
+    @Test func listToolsContainsAllFiftyThreeTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -794,7 +796,7 @@ private actor FakeStrokeOpDevice {
             "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
-            "transform_elements", "undo_last_edit", "fill_region", "draw_dots",
+            "transform_elements", "undo_last_edit", "fill_region", "draw_dots", "list_tags",
             "get_selection", "transform_selection",
             "select_all", "select_elements", "set_reference_point", "clear_selection",
             "preview_selection", "duplicate_selection",
@@ -5523,98 +5525,93 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    // MARK: - tag_elements / find_elements (element names, 2026-07-27)
+    // MARK: - tag_elements / find_elements / list_tags (element tags, 2026-07-28)
 
-    /// The naming ops are device-relayed for the same reason `list_strokes` is: validating that an
-    /// id EXISTS means enumerating stroke composite keys, and only PencilKit can decode a drawing.
-    /// This pins the envelope the device decodes (`ElementNaming.TagSpec`, app repo) — a plain
-    /// `Decodable`, so a field-name drift here would fail SILENTLY on one side of the wire.
+    /// The tagging ops are device-relayed for the same reason `list_strokes` is: validating that
+    /// an id EXISTS means enumerating stroke composite keys, and only PencilKit can decode a
+    /// drawing. This pins the envelope the device decodes (`ElementTagging.TagSpec`, app repo) — a
+    /// plain `Decodable`, so a field-name drift here would fail SILENTLY on one side of the wire.
     @Test func tagElementsRelaysSpecAndCapability() async throws {
         let (server, port, task) = try await startServer()  // seeds "d"
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"named"}"#.utf8)
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"tagged"}"#.utf8)
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["tagElements"])
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1"], "name": "fft.axis.h"])
+            name: "tag_elements",
+            arguments: ["docId": "d", "ids": ["k1", "k2"], "tags": ["roof", "revision-2"]])
         #expect(isError != true)
-        #expect(toolResultText(content).contains(#"named k1 "fft.axis.h" in d"#))
+        #expect(toolResultText(content).contains("2 element(s) in d"))
         let received = try #require(await device.receivedRequests.first)
         let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(spec["op"] as? String == "tagElements")
-        #expect(spec["ids"] as? [String] == ["k1"])
-        #expect(spec["name"] as? String == "fft.axis.h")
-    }
-
-    /// A name identifies ONE element, so setting one takes exactly one id — rejected HERE, before
-    /// the device is contacted, because the shape is wrong rather than the content.
-    @Test func tagElementsRejectsSeveralIdsWhenSettingAName() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
-        defer { task.cancel() }
-        let client = try await connectedClient(port: port)
-        defer { Task { await client.disconnect() } }
-        let device = try await FakeStrokeOpDevice(
-            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["tagElements"])
-        defer { Task { await device.close() } }
-
-        let (content, isError) = try await client.callTool(
-            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1", "k2"], "name": "both"])
-        #expect(isError == true)
-        #expect(toolResultText(content).hasPrefix("invalidArguments"))
-        #expect(await device.receivedRequests.isEmpty)
+        #expect(spec["ids"] as? [String] == ["k1", "k2"])
+        #expect(spec["tags"] as? [String] == ["roof", "revision-2"])
+        // The default, sent explicitly so the device never has to guess.
+        #expect(spec["mode"] as? String == "add")
 
         await server.stop()
     }
 
-    /// Clearing many at once IS meaningful ("un-name all of these"), so the same argument shape
-    /// with no `name` is accepted and relayed with the field absent.
-    @Test func tagElementsClearsManyIdsAtOnce() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
+    /// SEVERAL ids at once is the ordinary case now — a tag covers a set. The old single-name rule
+    /// rejected this, and that rejection is what tags exist to remove.
+    @Test func tagElementsAcceptsManyIdsAndModes() async throws {
+        let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"cleared"}"#.utf8)
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"tagged"}"#.utf8)
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["tagElements"])
         defer { Task { await device.close() } }
 
-        let (content, isError) = try await client.callTool(
-            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1", "k2"]])
-        #expect(isError != true)
-        #expect(toolResultText(content).contains("cleared 2 name(s) in d"))
-        let received = try #require(await device.receivedRequests.first)
-        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(spec["name"] == nil)
+        for (mode, verb) in [("add", "added"), ("remove", "removed"), ("replace", "replaced")] {
+            let (content, isError) = try await client.callTool(
+                name: "tag_elements",
+                arguments: ["docId": "d", "ids": ["a", "b", "c"], "tags": ["roof"], "mode": .string(mode)])
+            #expect(isError != true, "mode \(mode) was rejected")
+            // Real words, not "\(mode)ed" — which produced "removeed" on a device.
+            #expect(toolResultText(content).contains(verb))
+        }
+        // …and `replace` with no tags is the CLEAR, so it must not be treated as a missing argument.
+        let (_, clearError) = try await client.callTool(
+            name: "tag_elements",
+            arguments: ["docId": "d", "ids": ["a"], "tags": .array([]), "mode": "replace"])
+        #expect(clearError != true)
+
+        await server.stop()
     }
 
-    /// A name that was already taken MOVES to the new element. The reply names the element it came
-    /// from — still on the canvas, now unnamed — so the agent can delete it if this was a
-    /// replacement. The alternative (deleting it here) is a write that removes something the
-    /// caller never named.
-    @Test func tagElementsReportsTheElementANameMovedFrom() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
+    /// …while add/remove of NOTHING is a caller mistake worth naming rather than a silent no-op,
+    /// and an unknown mode never reaches the device.
+    @Test func tagElementsRejectsAnEmptyAddAndABadMode() async throws {
+        let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
-            port: port,
-            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","marker":"named"}"#.utf8),
-                                      meta: Data(#"{"displaced":"old-key"}"#.utf8)),
-            capabilities: ["tagElements"])
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["tagElements"])
         defer { Task { await device.close() } }
 
-        let (content, isError) = try await client.callTool(
-            name: "tag_elements", arguments: ["docId": "d", "ids": ["k1"], "name": "fft.axis.h"])
-        #expect(isError != true)
-        let text = toolResultText(content)
-        #expect(text.contains("the name moved from old-key"))
-        #expect(text.contains("still on the canvas and now unnamed"))
+        let (empty, emptyError) = try await client.callTool(
+            name: "tag_elements", arguments: ["docId": "d", "ids": ["a"], "tags": .array([])])
+        #expect(emptyError == true)
+        #expect(toolResultText(empty).hasPrefix("invalidArgument: tags"))
+
+        let (bad, badError) = try await client.callTool(
+            name: "tag_elements",
+            arguments: ["docId": "d", "ids": ["a"], "tags": ["roof"], "mode": "sideways"])
+        #expect(badError == true)
+        #expect(toolResultText(bad).hasPrefix("invalidArgument: mode"))
+        #expect(await device.receivedRequests.isEmpty, "a bad shape must not reach the device")
+
+        await server.stop()
     }
 
     @Test func tagElementsUnknownDocErrors() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
+        let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
@@ -5623,7 +5620,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "tag_elements", arguments: ["docId": "ghost", "ids": ["k1"], "name": "x"])
+            name: "tag_elements", arguments: ["docId": "ghost", "ids": ["k1"], "tags": ["roof"]])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("unknownDoc"))
         #expect(await device.receivedRequests.isEmpty)
@@ -5631,40 +5628,70 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// `find_elements` is a READ: the device's answer rides in `meta` and is passed through as the
-    /// tool's text. Nothing is submitted, so there is no seq and nothing to retry.
-    @Test func findElementsReturnsTheNameToIdMap() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
+    /// A tag resolves to MANY ids, so the reply is a map of lists — the shape change from the
+    /// single-name `{name: id}` this replaced.
+    @Test func findElementsReturnsTheTagToIdsMap() async throws {
+        let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port,
             autoReply: .bytesWithMeta(bytes: Fixtures.docBytes,
-                                      meta: Data(#"{"fft.axis.h":"3969691072-806790281"}"#.utf8)),
+                                      meta: Data(#"{"roof":["k1","k2"]}"#.utf8)),
             capabilities: ["tagElements"])
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "find_elements", arguments: ["docId": "d", "names": ["fft.axis.h"]])
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"]])
         #expect(isError != true)
-        #expect(toolResultText(content) == #"{"fft.axis.h":"3969691072-806790281"}"#)
+        #expect(toolResultText(content) == #"{"roof":["k1","k2"]}"#)
         let received = try #require(await device.receivedRequests.first)
         let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(spec["op"] as? String == "findElements")
-        #expect(spec["names"] as? [String] == ["fft.axis.h"])
+        #expect(spec["tags"] as? [String] == ["roof"])
+
+        await server.stop()
     }
 
     @Test func findElementsUnknownDocErrors() async throws {
-        let (server, port, task) = try await startServer()  // seeds "d"
+        let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "find_elements", arguments: ["docId": "ghost", "names": ["x"]])
+            name: "find_elements", arguments: ["docId": "ghost", "tags": ["roof"]])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("unknownDoc"))
+
+        await server.stop()
+    }
+
+    /// `list_tags` takes no list argument at all — it is the "what is in here?" read an agent
+    /// needs before it can ask for anything by name.
+    @Test func listTagsRelaysAndPassesTheCountsThrough() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Fixtures.docBytes,
+                                      meta: Data(#"{"roof":7,"sky":1}"#.utf8)),
+            capabilities: ["tagElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "list_tags", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"{"roof":7,"sky":1}"#)
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "listTags")
+        #expect(spec["tags"] == nil, "list_tags sends no tag list")
 
         await server.stop()
     }
