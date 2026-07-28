@@ -1817,7 +1817,25 @@ public actor MCPAdapter {
                     "ops": .object([
                         "type": "array",
                         "description": "1 to 16 operations, composed left-to-right into one undo step.",
-                        "items": .object(["type": "object"]),
+                        // Typed, not a bare `object`: an agent reading the schema could not tell
+                        // what an op looked like, so the shapes lived only in the prose above and
+                        // the natural guess was transform_strokes' flat fields, which is a
+                        // different vocabulary for the same idea (2026-07-28 finding 7).
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "op": .object([
+                                    "type": "string",
+                                    "enum": .array(["rotate", "scale", "translate", "flipHorizontal", "flipVertical"].map(Value.string)),
+                                    "description": "Which operation this entry is.",
+                                ]),
+                                "degrees": .object(["type": "number", "description": "rotate: degrees about the reference point; positive = clockwise."]),
+                                "factor": .object(["type": "number", "description": "scale: uniform factor about the reference point."]),
+                                "dx": .object(["type": "number", "description": "translate: canvas points along x."]),
+                                "dy": .object(["type": "number", "description": "translate: canvas points along y."]),
+                            ]),
+                            "required": .array([Value.string("op")]),
+                        ]),
                     ]),
                     "expect": .object(["type": "string", "description": "signature from get_selection."]),
                 ]),
