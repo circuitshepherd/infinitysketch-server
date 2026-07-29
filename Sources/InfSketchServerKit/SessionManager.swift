@@ -202,6 +202,11 @@ public actor SessionManager {
             graceTasks.removeValue(forKey: docId)?.task.cancel()
             emitStatus(docId: docId, kind: "sessionClosed", seq: nil, count: 0)
         }
+        // Unconditionally, and NOT folded into the branch above: a document with no live session
+        // is the ordinary case for an agent `delete_doc`, and emitting only `sessionClosed` there
+        // would tell status listeners nothing — a browser watching this channel would keep showing
+        // the row until something else made it re-fetch.
+        emitStatus(docId: docId, kind: "docDeleted", seq: nil, count: 0)
     }
 
     /// Register a viewer. Opens the session from the store if needed (no

@@ -117,6 +117,29 @@ final class DeleteDocTests: XCTestCase {
     /// Nothing is retained: re-creating the same id afterwards is an ordinary create, not a
     /// resurrection that has to defeat a tombstone. This pins the "server stores nothing after
     /// delete" decision — a later tombstone would break this test, which is the point.
+    /// A delete must announce itself on the status channel even when NOBODY had the document
+    /// open — which is the ordinary case for an agent `delete_doc`. Before this, `deleteDoc` only
+    /// emitted `sessionClosed`, and only inside the `if let session` branch, so deleting an
+    /// unopened document told status listeners nothing and a browser watching that channel kept
+    /// showing the row until something else made it re-fetch.
+    func testDeletingADocumentWithNoLiveSessionStillAnnouncesIt() async throws {
+        let (manager, store, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try store.save(docId: "Doomed", bytes: Data("bye".utf8))
+
+        let (events, _) = await manager.subscribeStatus()
+        try await manager.deleteDoc(docId: "Doomed")
+
+        var kinds: [String] = []
+        for await message in events {
+            if case .statusEvent(let p) = message, p.docId == "Doomed" {
+                kinds.append(p.kind)
+                break
+            }
+        }
+        XCTAssertEqual(kinds, ["docDeleted"])
+    }
+
     func testTheIdIsFreeAgainImmediatelyAfterDeletion() async throws {
         let (manager, store, dir) = try makeManager()
         defer { try? FileManager.default.removeItem(at: dir) }
