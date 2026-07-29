@@ -4351,21 +4351,52 @@ public actor MCPAdapter {
             // but `draw_strokes` announces exactly this while restyle used to stay silent, so an
             // agent asking for 1.1 on a pen got 2.5 and could only find out by calling
             // `list_strokes` afterwards.
-            struct RestyleMeta: Decodable { let clampedWidths: [[Double]]? }
-            let clamped = out.meta
+            struct WidthNote: Decodable {
+                let requested: Double
+                let actual: Double
+                let sourcePeak: Double
+                /// 1 when the target ink COULD have rendered the requested width. The two cases
+                /// need different words, and asserting the wrong one is worse than saying nothing:
+                /// an agent that asked for 5 and got 8.33 was previously told "pen tops out near
+                /// 6", which contradicts itself as well as being the wrong reason.
+                let inkCanExpress: Double
+                /// 1 when the stroke's EXISTING peak is within the ink's range. When it is not,
+                /// the anchor's own inference saturates and the re-ink scales from a wrong
+                /// estimate — a separate cause that can hold at the same time as the first.
+                let sourcePeakExpressible: Double
+            }
+            struct RestyleMeta: Decodable { let widthNotes: [WidthNote]? }
+            let notes = out.meta
                 .flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }?
-                .clampedWidths ?? []
+                .widthNotes ?? []
 
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 var summary = "restyled \(ids.count) stroke(s) at seq \(seq)"
-                if let first = clamped.first, first.count == 2 {
-                    summary += "\nnote: \(clamped.count) stroke(s) asked for a width that "
-                        + "\(clamped.count == 1 ? "this ink" : "their inks") cannot render "
-                        + "(e.g. \(Self.trimmed(first[0])) became \(Self.trimmed(first[1]))). "
-                        + "Each ink expresses a limited range — pen tops out near 6, marker "
-                        + "cannot go below about 7.5 — so the nearest end was used."
+                // Say only what was checked. Both causes can hold at once, so the sentence is
+                // assembled from the ones that actually apply rather than picking one — an
+                // earlier version asserted "the nearest end was used" for a result that was
+                // neither the request nor a range end.
+                if let first = notes.first {
+                    let asked = Self.trimmed(first.requested), got = Self.trimmed(first.actual)
+                    summary += "\nnote: \(notes.count) stroke(s) did not land on the width asked "
+                        + "for (\(asked) became \(got))."
+                    if first.inkCanExpress == 0 {
+                        summary += " That ink cannot render \(asked) — each ink expresses a "
+                            + "limited range, pen topping out near 6 and marker not going below "
+                            + "about 7.5."
+                    }
+                    if first.sourcePeakExpressible == 0 {
+                        // "…that range too" only reads correctly when the clause above ran; on its
+                        // own it refers to nothing.
+                        let alsoRange = first.inkCanExpress == 0
+                            ? "outside that range too"
+                            : "outside what that ink can express"
+                        summary += " The stroke's own peak of \(Self.trimmed(first.sourcePeak)) is "
+                            + "\(alsoRange), so the re-ink scales from a saturated estimate."
+                    }
+                    summary += " list_strokes reports what each stroke actually got."
                 }
                 return summary
             }
