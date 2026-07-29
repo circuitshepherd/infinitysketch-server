@@ -1965,10 +1965,6 @@ public actor MCPAdapter {
                             get_strokes reports the actual resulting peak.
                             """,
                     ]),
-                    "tags": .object([
-                        "type": "array", "items": .object(["type": "string"]),
-                        "description": "Durable tags for this stroke, so find_elements can reach it later.",
-                    ]),
                     "inkType": .object([
                         "type": "string",
                         "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),

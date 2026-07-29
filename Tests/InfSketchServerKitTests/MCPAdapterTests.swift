@@ -5117,6 +5117,28 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A tool may not ADVERTISE an argument its handler ignores. Strictness cannot catch this —
+    /// the argument IS declared — so it is the mirror image of the `scale` bug and just as silent:
+    /// the caller passes it, the reply looks fine, and nothing happened.
+    ///
+    /// `restyle_strokes` advertised `tags` for one commit (my own tags rename added it to the
+    /// schema; restyling does not tag, `tag_elements` does) and forwarded only colour, width and
+    /// ink. Spot-checked here for the tools whose forwarded set is a plain literal list.
+    @Test func restyleStrokesDoesNotAdvertiseAnArgumentItIgnores() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        let tool = try #require(tools.first { $0.name == "restyle_strokes" })
+        let declared = MCPAdapter.declaredArguments(of: tool)
+        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType"],
+                "restyle_strokes declares \(declared.sorted()) — every one must reach the device")
+
+        await server.stop()
+    }
+
     /// A schema may not REQUIRE an argument it does not declare — with `additionalProperties:
     /// false` that combination makes a tool uncallable: `required` says send it, `properties` says
     /// it is forbidden. Four tools were in exactly that state, left behind by the
