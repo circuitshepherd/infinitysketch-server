@@ -647,7 +647,7 @@ public actor MCPAdapter {
                         ]),
                     ].merging(textStyleProperties) { current, _ in current }
                 ),
-                "required": .array(["docId", "text", "x", "y"].map(Value.string)),
+                "required": .array(["docId", "text", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1127,7 +1127,7 @@ public actor MCPAdapter {
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
                 ]),
-                "required": .array(["docId", "bytes", "x", "y"].map(Value.string)),
+                "required": .array(["docId", "bytes", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1582,7 +1582,7 @@ public actor MCPAdapter {
                     "canvasX": .object(["type": "number", "description": "Canvas-space x the lattice should pass through."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y the lattice should pass through."]),
                 ]),
-                "required": .array(["docId", "id", "x", "y"].map(Value.string)),
+                "required": .array(["docId", "id", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -2295,7 +2295,7 @@ public actor MCPAdapter {
                     "canvasX": .object(["type": "number", "description": "Canvas-space x. Not snapped."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y. Not snapped."]),
                 ]),
-                "required": .array(["docId", "x", "y"].map(Value.string)),
+                "required": .array(["docId", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -2555,14 +2555,67 @@ public actor MCPAdapter {
     ]
 
     private func handleListTools() async throws -> ListTools.Result {
-        ListTools.Result(tools: Self.tools)
+        ListTools.Result(tools: Self.tools.map(Self.strict))
+    }
+
+    /// Declare `additionalProperties: false` on a tool's input schema.
+    ///
+    /// The STANDARD way to say "these are the arguments and nothing else", and the reason to say
+    /// it in the SCHEMA rather than only checking at call time: the constraint becomes visible to
+    /// the caller in `tools/list`, so a client-side validator can catch a misspelling before the
+    /// request is ever sent. `enforceKnownArguments` below is the same rule at the other end, for
+    /// callers that do not validate.
+    ///
+    /// This is a server decision and is not negotiable per call. Offering an opt-out would defeat
+    /// the point: the mistake being caught is one the caller does not know it is making, so a
+    /// caller free to disable the check would disable it exactly when most confused. If a field
+    /// is ever genuinely needed, NAME IT in the schema.
+    ///
+    /// The known cost, recorded because it is why the ecosystem has not simply standardised on
+    /// strict: a protocol that sends envelope metadata ALONGSIDE tool arguments has its calls
+    /// rejected at validation (modelcontextprotocol/go-sdk#892). No caller here does that — these
+    /// tools are invoked directly by agents — so the trade is clearly worth it.
+    static func strict(_ tool: Tool) -> Tool {
+        guard case .object(var schema) = tool.inputSchema else { return tool }
+        schema["additionalProperties"] = .bool(false)
+        return Tool(name: tool.name, description: tool.description, inputSchema: .object(schema),
+                    annotations: tool.annotations)
+    }
+
+    /// The argument names a tool declares, for the call-time half of the same rule.
+    static func declaredArguments(of tool: Tool) -> Set<String> {
+        guard case .object(let schema) = tool.inputSchema,
+              case .object(let properties)? = schema["properties"] else { return [] }
+        return Set(properties.keys)
     }
 
     /// Every tool call, with one post-processing step: an error that names only a SYMPTOM gets
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
-        await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
-                            arguments: arguments)
+        if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
+        return await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
+                                   arguments: arguments)
+    }
+
+    /// Refuse an argument the named tool does not declare.
+    ///
+    /// The call-time half of `strict` above. It exists because dropping an unknown argument is
+    /// SILENT and produces a plausible wrong answer: `render_sketch` had no `scale` argument for
+    /// months, and one passed by a caller was discarded — every render came back at a size nobody
+    /// chose, with nothing in the reply to say so. A misspelling behaves identically.
+    ///
+    /// Names what was wrong AND what the tool takes, so the caller can fix it in one step rather
+    /// than by bisecting its own arguments.
+    static func enforceKnownArguments(name: String, arguments: [String: Value]?) -> CallTool.Result? {
+        guard let arguments, !arguments.isEmpty,
+              let tool = tools.first(where: { $0.name == name }) else { return nil }
+        let declared = declaredArguments(of: tool)
+        guard !declared.isEmpty else { return nil }   // a tool that declares none takes anything
+        guard let unknown = arguments.keys.sorted().first(where: { !declared.contains($0) }) else {
+            return nil
+        }
+        return errorResult("invalidArgument: \(unknown) — \(name) takes "
+                           + declared.sorted().joined(separator: ", "))
     }
 
     /// Turn a dead-end error into a self-correcting one.
@@ -4006,15 +4059,6 @@ public actor MCPAdapter {
             }
 
             var specFields: [String: Value] = ["op": .string("render")]
-            // An argument this tool does not know is REJECTED, not dropped. It used to be
-            // dropped: `scale` was passed on every call of a long session and silently discarded,
-            // producing plausible renders at a size nobody asked for. A typo behaves the same way,
-            // and neither the reply nor the image says anything is wrong.
-            let known = Set(Self.renderSpecParameterNames + ["docId"])
-            if let unknown = arguments?.keys.first(where: { !known.contains($0) }) {
-                return Self.errorResult("invalidArgument: \(unknown) — render_sketch takes "
-                                        + Self.renderSpecParameterNames.sorted().joined(separator: ", "))
-            }
             for key in Self.renderSpecParameterNames {
                 if let value = arguments?[key] {
                     specFields[key] = value

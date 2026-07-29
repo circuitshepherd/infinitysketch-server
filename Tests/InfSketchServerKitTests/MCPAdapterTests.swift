@@ -3355,7 +3355,10 @@ private actor FakeStrokeOpDevice {
                 "canvasTranslate": .array([.double(1), .double(1)]),
             ]),
             ("restyle_strokes", [
-                "docId": "ghost", "ids": .array([.string("1-2")]), "width": .double(3),
+                // `stampWidth`, not `width` — this said `width` until the strict-argument check
+                // caught it, a leftover from the explicit-coordinate-spaces rename that had been
+                // silently dropped ever since.
+                "docId": "ghost", "ids": .array([.string("1-2")]), "stampWidth": .double(3),
             ]),
             ("reshape_strokes", ["docId": "ghost", "strokes": Self.minimalReshapeStrokes]),
         ]
@@ -5085,6 +5088,94 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content) == "missingArgument: orderedIds")
 
         #expect(await device.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    // MARK: - strict arguments, declared and enforced (2026-07-29)
+
+    /// EVERY tool advertises `additionalProperties: false`, which is the standard way to say "the
+    /// arguments are these and nothing else". Declaring it — rather than only checking at call
+    /// time — puts the constraint in `tools/list`, where a client-side validator can catch a
+    /// misspelling before the request is sent.
+    @Test func everyToolDeclaresItsArgumentsClosed() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        #expect(!tools.isEmpty)
+        for tool in tools {
+            guard case .object(let schema) = tool.inputSchema else {
+                Issue.record("\(tool.name) has no object schema"); continue
+            }
+            #expect(schema["additionalProperties"] == .bool(false),
+                    "\(tool.name) does not declare additionalProperties: false")
+        }
+
+        await server.stop()
+    }
+
+    /// A schema may not REQUIRE an argument it does not declare — with `additionalProperties:
+    /// false` that combination makes a tool uncallable: `required` says send it, `properties` says
+    /// it is forbidden. Four tools were in exactly that state, left behind by the
+    /// explicit-coordinate-spaces rename (`x`/`y` became `canvasX`/`canvasY` in the properties
+    /// and not in the required list), and nothing noticed until strictness made it fatal.
+    @Test func noToolRequiresAnArgumentItDoesNotDeclare() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (tools, _) = try await client.listTools()
+        for tool in tools {
+            guard case .object(let schema) = tool.inputSchema else { continue }
+            guard case .array(let required)? = schema["required"] else { continue }
+            let declared = MCPAdapter.declaredArguments(of: tool)
+            for entry in required {
+                guard case .string(let name) = entry else { continue }
+                #expect(declared.contains(name),
+                        "\(tool.name) requires \(name) but does not declare it")
+            }
+        }
+
+        await server.stop()
+    }
+
+    /// …and the same rule is enforced at call time, for callers that do not validate. The reply
+    /// names the offending argument AND what the tool takes, so it is fixable in one step.
+    @Test func anUnknownArgumentIsRefusedByName() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // `width` is exactly the mistake this caught in this suite: restyle_strokes takes
+        // `stampWidth` since the coordinate-space rename, and `width` was being dropped in silence.
+        let (content, isError) = try await client.callTool(
+            name: "restyle_strokes",
+            arguments: ["docId": "d", "ids": .array([.string("1-2")]), "width": .double(3)])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("invalidArgument: width"))
+        #expect(toolResultText(content).contains("stampWidth"), "must name what the tool DOES take")
+
+        await server.stop()
+    }
+
+    /// A correct call is unaffected — the check must not become a second place that rejects
+    /// legitimate arguments.
+    @Test func aFullyCorrectCallIsUntouchedByTheCheck() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "restyle_strokes",
+            arguments: ["docId": "ghost", "ids": .array([.string("1-2")]), "stampWidth": .double(3)])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("unknownDoc"), "should fail on the DOC, not the args")
 
         await server.stop()
     }
