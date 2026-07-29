@@ -1687,6 +1687,15 @@ public actor MCPAdapter {
                             judgement stays clean).
                             """,
                     ]),
+                    "scale": .object([
+                        "type": "number",
+                        "description": """
+                            Pixels per canvas point, at most 16. THIS is the knob for how big the \
+                            image comes back — and the image is returned to you inline, so its \
+                            size is a cost you pay on every call. Omit it and the renderer picks \
+                            a scale that fits `maxPixels`.
+                            """,
+                    ]),
                     "maxPixels": .object([
                         "type": "number",
                         "description": """
@@ -3997,6 +4006,15 @@ public actor MCPAdapter {
             }
 
             var specFields: [String: Value] = ["op": .string("render")]
+            // An argument this tool does not know is REJECTED, not dropped. It used to be
+            // dropped: `scale` was passed on every call of a long session and silently discarded,
+            // producing plausible renders at a size nobody asked for. A typo behaves the same way,
+            // and neither the reply nor the image says anything is wrong.
+            let known = Set(Self.renderSpecParameterNames + ["docId"])
+            if let unknown = arguments?.keys.first(where: { !known.contains($0) }) {
+                return Self.errorResult("invalidArgument: \(unknown) — render_sketch takes "
+                                        + Self.renderSpecParameterNames.sorted().joined(separator: ", "))
+            }
             for key in Self.renderSpecParameterNames {
                 if let value = arguments?[key] {
                     specFields[key] = value
@@ -4040,6 +4058,7 @@ public actor MCPAdapter {
     /// one of them optional; see `callRenderSketch`.
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
+        "scale",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):

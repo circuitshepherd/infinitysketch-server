@@ -5089,6 +5089,52 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - render_sketch scale, and unknown arguments (2026-07-29)
+
+    /// `scale` reaches the device. It did not exist before: the relay is an ALLOW-LIST, so a
+    /// `scale` argument was silently dropped and every render came back at a size the caller had
+    /// not chosen — passed on every call of a long session before anyone noticed.
+    @Test func renderSketchRelaysScale() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([0x89, 0x50]),
+                                                  meta: Data(#"{"scale":4}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        _ = try await client.callTool(name: "render_sketch",
+                                      arguments: ["docId": "d", "scale": .double(4)])
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["scale"] as? Double == 4)
+
+        await server.stop()
+    }
+
+    /// An argument the tool does not know is REJECTED by name, not dropped. Dropping is what hid
+    /// the missing `scale`: the render came back plausible and wrong, and nothing said so.
+    @Test func renderSketchRejectsAnUnknownArgument() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data([0x89, 0x50])))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "canvasRECT": .array([.int(0)])])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("invalidArgument: canvasRECT"))
+        // …and it names what the tool does take, so the caller can fix it in one step.
+        #expect(toolResultText(content).contains("canvasRect"))
+        #expect(await device.receivedRequests.isEmpty, "a bad argument must not reach the device")
+
+        await server.stop()
+    }
+
     // MARK: - reply shapes are documented (2026-07-29 drive finding)
 
     /// Every tool that answers with structured JSON must NAME its reply's keys in its own

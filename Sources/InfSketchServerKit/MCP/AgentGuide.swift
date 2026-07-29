@@ -28,7 +28,9 @@ enum AgentGuide {
     - **`list_docs`** — what exists. `open: true` means a device has it on screen, so your writes \
       land live on the user's canvas while they watch.
     - **`render_sketch`** — look at it. Your most useful tool by a distance: propose, render, \
-      check, adjust. Its metadata carries the paper colour, every grid, and the viewport.
+      check, adjust. Its metadata carries the paper colour, every grid, and the viewport. \
+      **`scale` is pixels per canvas point, and the image comes back INLINE — so its size is a \
+      cost you pay on every call.** 0.5 to check a layout, higher only to inspect detail.
     - **`undo_last_edit`** — take back your own last write, on any document. Only your writes are \
       recorded, never the user's, so it can never reverse their work.
 
