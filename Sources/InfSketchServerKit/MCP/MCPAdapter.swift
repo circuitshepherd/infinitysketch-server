@@ -4380,17 +4380,22 @@ public actor MCPAdapter {
                 // neither the request nor a range end.
                 if let first = notes.first {
                     let asked = Self.trimmed(first.requested), got = Self.trimmed(first.actual)
+                    // "e.g." once there is more than one: the numbers are the FIRST stroke's, and
+                    // stating them bare for N reads as a claim about all N. A cause clause is
+                    // emitted only when every note agrees on it, for the same reason — the strokes
+                    // can have different peaks and so different causes.
+                    let example = notes.count == 1 ? "" : "e.g. "
                     summary += "\nnote: \(notes.count) stroke(s) did not land on the width asked "
-                        + "for (\(asked) became \(got))."
-                    if first.inkCanExpress == 0 {
+                        + "for (\(example)\(asked) became \(got))."
+                    if notes.allSatisfy({ $0.inkCanExpress == 0 }) {
                         summary += " That ink cannot render \(asked) — each ink expresses a "
                             + "limited range, pen topping out near 6 and marker not going below "
                             + "about 7.5."
                     }
-                    if first.sourcePeakExpressible == 0 {
+                    if notes.allSatisfy({ $0.sourcePeakExpressible == 0 }) {
                         // "…that range too" only reads correctly when the clause above ran; on its
                         // own it refers to nothing.
-                        let alsoRange = first.inkCanExpress == 0
+                        let alsoRange = notes.allSatisfy({ $0.inkCanExpress == 0 })
                             ? "outside that range too"
                             : "outside what that ink can express"
                         summary += " The stroke's own peak of \(Self.trimmed(first.sourcePeak)) is "
