@@ -2457,6 +2457,10 @@ public actor MCPAdapter {
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: elementNotFound if an id \
                 isn't found in `source`. \(writeToolCaveats)
+
+                REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and \
+                `createdImageIds` — deliberately not `strokeIds`/`textIds`/`imageIds`, which are \
+                this tool's ARGUMENTS and name the elements in the SOURCE.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -5027,14 +5031,18 @@ public actor MCPAdapter {
                 var summary = "copied \(count) element(s) from \(source) into \(target) at seq \(seq)"
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode([String: [String]].self, from: meta) {
+                    // `created…`, NOT `strokeIds`/`textIds`/`imageIds`: those are this tool's
+                    // ARGUMENTS, naming the elements to copy FROM the source. Labelling the new
+                    // clones with the same words made one call use each word for two things, and
+                    // a reply that looks like an echo of what was sent.
                     if let keys = decoded["createdStrokeKeys"], !keys.isEmpty {
-                        summary += "\nstrokeIds: \(keys.joined(separator: ", "))"
+                        summary += "\ncreatedStrokeIds: \(keys.joined(separator: ", "))"
                     }
                     if let ids = decoded["createdTextIds"], !ids.isEmpty {
-                        summary += "\ntextIds: \(ids.joined(separator: ", "))"
+                        summary += "\ncreatedTextIds: \(ids.joined(separator: ", "))"
                     }
                     if let ids = decoded["createdImageIds"], !ids.isEmpty {
-                        summary += "\nimageIds: \(ids.joined(separator: ", "))"
+                        summary += "\ncreatedImageIds: \(ids.joined(separator: ", "))"
                     }
                 }
                 return summary

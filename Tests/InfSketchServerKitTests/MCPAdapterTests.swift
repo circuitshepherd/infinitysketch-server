@@ -5092,6 +5092,38 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// The clones' ids come back under `created…`, not under the argument names.
+    ///
+    /// `copy_elements` TAKES `strokeIds` (elements in the SOURCE) and used to REPORT the new
+    /// clones under the same word — one call using each name for two things, and a reply that
+    /// reads like an echo of what was sent. Found by using the tool, not by reading it.
+    @Test func copyElementsNamesTheClonesDistinctlyFromItsArguments() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "t", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(
+            client, docId: "s", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"copied"}"#.utf8),
+                meta: Data(#"{"createdStrokeKeys":["new-1"],"createdTextIds":[],"createdImageIds":["img-1"]}"#.utf8)),
+            capabilities: ["copyElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "copy_elements", arguments: [
+            "source": "s", "target": "t", "strokeIds": .array([.string("old-1")]),
+        ])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("createdStrokeIds: new-1"))
+        #expect(text.contains("createdImageIds: img-1"))
+        #expect(!text.contains("\nstrokeIds:"), "the clones must not reuse the argument's name")
+
+        await server.stop()
+    }
+
     // MARK: - strict arguments, declared and enforced (2026-07-29)
 
     /// EVERY tool advertises `additionalProperties: false`, which is the standard way to say "the
