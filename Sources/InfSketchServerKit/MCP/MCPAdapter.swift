@@ -1951,8 +1951,10 @@ public actor MCPAdapter {
                 stroke width — the same quantity get_strokes/list_strokes report, not a tool-slider value — \
                 and is CLAMPED to what the target ink can express (pen tops out around \
                 peak 6; marker cannot render below roughly 7.5), so a thin pen stroke \
-                necessarily gets thicker when restyled to marker; get_strokes reports \
-                the actual resulting peak. An ink-only restyle (no width) preserves the \
+                necessarily gets thicker when restyled to marker. THE REPLY SAYS SO when \
+                it happens, naming what you asked for and what it became, so you do not \
+                have to call list_strokes to find out; get_strokes reports the actual \
+                resulting peak either way. An ink-only restyle (no width) preserves the \
                 stroke's apparent thickness. A colour-only restyle changes nothing \
                 else. One user-visible cost, worth knowing before you restyle a stroke \
                 the user has never width-edited: the app can afterwards restore that \
@@ -3393,6 +3395,12 @@ public actor MCPAdapter {
                     // What an omitted colour/width/inkType actually inherited from the user's
                     // picker. Pass these back explicitly if you previewed first: the picker is
                     // live, so omitting the fields twice reads it twice.
+                    //
+                    // The DEVICE decides whether to send this — it is absent when the caller
+                    // supplied all three fields on every stroke, because there was then nothing
+                    // to inherit and reporting the picker told the caller its stroke was a width
+                    // and colour it is not (measured: a stroke drawn at width 4 / #112233FF was
+                    // reported back as stampWidth 3.0, color #000000FF).
                     if let tool = decoded.resolvedTool {
                         summary += "\ninherited from the user's tool: inkType \(tool.inkType), stampWidth \(tool.width), color \(tool.color)"
                     }
@@ -4339,16 +4347,38 @@ public actor MCPAdapter {
 
             // expectedBytes is docBytes — the exact bytes relayed to the
             // device (Task 2, write CAS) — never a fresh re-read.
+            // A width the target ink cannot express is CLAMPED, which is correct and documented —
+            // but `draw_strokes` announces exactly this while restyle used to stay silent, so an
+            // agent asking for 1.1 on a pen got 2.5 and could only find out by calling
+            // `list_strokes` afterwards.
+            struct RestyleMeta: Decodable { let clampedWidths: [[Double]]? }
+            let clamped = out.meta
+                .flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }?
+                .clampedWidths ?? []
+
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                "restyled \(ids.count) stroke(s) at seq \(seq)"
+                var summary = "restyled \(ids.count) stroke(s) at seq \(seq)"
+                if let first = clamped.first, first.count == 2 {
+                    summary += "\nnote: \(clamped.count) stroke(s) asked for a width that "
+                        + "\(clamped.count == 1 ? "this ink" : "their inks") cannot render "
+                        + "(e.g. \(Self.trimmed(first[0])) became \(Self.trimmed(first[1]))). "
+                        + "Each ink expresses a limited range — pen tops out near 6, marker "
+                        + "cannot go below about 7.5 — so the nearest end was used."
+                }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
             return Self.errorResult("invalidArguments")
         }
+    }
+
+    /// A number for a human-facing reply: no trailing `.0`, at most two decimals.
+    private static func trimmed(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.2f", value)
     }
 
     private func callReshapeStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
