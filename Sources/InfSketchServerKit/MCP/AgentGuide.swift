@@ -110,7 +110,10 @@ enum AgentGuide {
       document, so they outlast this task and this session — `find_elements` resolves them later, \
       and `list_tags` says what a document already holds. A tag covers a SET, so tag the whole \
       roof, not just one stroke of it. Without one you cannot find your own axis again and will \
-      redraw the chart, taking the user's annotations with it.
+      redraw the chart, taking the user's annotations with it. **Grids carry tags too, but \
+      `find_elements` never returns one** — set them with `add_grid`/`update_grid`, read them from \
+      `list_grids`, and watch the `grids` count in `list_tags`: a tag with a grid in it has a \
+      lattice that resolving the tag will not hand you.
     - **Edit in place; never rebuild.** `reshape_strokes`, `restyle_strokes`, `transform_elements` \
       keep an element's identity and its history. Deleting and redrawing loses both.
     - **Snap candidates are ranked by DISTANCE, not by suitability.** `snap_points` returns every \

@@ -771,14 +771,21 @@ public actor MCPAdapter {
         Tool(
             name: "list_tags",
             description: """
-                Every tag in a document, with how many live elements carry it. Read-only.
+                Every tag in a document, with how many live things carry it, split by family. \
+                Read-only.
 
                 This is how you pick up work you did earlier: the ids you were handed are gone, \
                 and guessing a tag is indistinguishable from the tag having been deleted. Start \
                 here, then find_elements to turn a tag into ids.
 
-                REPLY: an OBJECT mapping each tag to how many LIVE elements carry it, e.g. \
-                `{"roof": 7, "sky": 1}`. `{}` means nothing is tagged yet.
+                READ THE `grids` COUNT. Grids carry tags too, but find_elements returns ELEMENT \
+                ids only and never a grid — so a tag with `grids` above zero has a lattice in it \
+                that resolving the tag will not hand you. Read it back from list_grids, and \
+                change it with update_grid.
+
+                REPLY: an OBJECT mapping each tag to `{"elements": N, "grids": M}` — live \
+                elements and grids carrying it, e.g. `{"roof": {"elements": 7, "grids": 0}, \
+                "elevation": {"elements": 12, "grids": 1}}`. `{}` means nothing is tagged yet.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1427,8 +1434,9 @@ public actor MCPAdapter {
                 document doesn't exist.
 
                 REPLY: an ARRAY of `{id, type, spacing, snap, rotation, offset, color, thickness, \
-                visible, enabled, families}` in DRAW order, where each family is \
-                `{id, label, normal, lineAngleDeg, phase, drawSpacing, snapSpacing}`.
+                visible, enabled, families, tags}` in DRAW order, where each family is \
+                `{id, label, normal, lineAngleDeg, phase, drawSpacing, snapSpacing}` and `tags` \
+                is the grid's durable tags (empty unless you set them with add_grid/update_grid).
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1478,6 +1486,11 @@ public actor MCPAdapter {
                         "description": "The lattice phase [x, y]. Defaults to [0, 0].",
                         "items": .object(["type": "number"]),
                     ]),
+                    "tags": .object([
+                        "type": "array",
+                        "description": "Durable tags for this grid, so you can find it again in a later session — and group it with the strokes you draw against it. REPLACES the grid's tags; [] clears them. Grids do NOT appear in find_elements; read them back from list_grids. list_tags reports how many grids carry each tag.",
+                        "items": .object(["type": "string"]),
+                    ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1519,6 +1532,11 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": "The lattice phase [x, y].",
                         "items": .object(["type": "number"]),
+                    ]),
+                    "tags": .object([
+                        "type": "array",
+                        "description": "Durable tags for this grid, so you can find it again in a later session — and group it with the strokes you draw against it. REPLACES the grid's tags; [] clears them. Grids do NOT appear in find_elements; read them back from list_grids. list_tags reports how many grids carry each tag.",
+                        "items": .object(["type": "string"]),
                     ]),
                 ]),
                 "required": .array(["docId", "id"].map(Value.string)),
@@ -3631,7 +3649,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addGrid")]
-            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset"] {
+            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset", "tags"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3686,7 +3704,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("updateGrid"), "id": .string(id)]
-            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset"] {
+            for key in ["type", "spacing", "snap", "rotation", "color", "thickness", "visible", "enabled", "offset", "tags"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }

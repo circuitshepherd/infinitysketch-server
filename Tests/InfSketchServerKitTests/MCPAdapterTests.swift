@@ -4803,6 +4803,44 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Grid tags (spec 2026-07-29-grid-tags-design) relay verbatim, on both write tools. This is
+    /// the seam a unit test on either side alone cannot cover: the server's tests fake the device
+    /// and the app's fake the server, so a field added on one side only passes BOTH suites —
+    /// which is exactly how `reshape_strokes` shipped broken for a commit.
+    @Test func gridTagsRelayVerbatimOnAddAndUpdate() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","marker":"g"}"#.utf8),
+                                      meta: Data(#"{"id":"GRID-NEW"}"#.utf8)),
+            capabilities: ["authorGrids"])
+        defer { Task { await device.close() } }
+
+        let (_, addError) = try await client.callTool(
+            name: "add_grid", arguments: ["docId": "d", "tags": ["elevation", "draft"]])
+        #expect(addError != true)
+        let addRequest = try #require(await device.receivedRequests.first)
+        let added = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
+        #expect(Set(added.keys) == ["op", "tags"])
+        #expect(added["tags"] as? [String] == ["elevation", "draft"])
+
+        // An EMPTY list must survive the relay too — it is how `update_grid` clears tags, and a
+        // present-only filter that dropped it would silently turn "clear" into "leave alone".
+        let (_, updateError) = try await client.callTool(
+            name: "update_grid", arguments: ["docId": "d", "id": "GRID-1", "tags": []])
+        #expect(updateError != true)
+        let updateRequest = try #require(await device.receivedRequests.last)
+        let updated = try #require(JSONSerialization.jsonObject(with: updateRequest.spec) as? [String: Any])
+        #expect(Set(updated.keys) == ["op", "id", "tags"])
+        #expect(updated["tags"] as? [String] == [])
+
+        await server.stop()
+    }
+
     /// `docId` not in the store -> `unknownDoc`, short-circuiting BEFORE any
     /// device round trip.
     @Test func addGridUnknownDocErrors() async throws {
@@ -5299,11 +5337,11 @@ private actor FakeStrokeOpDevice {
             "get_strokes": ["canvasPoints", "canvasPathBounds", "localToCanvasTransform"],
             "list_texts": ["canvasBounds", "pinned", "opacity", "tags"],
             "list_images": ["canvasBounds", "pinned", "opacity", "tags"],
-            "list_tags": ["roof"],
+            "list_tags": ["roof", "elements", "grids"],
             "find_elements": ["roof"],
             "list_docs": ["sizeBytes", "modifiedAt", "hasContent", "open"],
             "snap_points": ["canvasPoint", "candidates", "canvasPosition", "distance", "kind", "parents"],
-            "list_grids": ["families", "drawSpacing", "snapSpacing", "lineAngleDeg"],
+            "list_grids": ["families", "drawSpacing", "snapSpacing", "lineAngleDeg", "tags"],
             "get_selection": ["elements", "canvasBounds", "canvasRect", "canvasReferencePoint",
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "stampWidth"],
