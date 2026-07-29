@@ -942,7 +942,9 @@ public actor MCPAdapter {
 
                 `inkType` defaults to **pen** on purpose: marker is TRANSLUCENT and builds up \
                 where passes overlap, so a fill made from it shows the paper through. \
-                `spacingRatio` is the scanline spacing as a fraction of the stroke width — below 1 \
+                `spacingRatio` is the scanline spacing as a fraction of the stroke width — it \
+                defaults to 0.4, which overlaps by more than mere coverage so the fill stays even \
+                when the canvas is zoomed out or exported small; below 1 \
                 the passes overlap and it reads solid (default 0.8), above 1 you get visible \
                 hatching, and `angleDeg` turns the hatch.
 
