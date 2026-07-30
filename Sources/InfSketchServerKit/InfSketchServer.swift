@@ -217,6 +217,16 @@ public final class InfSketchServer: Sendable {
         // this was built from).
         await mountMCP(on: http, adapter: mcpAdapter)
 
+        // Where a scanned QR code lands. The address comes from the request's own Host header —
+        // whatever the DEVICE used to reach us, which is by definition an address that works from
+        // the device. See `JoinPage` for why the code carries an http url rather than the app's
+        // custom scheme.
+        await http.appendRoute("GET,HEAD /join") { request in
+            self.headAware(
+                request, headers: [.contentType: "text/html; charset=utf-8"],
+                body: Data(JoinPage.html(host: request.headers[.host] ?? "localhost").utf8))
+        }
+
         await http.appendRoute("GET,HEAD /") { request in
             self.headAware(
                 request, headers: [.contentType: "text/html; charset=utf-8"],
