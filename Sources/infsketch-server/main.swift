@@ -59,6 +59,20 @@ func restoreTerminalSettings() {
 nonisolated(unsafe) var picker = AddressPicker(candidates: LocalAddresses.candidates(), port: port)
 nonisolated(unsafe) var drawnLineCount = 0
 
+/// Whether a keypress can reach this process at all. ONE predicate, read by both the hint below and
+/// the reader further down, so the offer and the ability to honour it cannot drift apart: under
+/// `scripts/worktree-server` stdin is /dev/null, and the log was telling its reader to press keys
+/// that nothing would ever read. On Windows there are no candidates, so the hint never prints.
+/// A function rather than a computed `var`: a top-level variable in `main.swift` is implicitly
+/// main-actor isolated, which `drawJoinCode` — an ordinary global function — cannot read.
+func addressSwitchingIsPossible() -> Bool {
+    #if os(Windows)
+    return false
+    #else
+    return isatty(STDIN_FILENO) == 1
+    #endif
+}
+
 /// Draws the code for the selected address, erasing whatever was drawn before it, so only ONE code
 /// is ever on screen.
 func drawJoinCode() {
@@ -80,7 +94,9 @@ func drawJoinCode() {
             let marker = index == picker.selection ? "▸" : " "
             text += "  \(marker) \(index + 1)) \(candidate.ip)  (\(candidate.interface))\n"
         }
-        text += "    ↑/↓ or 1–\(min(9, picker.candidates.count)) to switch · q to stop showing\n"
+        if addressSwitchingIsPossible() {
+            text += "    ↑/↓ or 1–\(min(9, picker.candidates.count)) to switch · q to stop showing\n"
+        }
     }
     print(text, terminator: "")
     // Flushed by hand: stdout is block-buffered when it is not a terminal, so under
@@ -95,7 +111,7 @@ drawJoinCode()
 #if !os(Windows)
 // The picker needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this task
 // reaches EOF at once and exits, leaving the first code in the log and the server running.
-if isatty(STDIN_FILENO) == 1, picker.candidates.count > 1 {
+if addressSwitchingIsPossible(), picker.candidates.count > 1 {
     Task.detached {
         var original = termios()
         tcgetattr(STDIN_FILENO, &original)
