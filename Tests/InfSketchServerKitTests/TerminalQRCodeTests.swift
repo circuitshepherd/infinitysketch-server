@@ -30,6 +30,19 @@ import QRCodeGenerator
                 "the colours must be reset, or the rest of the shell keeps them")
     }
 
+    /// WHICH colour is which, which the test above does not pin and neither does the decode below.
+    ///
+    /// The blocks are drawn in the FOREGROUND colour and stand for LIGHT modules, over a background
+    /// standing for dark ones. Swap the two constants and every other test here still passes — the
+    /// decode strips ANSI before parsing — while the printed code comes out inverted, which most
+    /// scanners refuse. So the polarity is asserted directly: foreground light, background dark.
+    @Test func theBlocksAreTheLightModulesNotTheDarkOnes() {
+        #expect(TerminalQRCode.light.contains("38;5;"), "the LIGHT module must be a FOREGROUND colour")
+        #expect(TerminalQRCode.light.contains(";15m"), "the light module must be white")
+        #expect(TerminalQRCode.dark.contains("48;5;"), "the DARK module must be a BACKGROUND colour")
+        #expect(TerminalQRCode.dark.contains(";0m"), "the dark module must be black")
+    }
+
     /// Every row is the same width, so the symbol is a rectangle rather than a staircase.
     @Test func everyRowIsTheSameWidth() throws {
         let widths = Set(try TerminalQRCode.render("http://10.0.0.5:8080/join")

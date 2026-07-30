@@ -36,6 +36,17 @@ import Testing
         #expect(ranked.map(\.interface) == ["en1", "en0"])
     }
 
+    /// A link-local address is what an interface gives itself when it got none — so it sits on real
+    /// HARDWARE and would otherwise be offered first while being the one address least likely to
+    /// work. It stays in the list (the user can still pick it); it just stops being the default.
+    @Test func linkLocalSinksBelowARealHardwareAddress() {
+        let ranked = LocalAddresses.ranked([
+            LocalAddress(interface: "en0", ip: "169.254.11.7"),
+            LocalAddress(interface: "en1", ip: "192.168.1.42"),
+        ])
+        #expect(ranked.map(\.ip) == ["192.168.1.42", "169.254.11.7"])
+    }
+
     @Test func noCandidatesIsAnEmptyListNotACrash() {
         #expect(LocalAddresses.ranked([]).isEmpty)
     }

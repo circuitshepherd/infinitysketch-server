@@ -24,23 +24,38 @@ public struct LocalAddress: Sendable, Equatable {
 /// actually connected to — but it costs the user a step, so the guess is worth making well.
 public enum LocalAddresses {
     /// Interface name prefixes that are real hardware on the platforms this runs on.
-    private static let hardwarePrefixes = ["en", "eth", "wlan", "wl"]
+    /// `wl` covers `wlan` as well, so listing both would be one dead entry.
+    private static let hardwarePrefixes = ["en", "eth", "wl"]
 
     /// Pure, so the ordering can be tested without a network.
+    ///
+    /// Only LOOPBACK is removed. Everything else stays in the list even when it is a poor guess,
+    /// because the user can switch and the `/join` page checks the answer anyway — the ranking
+    /// decides what is offered FIRST, not what is possible.
     public static func ranked(_ found: [LocalAddress]) -> [LocalAddress] {
         found
             .filter { !$0.ip.hasPrefix("127.") }     // loopback: a phone can never reach it
             .enumerated()
             .sorted { a, b in
-                let ah = isHardware(a.element.interface), bh = isHardware(b.element.interface)
-                if ah != bh { return ah }
+                let ar = rank(a.element), br = rank(b.element)
+                if ar != br { return ar < br }
                 return a.offset < b.offset           // stable within a class
             }
             .map(\.element)
     }
 
-    private static func isHardware(_ interface: String) -> Bool {
-        hardwarePrefixes.contains { interface.hasPrefix($0) }
+    /// Lower sorts first. Link-local (`169.254.x`) is what an interface self-assigns when it got no
+    /// address at all, so it sits on real hardware and would otherwise be offered first while being
+    /// the one address least likely to work.
+    private static func rank(_ address: LocalAddress) -> Int {
+        let hardware = hardwarePrefixes.contains { address.interface.hasPrefix($0) }
+        let linkLocal = address.ip.hasPrefix("169.254.")
+        switch (hardware, linkLocal) {
+        case (true, false): return 0
+        case (false, false): return 1
+        case (true, true): return 2
+        case (false, true): return 3
+        }
     }
 
     /// This machine's usable IPv4 addresses.
@@ -53,8 +68,11 @@ public enum LocalAddresses {
         return []
         #else
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return [] }
+        guard getifaddrs(&head) == 0 else { return [] }
+        // Installed BEFORE the nil check: a success that yields no list has still allocated, and
+        // returning between the two would leak it.
         defer { freeifaddrs(head) }
+        guard let first = head else { return [] }
 
         var found: [LocalAddress] = []
         for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {

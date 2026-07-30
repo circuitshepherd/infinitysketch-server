@@ -4,6 +4,8 @@ import InfSketchServerKit
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif canImport(WinSDK)
+import WinSDK          // the C runtime, for `fflush` — the terminal handling below is POSIX-only
 #endif
 
 var port: UInt16 = 8080
@@ -45,8 +47,13 @@ print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs
 /// and `signal` take C function pointers, which cannot capture context.
 ///
 /// A terminal left in raw mode is a wrecked shell — no echo, no line editing — and the user's next
-/// act after scanning is usually Ctrl-C, which unwinds nothing. So the restore is wired to three
-/// exits: the reader's own `defer`, `atexit`, and SIGINT.
+/// act after scanning is usually Ctrl-C, which unwinds nothing. So the restore is wired to every way
+/// out: the reader's own `defer`, `atexit`, SIGINT, SIGTERM, and the do/catch around `server.run()`.
+///
+/// **That last one is the path that actually bites, and it is not exotic.** A second server on the
+/// same port — routine here, one per worktree — makes `run()` throw, and an error thrown from
+/// top-level code TRAPS rather than exits, so neither `atexit` nor the `defer` ever runs. Catching
+/// it and calling `exit` is the whole difference between a tidy message and a broken shell.
 #if !os(Windows)
 nonisolated(unsafe) var savedTerminalSettings: termios?
 
@@ -83,7 +90,7 @@ func drawJoinCode() {
         // No usable address, or Windows. Say why rather than printing nothing at all.
         let text = "no reachable network address found — scan to join is unavailable here\n"
         print(text, terminator: "")
-        fflush(stdout)
+        fflush(nil)
         drawnLineCount = text.components(separatedBy: "\n").count - 1
         return
     }
@@ -102,43 +109,68 @@ func drawJoinCode() {
     // Flushed by hand: stdout is block-buffered when it is not a terminal, so under
     // `scripts/worktree-server` — which redirects to a log — the code would sit in the buffer until
     // something else filled it, and be lost entirely if the server were killed first.
-    fflush(stdout)
+    fflush(nil)
     drawnLineCount = text.components(separatedBy: "\n").count - 1
 }
 
 drawJoinCode()
 
 #if !os(Windows)
-// The picker needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this task
-// reaches EOF at once and exits, leaving the first code in the log and the server running.
+/// Read exactly `count` bytes, or report that the stream ended.
+///
+/// A single `read` is allowed to return SHORT, and an arrow key is three bytes: over ssh, or after a
+/// paste, `Esc [ B` can arrive split. Demanding all of it in one call made the picker mistake that
+/// for the terminal going away and quit silently for the rest of the session.
+func readExactly(_ count: Int, into buffer: inout [UInt8]) -> Bool {
+    var filled = 0
+    while filled < count {
+        let got = buffer.withUnsafeMutableBufferPointer {
+            read(STDIN_FILENO, $0.baseAddress! + filled, count - filled)
+        }
+        guard got > 0 else { return false }          // 0 = EOF, -1 = error
+        filled += got
+    }
+    return true
+}
+
+// The picker needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this never
+// arms at all and the first code simply stays in the log with the server running.
 if addressSwitchingIsPossible(), picker.candidates.count > 1 {
-    Task.detached {
+    // A REAL THREAD, not `Task.detached`. `read` BLOCKS until a key arrives — which is to say, for
+    // the whole life of the process — and a detached Task holds a cooperative-pool thread while it
+    // does. The pool is sized to the core count, so on a single-core host that is the ONE thread the
+    // accept loop and every connection need. Same rule the app already follows for PencilKit's
+    // blocking rasterizer, and the same deadlock if it is broken.
+    Thread.detachNewThread {
         var original = termios()
         tcgetattr(STDIN_FILENO, &original)
         savedTerminalSettings = original
         atexit(restoreTerminalSettings)
-        signal(SIGINT) { _ in restoreTerminalSettings(); exit(130) }
+        // `_exit`, not `exit`: only async-signal-safe calls are allowed here, and `exit` would also
+        // run the `atexit` handler a second time. The restore has already happened by then.
+        signal(SIGINT) { _ in restoreTerminalSettings(); _exit(130) }
+        signal(SIGTERM) { _ in restoreTerminalSettings(); _exit(143) }
         defer { restoreTerminalSettings() }
 
         var raw = original
-        raw.c_lflag &= ~UInt(ICANON | ECHO)
+        raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
         tcsetattr(STDIN_FILENO, TCSANOW, &raw)
 
+        var byte = [UInt8](repeating: 0, count: 1)
+        var sequence = [UInt8](repeating: 0, count: 2)
         while true {
-            var byte: UInt8 = 0
-            guard read(STDIN_FILENO, &byte, 1) == 1 else { return }   // EOF: the terminal went away
+            guard readExactly(1, into: &byte) else { return }   // EOF: the terminal went away
             var key: AddressPicker.Key?
-            switch byte {
+            switch byte[0] {
             case 0x1B:                                    // Esc — an arrow arrives as Esc [ A / B
-                var sequence = [UInt8](repeating: 0, count: 2)
-                guard read(STDIN_FILENO, &sequence, 2) == 2,
-                      sequence[0] == UInt8(ascii: "[") else { return }
+                guard readExactly(2, into: &sequence) else { return }
+                guard sequence[0] == UInt8(ascii: "[") else { continue }
                 key = sequence[1] == UInt8(ascii: "A") ? .up
                     : sequence[1] == UInt8(ascii: "B") ? .down : nil
             case UInt8(ascii: "q"), 0x03:                 // q, or Ctrl-C if it reaches us as a byte
                 return
             case UInt8(ascii: "1")...UInt8(ascii: "9"):
-                key = .digit(Int(byte - UInt8(ascii: "0")))
+                key = .digit(Int(byte[0] - UInt8(ascii: "0")))
             default:
                 key = nil
             }
@@ -149,4 +181,12 @@ if addressSwitchingIsPossible(), picker.candidates.count > 1 {
 }
 #endif
 
-try await server.run()
+// Caught rather than propagated: an error thrown out of top-level code is a TRAP, which runs neither
+// `atexit` nor any `defer` — so a second server on the same port would leave the terminal in raw
+// mode. `exit` runs them. The message is also better than a stack trace.
+do {
+    try await server.run()
+} catch {
+    print("infsketch-server stopped: \(error)")
+    exit(1)
+}
