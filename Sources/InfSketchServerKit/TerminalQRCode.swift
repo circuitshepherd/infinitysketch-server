@@ -14,15 +14,15 @@ import QRCodeGenerator
 ///
 /// Drawn with half blocks, so ONE character cell carries TWO module rows — otherwise a terminal's
 /// line height stretches the symbol into a rectangle and the aspect ratio fights the scanner.
-enum TerminalQRCode {
+public enum TerminalQRCode {
     /// Four modules, per the QR specification. Not decoration.
-    static let quietZone = 4
+    public static let quietZone = 4
 
     static let light = "\u{1B}[38;5;15m"   // explicit white foreground
     static let dark = "\u{1B}[48;5;0m"     // explicit black background
     static let reset = "\u{1B}[0m"
 
-    static func render(_ text: String) throws -> String {
+    public static func render(_ text: String) throws -> String {
         let qr = try QRCode.encode(text: text, ecl: .medium)
         let padded = qr.size + 2 * quietZone
 

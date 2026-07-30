@@ -1,0 +1,51 @@
+import Foundation
+
+/// Which of this machine's addresses the terminal is currently showing a code for.
+///
+/// Pure state and no I/O: the raw-mode key reading lives in `main.swift`, so the decisions can be
+/// tested without a terminal. `handle` returns whether the selection actually CHANGED, so the
+/// caller redraws only when there is something new to draw — redrawing on every keypress makes the
+/// block flicker.
+public struct AddressPicker: Sendable {
+    public enum Key: Equatable, Sendable { case up, down, digit(Int), quit }
+
+    public let candidates: [LocalAddress]
+    public let port: UInt16
+    public private(set) var selection = 0
+
+    public init(candidates: [LocalAddress], port: UInt16) {
+        self.candidates = candidates
+        self.port = port
+    }
+
+    /// The url a scanned code carries: the `/join` page on this server.
+    public static func joinURL(ip: String, port: UInt16) -> String {
+        "http://\(ip):\(port)/join"
+    }
+
+    public var currentURL: String? {
+        candidates.indices.contains(selection)
+            ? Self.joinURL(ip: candidates[selection].ip, port: port)
+            : nil
+    }
+
+    /// Returns true when the selection moved — i.e. when the caller should redraw.
+    public mutating func handle(_ key: Key) -> Bool {
+        // With nothing to select, every key is a no-op. Without this, `.down` clamps to
+        // `count - 1` = -1 and the selection walks off the front of an empty list — reachable on a
+        // machine with no usable address, and on Windows, where the candidate list is always empty.
+        guard !candidates.isEmpty else { return false }
+        let previous = selection
+        switch key {
+        case .up:
+            selection = max(0, selection - 1)
+        case .down:
+            selection = min(candidates.count - 1, selection + 1)
+        case .digit(let n) where (1...candidates.count).contains(n):
+            selection = n - 1
+        case .digit, .quit:
+            break
+        }
+        return selection != previous
+    }
+}

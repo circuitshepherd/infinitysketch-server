@@ -73,5 +73,53 @@ extension TerminalQRCodeTests {
         let decoded = (detector.features(in: CIImage(cgImage: cg)).first as? CIQRCodeFeature)?.messageString
         #expect(decoded == url)
     }
+
+    /// The same check, but starting from the RENDERED TEXT — parsing the half blocks back into
+    /// modules and decoding those. The test above proves the grid is right; this one proves the
+    /// thing a camera is actually pointed at is right, which is where a rendering mistake would
+    /// live: a dropped quiet zone, an inverted block, an off-by-one row.
+    @Test func theRenderedBlockItselfDecodesBackToTheURL() throws {
+        let url = "http://192.168.1.42:18551/join"
+        let rows = try TerminalQRCode.render(url)
+            .replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+            .split(separator: "\n")
+            .map(Array.init)
+        let width = rows[0].count
+
+        // Each text row carries two module rows: ▀ is light-over-dark, ▄ dark-over-light, █ both
+        // light, and a space both dark.
+        var modules: [[Bool]] = []
+        for row in rows {
+            var upper = [Bool](), lower = [Bool]()
+            for cell in row {
+                upper.append(cell == "\u{2584}" || cell == " ")
+                lower.append(cell == "\u{2580}" || cell == " ")
+            }
+            modules.append(upper)
+            modules.append(lower)
+        }
+
+        let scale = 8, side = width * scale
+        var pixels = [UInt8](repeating: 255, count: side * (modules.count * scale))
+        for (y, row) in modules.enumerated() {
+            for (x, dark) in row.enumerated() where dark {
+                for dy in 0..<scale {
+                    for dx in 0..<scale {
+                        pixels[(y * scale + dy) * side + x * scale + dx] = 0
+                    }
+                }
+            }
+        }
+        let height = modules.count * scale
+        let ctx = try #require(CGContext(data: &pixels, width: side, height: height,
+                                         bitsPerComponent: 8, bytesPerRow: side,
+                                         space: CGColorSpaceCreateDeviceGray(),
+                                         bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        let cg = try #require(ctx.makeImage())
+        let detector = try #require(CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
+                                               options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]))
+        let decoded = (detector.features(in: CIImage(cgImage: cg)).first as? CIQRCodeFeature)?.messageString
+        #expect(decoded == url, "the rendered block does not decode — a camera would not read it either")
+    }
 }
 #endif
