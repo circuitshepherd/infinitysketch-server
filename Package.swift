@@ -17,6 +17,10 @@ let package = Package(
         // SHA-256 for the `.matchHash` write expectation. On InfSketchServerKit ONLY —
         // InfSketchWire carries the digest as opaque bytes and stays dependency-free.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // Terminal QR codes for scan-to-join. MIT, pure Swift, no dependencies of its own — a
+        // port of Nayuki's reference implementation. Chosen over image-only libraries because it
+        // exposes the module grid (`getModule(x:y:)`), which is what a text renderer needs.
+        .package(url: "https://github.com/fwcd/swift-qrcode-generator.git", from: "2.0.2"),
     ],
     targets: [
         .target(name: "InfSketchWire"),
@@ -28,6 +32,7 @@ let package = Package(
                 .product(name: "FlyingSocks", package: "FlyingFox"),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "QRCodeGenerator", package: "swift-qrcode-generator"),
             ]
         ),
         .executableTarget(
