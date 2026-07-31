@@ -125,34 +125,43 @@ import Foundation
 
 @Suite struct StrippedDocumentRealDocumentTests {
 
-    /// The bundled examples, which are real `.infsketch` files with real pasted images written by
-    /// the app's own encoder. A synthetic fixture cannot prove the escaping rule, because I wrote
-    /// the fixture's escaping myself — only genuine `JSONEncoder` output can.
+    /// A document written by the APP's own `JSONEncoder`, carrying a real escaped base64 run — the
+    /// one thing a fixture I hand-escaped myself cannot prove, since it could agree with a strip
+    /// that is wrong in exactly the same way.
     ///
-    /// The saving is PRINTED rather than asserted: it drifts with the artwork, while the exactness
-    /// does not.
-    @Test(arguments: ["Example1.infsketch", "Example2v2.infsketch"])
-    func aRealDocumentRoundTripsExactly(named name: String) throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let url = root.appendingPathComponent("InfinitySketch/InfinitySketch/\(name)")
-        // `#require`, not a silent skip: this is the ONLY test that exercises the escaping rule
-        // against genuine `JSONEncoder` output, and a fixture I hand-escaped myself could agree
-        // with a strip that is wrong in exactly the same way. Passing with zero coverage of the
-        // thing it exists to cover would be worse than failing.
-        let doc = try #require(try? Data(contentsOf: url),
-                               "the app repo is not checked out beside this one; expected \(url.path)")
+    /// CHECKED IN rather than read out of the app repo next door. That is what the first version
+    /// did, and it failed in the container CI actually runs in, where only this package is mounted;
+    /// with a silent skip it would instead have PASSED there, covering nothing.
+    @Test func aRealDocumentRoundTripsExactly() throws {
+        let url = try #require(Bundle.module.url(forResource: "RealDocument",
+                                                 withExtension: "infsketch"))
+        let doc = try Data(contentsOf: url)
 
         let stripped = StrippedDocument.strip(document: doc, against: doc,
                                               basedOn: Data(repeating: 1, count: 32),
                                               originalSHA256: Data(repeating: 2, count: 32))
 
         #expect(try stripped.restore(using: doc) == doc, "the rebuild is not byte-identical")
+        #expect(stripped.encoded().count < doc.count, "nothing was omitted from a document with blobs")
+        let saved = 100.0 - Double(stripped.encoded().count) / Double(doc.count) * 100.0
+        print("real document: \(doc.count) B -> \(stripped.encoded().count) B "
+              + "(\(String(format: "%.1f", saved))% smaller)")
+    }
 
-        let sent = stripped.encoded().count
-        let saved = 100.0 - Double(sent) / Double(doc.count) * 100.0
-        print("\(name): \(doc.count) B -> \(sent) B  (\(String(format: "%.1f", saved))% smaller)")
-        #expect(sent < doc.count, "nothing was omitted from a document that has blobs")
+    /// The escaping rule, against that same real run: `JSONEncoder` writes `/` as `\/`, so a search
+    /// for the RAW base64 finds nothing at all. That is what makes this look unworkable.
+    @Test func theRealRunIsEscapedAndTheRawFormIsAbsent() throws {
+        let url = try #require(Bundle.module.url(forResource: "RealDocument",
+                                                 withExtension: "infsketch"))
+        let doc = try Data(contentsOf: url)
+        let runs = DocumentBlobs.escapedRuns(in: doc)
+        let id = try #require(runs.keys.first)
+        let escaped = try #require(runs[id]?[.data])
+
+        #expect(doc.range(of: escaped) != nil, "the escaped run must be findable")
+        let rawBase64 = String(decoding: escaped, as: UTF8.self)
+            .replacingOccurrences(of: "\\/", with: "/")
+        #expect(doc.range(of: Data(rawBase64.utf8)) == nil,
+                "the UNescaped base64 must be absent — searching for it is the trap")
     }
 }

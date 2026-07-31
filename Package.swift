@@ -45,7 +45,12 @@ let package = Package(
         ),
         .testTarget(
             name: "InfSketchServerKitTests",
-            dependencies: ["InfSketchServerKit", "InfSketchWire"]
+            dependencies: ["InfSketchServerKit", "InfSketchWire"],
+            // A document written by the APP's `JSONEncoder`, carrying a real escaped base64 run.
+            // Checked in so the blob-omission tests are self-contained: the app repo is not present
+            // in the Linux container CI runs in, and a test that silently skips there is a test
+            // that passes with zero coverage of the thing it exists to cover.
+            resources: [.copy("Fixtures/RealDocument.infsketch")]
         ),
     ]
 )
