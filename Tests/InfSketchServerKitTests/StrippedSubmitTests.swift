@@ -124,3 +124,50 @@ import InfSketchWire
         }
     }
 }
+
+/// What OTHER subscribers receive. A stripped payload is a private arrangement between one client
+/// and the server; forwarding it to everyone else hands them bytes they cannot read.
+@Suite struct StrippedBroadcastTests {
+
+    private func makeStore() throws -> DirectoryDocumentStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stripped-broadcast-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return DirectoryDocumentStore(directory: dir)
+    }
+
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+
+    /// Measured before the fix: a subscriber received `type = strippedDoc` and 210 bytes that are
+    /// not JSON, took them for the document, and sat behind a permanent "Changed on the server"
+    /// banner having never seen the change.
+    @Test func aSubscriberReceivesTheWholeDocumentNotTheStrippedPayload() async throws {
+        let store = try makeStore()
+        let id = UUID()
+        let base = document(blobId: id, tail: "before")
+        let updated = document(blobId: id, tail: "after")
+        try store.save(docId: "d", bytes: base)
+        let session = try DocumentSession(docId: "d", store: store, bufferLimit: 16)
+
+        let subscription = await session.subscribe()
+        let stripped = StrippedDocument.strip(document: updated, against: base,
+                                              basedOn: Data(SHA256.hash(data: base)),
+                                              originalSHA256: Data(SHA256.hash(data: updated)))
+        _ = await session.submit(opId: "1",
+                                 payload: OpPayload(type: "strippedDoc", data: stripped.encoded()))
+
+        var seen: OpPayload?
+        for await message in subscription.events {
+            if case .event(_, _, _, _, let payload) = message { seen = payload; break }
+        }
+        let payload = try #require(seen)
+        #expect(payload.type == "fullDoc")
+        #expect(payload.bulk.inlineData == updated, "a subscriber was handed something else")
+    }
+}

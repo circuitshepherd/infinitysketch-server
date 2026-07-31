@@ -137,7 +137,12 @@ import Foundation
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let url = root.appendingPathComponent("InfinitySketch/InfinitySketch/\(name)")
-        guard let doc = try? Data(contentsOf: url) else { return }   // not checked out — skip
+        // `#require`, not a silent skip: this is the ONLY test that exercises the escaping rule
+        // against genuine `JSONEncoder` output, and a fixture I hand-escaped myself could agree
+        // with a strip that is wrong in exactly the same way. Passing with zero coverage of the
+        // thing it exists to cover would be worse than failing.
+        let doc = try #require(try? Data(contentsOf: url),
+                               "the app repo is not checked out beside this one; expected \(url.path)")
 
         let stripped = StrippedDocument.strip(document: doc, against: doc,
                                               basedOn: Data(repeating: 1, count: 32),

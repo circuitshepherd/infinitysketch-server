@@ -300,6 +300,10 @@ actor DocumentSession {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
         }
 
+        // Hashed once and shared with the compare-and-swap below, which asks the same question of
+        // the same bytes — on a 5.8 MB document that is 10 ms not worth paying twice.
+        lazy var currentHash: Data = Data(SHA256.hash(data: bytes))
+
         // A whole document, or one rebuilt from the blobs THIS SESSION already holds. The rebuild
         // happens here, before anything else in `submit` — so the compare-and-swap below, the
         // store, the broadcast and every agent relay carry on seeing a complete document and none
@@ -319,7 +323,7 @@ actor DocumentSession {
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
             }
-            guard stripped.basedOn == Data(SHA256.hash(data: bytes)) else {
+            guard stripped.basedOn == currentHash else {
                 Self.report("\(docId): stripped against a document this session does not hold")
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
@@ -379,7 +383,7 @@ actor DocumentSession {
             // writer read — with a digest standing in for the bytes, so the APP can afford to
             // carry it on every settle-push (spec 2026-07-27-app-push-write-expectation-design).
             // Same actor turn, same position above `store.save`, same rejection reason.
-            if Data(SHA256.hash(data: bytes)) != expected {
+            if currentHash != expected {
                 return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
             }
         case .absent:
@@ -396,7 +400,15 @@ actor DocumentSession {
         }
         bytes = newBytes
         seq += 1
-        broadcast(.event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload))
+        // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
+        // hand every other subscriber a binary blob they have no idea how to read: measured, a
+        // second device took 210 bytes of `StrippedDocument` as its document, failed to decode it,
+        // and sat behind a permanent "Changed on the server" banner having never seen the stroke.
+        //
+        // Stripping this direction too is milestone 3, and it needs the `blobOmission` hello
+        // capability first — `infsketch-demo` subscribes to document events as well.
+        broadcast(.event(docId: docId, seq: seq, kind: "op", opId: opId,
+                         payload: OpPayload(type: "fullDoc", data: newBytes)))
         return .accepted(seq: seq)
     }
 
