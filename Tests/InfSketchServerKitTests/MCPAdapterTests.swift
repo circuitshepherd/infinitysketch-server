@@ -6351,7 +6351,6 @@ private actor FakeStrokeOpDevice {
     }
 }
 
-#endif  // !os(Linux)
 
 @Suite struct DeleteDocToolTests {
 
@@ -6423,3 +6422,9 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 }
+
+// EVERYTHING in this file lives inside the `#if !os(Linux)` above, and this must stay the
+// LAST line. A suite appended below it compiles on Linux with no `import Testing` and no
+// `startServer`/`connectedClient` — which is exactly what `DeleteDocToolTests` did, breaking
+// the Linux build while macOS stayed green, because on macOS the gate is true either way.
+#endif  // !os(Linux)
