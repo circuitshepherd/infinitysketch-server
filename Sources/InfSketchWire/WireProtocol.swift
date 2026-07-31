@@ -15,7 +15,7 @@ public enum WireProtocol {
     /// happily until the moment some other device deletes a document it is subscribed to, at which
     /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
-    public static let version = 4
+    public static let version = 5
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),

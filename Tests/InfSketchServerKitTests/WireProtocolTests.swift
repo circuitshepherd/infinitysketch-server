@@ -8,7 +8,8 @@ import InfSketchWire
     /// unknown `type` rather than ignoring it, so an older peer does not degrade — it passes the
     /// `hello` gate and then dies on the first message it has never heard of. `ping`/`pong` took
     /// this from 1 to 2; `deleteDoc`/`docDeleted` took it from 2 to 3; `WriteExpectation.matchHash`
-    /// took it from 3 to 4; the next addition takes it to 5.
+    /// took it from 3 to 4; the `strippedDoc` op payload took it from 4 to 5; the next addition
+    /// takes it to 6.
     ///
     /// An addition is not only a new MESSAGE: `matchHash` is a new CASE inside an existing
     /// message's payload, and an older peer would throw on its unknown `kind` exactly the same
@@ -17,7 +18,7 @@ import InfSketchWire
     /// This test earning its keep is not hypothetical: the delete work added both messages and
     /// left the version at 2, and this is what caught it.
     @Test func theVersionIsBumpedForEveryWireAddition() {
-        #expect(WireProtocol.version == 4)
+        #expect(WireProtocol.version == 5)
     }
 
     @Test func clientMessagesRoundTrip() throws {

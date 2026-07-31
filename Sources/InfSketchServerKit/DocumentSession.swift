@@ -280,12 +280,36 @@ actor DocumentSession {
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none) -> SubmitOutcome {
-        guard payload.type == "fullDoc" else {
-            return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
-        }
         // The adapter reassembles transfers before ops reach the session.
-        guard case .inline(let newBytes) = payload.bulk else {
+        guard case .inline(let inline) = payload.bulk else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
+        }
+
+        // A whole document, or one rebuilt from the blobs THIS SESSION already holds. The rebuild
+        // happens here, before anything else in `submit` — so the compare-and-swap below, the
+        // store, the broadcast and every agent relay carry on seeing a complete document and none
+        // of them learns that anything was omitted.
+        //
+        // It is VERIFIED, not trusted: the sender says which document its omissions came from and
+        // what the rebuild must hash to, and both are checked. That is what keeps a bug here to the
+        // cost of a whole-document resend — these bytes become the stored document, the sync
+        // lineage and the merge base, so a wrong rebuild must be unable to reach them.
+        let newBytes: Data
+        switch payload.type {
+        case "fullDoc":
+            newBytes = inline
+        case "strippedDoc":
+            guard let stripped = try? StrippedDocument(encoded: inline),
+                  stripped.basedOn == Data(SHA256.hash(data: bytes)),
+                  let rebuilt = try? stripped.restore(using: bytes),
+                  Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
+            else {
+                return .rejected(.reject(docId: docId, opId: opId,
+                                         reason: "cannotReconstruct", seq: seq))
+            }
+            newBytes = rebuilt
+        default:
+            return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
         }
         // Compare-and-swap guard for callers that read-then-compute-then-write
         // (MCP tools spanning a device round-trip): the token MUST be the
