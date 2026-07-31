@@ -279,6 +279,21 @@ actor DocumentSession {
     /// broadcast echo remains the subscriber-facing ack; the returned seq is
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
+    /// One line about a stripped push, FLUSHED.
+    ///
+    /// `print` is block-buffered whenever stdout is not a terminal, which is exactly how the dev
+    /// server runs — `scripts/worktree-server` redirects it to a log. Without the flush these lines
+    /// sit in the buffer, and their absence reads as "the code never ran": it cost an hour of
+    /// hunting a working feature, after the same trap had already been recorded for the QR printer
+    /// in this same repository.
+    ///
+    /// It reports at all because a correct rebuild and a whole-document push store byte-identical
+    /// content, so nothing downstream can tell you whether any of this engaged.
+    static func report(_ message: String) {
+        print("[blob-omission] \(message)")
+        fflush(nil)
+    }
+
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none) -> SubmitOutcome {
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let inline) = payload.bulk else {
@@ -299,14 +314,27 @@ actor DocumentSession {
         case "fullDoc":
             newBytes = inline
         case "strippedDoc":
-            guard let stripped = try? StrippedDocument(encoded: inline),
-                  stripped.basedOn == Data(SHA256.hash(data: bytes)),
-                  let rebuilt = try? stripped.restore(using: bytes),
-                  Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
-            else {
+            guard let stripped = try? StrippedDocument(encoded: inline) else {
+                Self.report("\(docId): payload did not decode")
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
             }
+            guard stripped.basedOn == Data(SHA256.hash(data: bytes)) else {
+                Self.report("\(docId): stripped against a document this session does not hold")
+                return .rejected(.reject(docId: docId, opId: opId,
+                                         reason: "cannotReconstruct", seq: seq))
+            }
+            guard let rebuilt = try? stripped.restore(using: bytes),
+                  Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
+            else {
+                Self.report("\(docId): the rebuild did not match the sender's hash")
+                return .rejected(.reject(docId: docId, opId: opId,
+                                         reason: "cannotReconstruct", seq: seq))
+            }
+            // Reported because it is otherwise invisible: a correct rebuild and a whole-document
+            // push produce exactly the same stored bytes, so nothing downstream can tell you
+            // whether any of this engaged. `scripts/e2e-blob-omission` reads this line.
+            Self.report("\(docId): rebuilt \(rebuilt.count) B from a \(inline.count) B payload")
             newBytes = rebuilt
         default:
             return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
