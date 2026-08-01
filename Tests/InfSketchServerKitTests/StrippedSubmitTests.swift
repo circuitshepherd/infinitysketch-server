@@ -171,3 +171,47 @@ import InfSketchWire
         #expect(payload.bulk.inlineData == updated, "a subscriber was handed something else")
     }
 }
+
+/// M2 — the agent reply. The device may leave out the blobs the server just sent it; the broker
+/// splices them back so every caller downstream sees a whole document exactly as before.
+@Suite struct StrippedReplyTests {
+
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+
+    /// The wire carries the kind explicitly rather than leaving the receiver to sniff what it got —
+    /// and it survives the chunking swap, exactly as `meta` does.
+    @Test func thePayloadKindRoundTripsAndSurvivesChunking() throws {
+        let message = ClientMessage.strokeOpReply(requestId: 7, docId: "d",
+                                                  payload: .inline(Data([1, 2, 3])), meta: nil,
+                                                  failureReason: nil, payloadKind: "strippedDoc")
+        #expect(try ClientMessage(jsonText: message.jsonText()) == message)
+
+        let descriptor = TransferDescriptor(transferId: 1, totalBytes: 3, chunkSize: 2)
+        if case .strokeOpReply(_, _, _, _, _, let kind) = message.replacingBulk(with: descriptor) {
+            #expect(kind == "strippedDoc", "chunking changes how bytes travel, never what they are")
+        } else {
+            Issue.record("replacingBulk did not preserve the reply shape")
+        }
+        if case .strokeOpReply(_, _, _, _, _, let kind) = message.resolvingBulk(with: Data([9])) {
+            #expect(kind == "strippedDoc")
+        } else {
+            Issue.record("resolvingBulk did not preserve the reply shape")
+        }
+    }
+
+    /// An older peer sends no kind at all, and that must keep meaning "a whole document".
+    @Test func anAbsentKindMeansAWholeDocument() throws {
+        let json = #"{"type":"strokeOpReply","requestId":1,"docId":"d","data":"AQID"}"#
+        if case .strokeOpReply(_, _, _, _, _, let kind) = try ClientMessage(jsonText: json) {
+            #expect(kind == nil)
+        } else {
+            Issue.record("did not decode as a strokeOpReply")
+        }
+    }
+}

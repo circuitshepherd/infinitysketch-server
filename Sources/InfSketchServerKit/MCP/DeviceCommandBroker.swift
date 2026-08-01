@@ -1,5 +1,6 @@
 import Foundation
 import InfSketchWire
+import Crypto
 
 /// Bridges MCP tools that `await` bytes solicited live from a connected
 /// InfinitySketch device — `create_doc` (Task 3) and the agent
@@ -67,6 +68,10 @@ public actor DeviceCommandBroker {
         let connectionId: UUID
         let continuation: CheckedContinuation<StrokeOpReply, Error>
         var timeoutTask: Task<Void, Never>?
+        /// The document bytes this request CARRIED. A device may answer with the blobs left out —
+        /// it was just sent them, so it knows we have them — and this is what they are spliced back
+        /// from. Empty for requests that send no document.
+        let sentBytes: Data
     }
 
     private let createTimeout: Duration
@@ -144,7 +149,8 @@ public actor DeviceCommandBroker {
     public func requestStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes"
     ) async throws -> StrokeOpReply {
-        try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout) {
+        try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
+                                 sentBytes: docBytes) {
             connection, requestId in
             connection.send(
                 .strokeOpRequest(requestId: requestId, docId: docId, payload: .inline(docBytes), spec: spec))
@@ -174,16 +180,40 @@ public actor DeviceCommandBroker {
     /// `meta` is non-nil only for replies that carry metadata (render/preview,
     /// selection descriptors, or an authoring op's created ids — see requestStrokeOp);
     /// createDocReply routing always passes the default `nil`.
-    public func handleReply(requestId: UInt32, bytes: Data?, meta: Data? = nil, failureReason: String?) {
+    public func handleReply(requestId: UInt32, bytes: Data?, meta: Data? = nil,
+                            failureReason: String?, payloadKind: String? = nil) {
         guard let entry = completePending(requestId) else {
             print("[DeviceCommandBroker] dropping reply for unknown/expired requestId \(requestId)")
             return
         }
         if let failureReason {
             entry.continuation.resume(throwing: DeviceCommandError.deviceFailed(failureReason))
-        } else {
-            entry.continuation.resume(returning: StrokeOpReply(bytes: bytes ?? Data(), meta: meta))
+            return
         }
+
+        // The device may leave out the image blobs we sent it — it knows we have them, because we
+        // are the ones who sent them. Rebuilt HERE, so every caller downstream receives a whole
+        // document exactly as before and none of them learns that anything was omitted.
+        //
+        // Verified rather than trusted, for the same reason `DocumentSession.submit` verifies: these
+        // bytes go on to be stored under a compare-and-swap. A rebuild that does not match the
+        // device's own hash of its result is a failure, never a document.
+        var resolved = bytes ?? Data()
+        if payloadKind == "strippedDoc" {
+            guard let stripped = try? StrippedDocument(encoded: resolved),
+                  stripped.basedOn == Data(SHA256.hash(data: entry.sentBytes)),
+                  let rebuilt = try? stripped.restore(using: entry.sentBytes),
+                  Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
+            else {
+                entry.continuation.resume(
+                    throwing: DeviceCommandError.deviceFailed("cannotReconstruct"))
+                return
+            }
+            DocumentSession.report("\(entry.docId): rebuilt an agent reply, "
+                                   + "\(rebuilt.count) B from a \(bytes?.count ?? 0) B payload")
+            resolved = rebuilt
+        }
+        entry.continuation.resume(returning: StrokeOpReply(bytes: resolved, meta: meta))
     }
 
     /// Shared request path for `requestCreation`, `requestStrokeOp` and
@@ -198,6 +228,7 @@ public actor DeviceCommandBroker {
     /// this registration into existence.
     private func performRequest(
         docId: String, capability: String, timeout: Duration, deviceId: String? = nil,
+        sentBytes: Data = Data(),
         send: @escaping (Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
         guard let connection = connections.last(where: {
@@ -221,7 +252,8 @@ public actor DeviceCommandBroker {
             // idiom): the reply-routing side must always find an entry
             // to resume, never race it into existence.
             pending[requestId] = PendingRequest(
-                docId: docId, connectionId: connection.id, continuation: continuation)
+                docId: docId, connectionId: connection.id, continuation: continuation,
+                sentBytes: sentBytes)
 
             send(connection, requestId)
 

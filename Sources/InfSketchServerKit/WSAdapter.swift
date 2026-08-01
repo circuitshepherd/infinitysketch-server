@@ -310,7 +310,7 @@ actor Connection {
             }
             await broker.handleReply(requestId: requestId, bytes: bytes, failureReason: nil)
 
-        case .strokeOpReply(let requestId, _, let payload, let meta, let failureReason):
+        case .strokeOpReply(let requestId, _, let payload, let meta, let failureReason, let payloadKind):
             // Same precedence as createDocReply above (kept in exact lockstep
             // on purpose — one broker, one reply-routing contract): an inline
             // payload always wins as a success (even alongside a
@@ -338,7 +338,8 @@ actor Connection {
                 }
                 return
             }
-            await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta, failureReason: nil)
+            await broker.handleReply(requestId: requestId, bytes: bytes, meta: meta,
+                                     failureReason: nil, payloadKind: payloadKind)
 
         case .advertiseDocs(let payload):
             // M2c-1: a device advertising the docs it owns — metadata + thumbnail, no content.
