@@ -215,3 +215,77 @@ import InfSketchWire
         }
     }
 }
+
+/// M3 — the broadcast. Only a subscriber that said it understands a stripped document gets one;
+/// everyone else keeps receiving whole documents, because `infsketch-demo` subscribes too.
+@Suite struct StrippedBroadcastCapabilityTests {
+
+    private func makeStore() throws -> DirectoryDocumentStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stripped-cap-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return DirectoryDocumentStore(directory: dir)
+    }
+
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+
+    private func firstEvent(_ result: SubscribeResult) async -> OpPayload? {
+        for await message in result.events {
+            if case .event(_, _, _, _, let payload) = message { return payload }
+        }
+        return nil
+    }
+
+    /// Two subscribers on one document, one capable and one not: each gets the form it can read,
+    /// and both end up with the same document.
+    @Test func eachSubscriberGetsTheFormItCanRead() async throws {
+        let store = try makeStore()
+        let id = UUID()
+        let base = document(blobId: id, tail: "before")
+        let updated = document(blobId: id, tail: "after")
+        try store.save(docId: "d", bytes: base)
+        let session = try DocumentSession(docId: "d", store: store, bufferLimit: 16)
+
+        let capable = await session.subscribe(acceptsStrippedDocuments: true)
+        let plain = await session.subscribe()
+
+        _ = await session.submit(opId: "1", payload: OpPayload(type: "fullDoc", data: updated))
+
+        let toCapable = try #require(await firstEvent(capable))
+        let toPlain = try #require(await firstEvent(plain))
+
+        #expect(toCapable.type == "strippedDoc")
+        #expect(toPlain.type == "fullDoc")
+        #expect(toPlain.bulk.inlineData == updated)
+
+        // …and the capable one rebuilds to exactly what the other was handed.
+        let payload = try #require(toCapable.bulk.inlineData)
+        #expect(payload.count < updated.count / 2, "nothing was actually omitted")
+        let rebuilt = try StrippedDocument(encoded: payload).restore(using: base)
+        #expect(rebuilt == updated)
+    }
+
+    /// With nobody capable, the stripping is not even attempted — no parse of the previous document,
+    /// no second payload built.
+    @Test func withNoCapableSubscriberTheDocumentGoesWhole() async throws {
+        let store = try makeStore()
+        let id = UUID()
+        let base = document(blobId: id, tail: "before")
+        try store.save(docId: "d", bytes: base)
+        let session = try DocumentSession(docId: "d", store: store, bufferLimit: 16)
+        let plain = await session.subscribe()
+
+        let updated = document(blobId: id, tail: "after")
+        _ = await session.submit(opId: "1", payload: OpPayload(type: "fullDoc", data: updated))
+
+        let payload = try #require(await firstEvent(plain))
+        #expect(payload.type == "fullDoc")
+        #expect(payload.bulk.inlineData == updated)
+    }
+}

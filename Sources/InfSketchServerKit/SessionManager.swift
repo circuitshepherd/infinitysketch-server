@@ -67,7 +67,11 @@ public actor SessionManager {
         contentProvider = provider
     }
 
-    public func subscribe(docId: String, createIfMissing: Bool = false) async throws -> SubscribeResult {
+    /// `acceptsStrippedDocuments` — the caller's connection advertised `blobOmission`, so its
+    /// broadcasts may leave out image blobs it already holds. Defaults to false: a peer that never
+    /// said so keeps receiving whole documents.
+    public func subscribe(docId: String, createIfMissing: Bool = false,
+                          acceptsStrippedDocuments: Bool = false) async throws -> SubscribeResult {
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -152,7 +156,7 @@ public actor SessionManager {
                 emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
             }
         }
-        let result = await session.subscribe()
+        let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments)
         tokenDocs[result.token] = docId
         let newCount = counts[docId, default: 0] + 1
         counts[docId] = newCount

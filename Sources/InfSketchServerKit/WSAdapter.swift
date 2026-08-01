@@ -54,6 +54,9 @@ actor Connection {
     private let output: AsyncStream<WSMessage>.Continuation
     private var sender: TransferSender<ServerMessage>
     private var reassembler = TransferReassembler<ClientMessage>()
+    /// Whether this connection advertised `blobOmission` in its hello, i.e. whether a broadcast to
+    /// it may leave out image blobs it already has.
+    private var acceptsStrippedDocuments = false
     private var helloed = false
     /// The advertising device's identity, from `hello`. M2c-1: recorded as a HOLDER on every
     /// document this connection advertises, so a content fetch can be routed to it — and pruned
@@ -163,6 +166,10 @@ actor Connection {
             // requestProvideContent's capability: "provideContent" relay — a
             // device advertising only content-provisioning must still register.
             let caps = Set(capabilities)
+            // M3: only a peer that says it understands a stripped document gets one. The web UI
+            // never subscribes to document events, but `infsketch-demo` does — and it would take a
+            // binary `StrippedDocument` for a document and be unable to read it.
+            acceptsStrippedDocuments = caps.contains("blobOmission")
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
@@ -191,7 +198,9 @@ actor Connection {
                 return emit(.error(reason: "alreadySubscribed"))
             }
             do {
-                let result = try await manager.subscribe(docId: docId, createIfMissing: createIfMissing)
+                let result = try await manager.subscribe(
+                    docId: docId, createIfMissing: createIfMissing,
+                    acceptsStrippedDocuments: acceptsStrippedDocuments)
                 emit(result.snapshot)
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {

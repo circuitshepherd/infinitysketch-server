@@ -150,6 +150,10 @@ actor DocumentSession {
     private var bytes: Data
     private(set) var seq = 0
     private var subscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    /// Subscribers that advertised `blobOmission` and may therefore receive a document with its
+    /// already-known image blobs left out. A separate set rather than a richer `subscribers` value,
+    /// so every existing use of that dictionary reads exactly as it did.
+    private var strippedCapableSubscribers: Set<UUID> = []
     private var watchers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
     /// One-slot live-frame cache; dies with the session (the HTTP route then
     /// falls back to the stored thumbnail, marked stale).
@@ -216,11 +220,15 @@ actor DocumentSession {
         return newBytes
     }
 
-    func subscribe() -> SubscribeResult {
+    /// `acceptsStrippedDocuments` — this subscriber understands a `strippedDoc` event and will
+    /// splice the blobs back from its own copy. Defaults to FALSE, so a peer that never said so
+    /// keeps receiving whole documents: `infsketch-demo` subscribes to document events too.
+    func subscribe(acceptsStrippedDocuments: Bool = false) -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
             bufferingPolicy: .bufferingOldest(bufferLimit))
         subscribers[token] = continuation
+        if acceptsStrippedDocuments { strippedCapableSubscribers.insert(token) }
         // A reconnecting app must learn it is already watched: deliver the
         // current watcher count as this subscription's first event.
         if !watchers.isEmpty {
@@ -233,6 +241,7 @@ actor DocumentSession {
     }
 
     func unsubscribe(_ token: UUID) {
+        strippedCapableSubscribers.remove(token)
         subscribers.removeValue(forKey: token)?.finish()
     }
 
@@ -398,6 +407,7 @@ actor DocumentSession {
             FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
             return .rejected(.reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq))
         }
+        let previousBytes = bytes
         bytes = newBytes
         seq += 1
         // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
@@ -407,8 +417,7 @@ actor DocumentSession {
         //
         // Stripping this direction too is milestone 3, and it needs the `blobOmission` hello
         // capability first — `infsketch-demo` subscribes to document events as well.
-        broadcast(.event(docId: docId, seq: seq, kind: "op", opId: opId,
-                         payload: OpPayload(type: "fullDoc", data: newBytes)))
+        broadcastDocument(newBytes, previous: previousBytes, opId: opId)
         return .accepted(seq: seq)
     }
 
@@ -423,23 +432,68 @@ actor DocumentSession {
         subscribers.removeAll()
     }
 
+    /// Send a document to every subscriber — whole, or with the image blobs it already has left
+    /// out, per what each one said it understands.
+    ///
+    /// The omissions are taken from the PREVIOUS content, which every caught-up subscriber holds:
+    /// this session keeps only current `bytes` and `seq`, with no history replay, so a subscriber is
+    /// either caught up or was given a full snapshot when it subscribed. One that cannot rebuild
+    /// says so and re-subscribes, which is an existing path.
+    private func broadcastDocument(_ newBytes: Data, previous: Data, opId: String) {
+        func event(_ payload: OpPayload) -> ServerMessage {
+            .event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload)
+        }
+        let whole = event(OpPayload(type: "fullDoc", data: newBytes))
+
+        guard !strippedCapableSubscribers.isEmpty, !previous.isEmpty else {
+            broadcast(whole)
+            return
+        }
+        let candidate = StrippedDocument.strip(document: newBytes, against: previous,
+                                               basedOn: Data(SHA256.hash(data: previous)),
+                                               originalSHA256: Data(SHA256.hash(data: newBytes)))
+        let omittedSomething = candidate.parts.contains {
+            if case .blob = $0 { return true } else { return false }
+        }
+        guard omittedSomething else {
+            broadcast(whole)
+            return
+        }
+        let stripped = event(OpPayload(type: "strippedDoc", data: candidate.encoded()))
+        Self.report("\(docId): broadcasting \(candidate.encoded().count) B instead of "
+                    + "\(newBytes.count) B to \(strippedCapableSubscribers.count) subscriber(s)")
+        for (token, continuation) in subscribers {
+            deliver(strippedCapableSubscribers.contains(token) ? stripped : whole,
+                    to: token, continuation)
+        }
+    }
+
     private func broadcast(_ message: ServerMessage) {
         for (token, continuation) in subscribers {
-            switch continuation.yield(message) {
-            case .dropped, .terminated:
-                // Bounded-buffer overflow (or consumer gone): disconnect; the
-                // client recovers by re-subscribing (fresh snapshot in v0).
-                //
-                // NOT the primary guard against a slow SOCKET, despite appearances.
-                // `WSAdapter.Connection.pump` drains this stream as fast as events arrive and
-                // re-yields into the connection's unbounded `output`, so this bound does not
-                // engage for a slow reader — `ConnectionHealth` handles that case. What this
-                // still covers is a `pump` task that is itself suspended or descheduled, which
-                // nothing else notices.
-                subscribers.removeValue(forKey: token)?.finish()
-            default:
-                break
-            }
+            deliver(message, to: token, continuation)
+        }
+    }
+
+    /// One subscriber, one message — shared by `broadcast` and `broadcastDocument`, so a peer that
+    /// receives a stripped document is dropped on overflow by exactly the same rule as one that
+    /// receives a whole document.
+    private func deliver(_ message: ServerMessage, to token: UUID,
+                         _ continuation: AsyncStream<ServerMessage>.Continuation) {
+        switch continuation.yield(message) {
+        case .dropped, .terminated:
+            // Bounded-buffer overflow (or consumer gone): disconnect; the
+            // client recovers by re-subscribing (fresh snapshot in v0).
+            //
+            // NOT the primary guard against a slow SOCKET, despite appearances.
+            // `WSAdapter.Connection.pump` drains this stream as fast as events arrive and
+            // re-yields into the connection's unbounded `output`, so this bound does not
+            // engage for a slow reader — `ConnectionHealth` handles that case. What this
+            // still covers is a `pump` task that is itself suspended or descheduled, which
+            // nothing else notices.
+            subscribers.removeValue(forKey: token)?.finish()
+            strippedCapableSubscribers.remove(token)
+        default:
+            break
         }
     }
 }
