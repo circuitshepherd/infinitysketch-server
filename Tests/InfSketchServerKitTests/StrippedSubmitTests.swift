@@ -289,3 +289,70 @@ import InfSketchWire
         #expect(payload.bulk.inlineData == updated)
     }
 }
+
+/// The writer is not an audience. It matches its own echo by `opId` and never reads the payload, so
+/// building a stripped one for it is tens of milliseconds of parsing on this actor, thrown away.
+@Suite struct StrippedBroadcastAudienceTests {
+
+    private func makeStore() throws -> DirectoryDocumentStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stripped-audience-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return DirectoryDocumentStore(directory: dir)
+    }
+
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+
+    private func firstEvent(_ result: SubscribeResult) async -> OpPayload? {
+        for await message in result.events {
+            if case .event(_, _, _, _, let payload) = message { return payload }
+        }
+        return nil
+    }
+
+    /// The single-device case, which is the common one: the only capable subscriber IS the writer,
+    /// so nothing is stripped.
+    @Test func aLoneWriterIsNotStrippedFor() async throws {
+        let store = try makeStore()
+        let id = UUID()
+        let base = document(blobId: id, tail: "before")
+        try store.save(docId: "d", bytes: base)
+        let session = try DocumentSession(docId: "d", store: store, bufferLimit: 16)
+        let writer = await session.subscribe(acceptsStrippedDocuments: true)
+
+        let updated = document(blobId: id, tail: "after")
+        _ = await session.submit(opId: "1", payload: OpPayload(type: "fullDoc", data: updated),
+                                 submitter: writer.token)
+
+        let payload = try #require(await firstEvent(writer))
+        #expect(payload.type == "fullDoc", "a strip was built for the one peer that ignores it")
+    }
+
+    /// …but a second capable device is a real audience, and then it is worth it — including for the
+    /// writer's own echo, which rides along on the same stripped message.
+    @Test func aSecondCapableDeviceIsWorthStrippingFor() async throws {
+        let store = try makeStore()
+        let id = UUID()
+        let base = document(blobId: id, tail: "before")
+        try store.save(docId: "d", bytes: base)
+        let session = try DocumentSession(docId: "d", store: store, bufferLimit: 16)
+        let writer = await session.subscribe(acceptsStrippedDocuments: true)
+        let other = await session.subscribe(acceptsStrippedDocuments: true)
+
+        let updated = document(blobId: id, tail: "after")
+        _ = await session.submit(opId: "1", payload: OpPayload(type: "fullDoc", data: updated),
+                                 submitter: writer.token)
+
+        let toOther = try #require(await firstEvent(other))
+        #expect(toOther.type == "strippedDoc")
+        let rebuilt = try StrippedDocument(encoded: try #require(toOther.bulk.inlineData))
+            .restore(using: base)
+        #expect(rebuilt == updated)
+    }
+}

@@ -303,7 +303,8 @@ actor DocumentSession {
         fflush(nil)
     }
 
-    func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none) -> SubmitOutcome {
+    func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
+                submitter: UUID? = nil) -> SubmitOutcome {
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let inline) = payload.bulk else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
@@ -417,7 +418,7 @@ actor DocumentSession {
         //
         // Stripping this direction too is milestone 3, and it needs the `blobOmission` hello
         // capability first — `infsketch-demo` subscribes to document events as well.
-        broadcastDocument(newBytes, previous: previousBytes, opId: opId)
+        broadcastDocument(newBytes, previous: previousBytes, opId: opId, submitter: submitter)
         return .accepted(seq: seq)
     }
 
@@ -440,13 +441,19 @@ actor DocumentSession {
     /// this session keeps only current `bytes` and `seq`, with no history replay, so a subscriber is
     /// either caught up or was given a full snapshot when it subscribed. One that cannot rebuild
     /// says so and re-subscribes, which is an existing path.
-    private func broadcastDocument(_ newBytes: Data, previous: Data, opId: String) {
+    private func broadcastDocument(_ newBytes: Data, previous: Data, opId: String,
+                                   submitter: UUID?) {
         func event(_ payload: OpPayload) -> ServerMessage {
             .event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload)
         }
         let whole = event(OpPayload(type: "fullDoc", data: newBytes))
 
-        guard !strippedCapableSubscribers.isEmpty, !previous.isEmpty else {
+        // Nobody but the WRITER is worth stripping for. A writer matches this echo by `opId` and
+        // never looks at the payload, so on the ordinary single-device setup the strip would be
+        // computed — tens of milliseconds of parsing on this actor, serialised against every other
+        // operation on the document — and then thrown away by the only peer that receives it.
+        let audience = strippedCapableSubscribers.subtracting(submitter.map { [$0] } ?? [])
+        guard !audience.isEmpty, !previous.isEmpty else {
             broadcast(whole)
             return
         }
@@ -465,10 +472,9 @@ actor DocumentSession {
         let encoded = candidate.encoded()
         let stripped = event(OpPayload(type: "strippedDoc", data: encoded))
         Self.report("\(docId): broadcasting \(encoded.count) B instead of "
-                    + "\(newBytes.count) B to \(strippedCapableSubscribers.count) subscriber(s)")
+                    + "\(newBytes.count) B to \(audience.count) subscriber(s)")
         for (token, continuation) in subscribers {
-            deliver(strippedCapableSubscribers.contains(token) ? stripped : whole,
-                    to: token, continuation)
+            deliver(audience.contains(token) ? stripped : whole, to: token, continuation)
         }
     }
 

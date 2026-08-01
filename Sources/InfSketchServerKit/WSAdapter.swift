@@ -239,7 +239,8 @@ actor Connection {
             // carries the assigned seq), so only a rejection needs
             // forwarding here.
             if let reject = await manager.submit(
-                docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none
+                docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none,
+                submitter: docSubscriptions[docId]?.token
             ).rejectMessage {
                 emit(reject)
             }

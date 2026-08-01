@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 import Testing
 import InfSketchWire
 @testable import InfSketchServerKit
@@ -317,5 +318,138 @@ private actor SentBox {
 
         #expect(try await strokeResult.bytes == Data("stroke".utf8))
         #expect(try await createResult == Data("create".utf8))
+    }
+}
+
+/// M2 — a device may answer with the image blobs left out, because the server just sent them. The
+/// broker splices them back so every tool downstream receives a whole document exactly as before.
+///
+/// These matter more than most: the app's tests fake the server and the server's fake the device, so
+/// a one-sided change to this envelope passes both suites and fails only on real hardware.
+@Suite struct StrippedAgentReplyTests {
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+    private func sha(_ d: Data) -> Data { Data(SHA256.hash(data: d)) }
+
+    private func requestAndReply(
+        sentBytes: Data,
+        makeReply: (UInt32) -> (bytes: Data?, kind: String?)
+    ) async throws -> Result<Data, any Error> {
+        let broker = DeviceCommandBroker()
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in
+            Task { await sent.set(msg) }
+        }
+        let task = Task {
+            try await broker.requestStrokeOp(docId: "D", docBytes: sentBytes, spec: Data("{}".utf8))
+        }
+        let request = try #require(await sent.awaitMessage())
+        guard case .strokeOpRequest(let rid, _, _, _) = request else {
+            Issue.record("wrong message"); return .failure(DeviceCommandBroker.DeviceCommandError.deviceTimeout)
+        }
+        let reply = makeReply(rid)
+        await broker.handleReply(requestId: rid, bytes: reply.bytes, meta: nil,
+                                 failureReason: nil, payloadKind: reply.kind)
+        do { return .success(try await task.value.bytes) } catch { return .failure(error) }
+    }
+
+    /// The document every tool downstream sees is byte-identical to what the device produced.
+    @Test func aStrippedReplyIsRebuiltFromWhatWasSent() async throws {
+        let id = UUID()
+        let sent = document(blobId: id, tail: "before")
+        let produced = document(blobId: id, tail: "after")
+        let stripped = StrippedDocument.strip(document: produced, against: sent,
+                                              basedOn: sha(sent), originalSHA256: sha(produced))
+        #expect(stripped.encoded().count < produced.count / 2, "nothing was omitted")
+
+        let result = try await requestAndReply(sentBytes: sent) { _ in
+            (bytes: stripped.encoded(), kind: "strippedDoc")
+        }
+        #expect(try result.get() == produced)
+    }
+
+    /// Stripped against something other than what we sent: named, never guessed at.
+    @Test func aReplyStrippedAgainstSomethingElseFails() async throws {
+        let id = UUID()
+        let sent = document(blobId: id, tail: "before")
+        let elsewhere = document(blobId: UUID(), tail: "elsewhere")
+        let produced = document(blobId: id, tail: "after")
+        let stripped = StrippedDocument.strip(document: produced, against: elsewhere,
+                                              basedOn: sha(elsewhere), originalSHA256: sha(produced))
+
+        let result = try await requestAndReply(sentBytes: sent) { _ in
+            (bytes: stripped.encoded(), kind: "strippedDoc")
+        }
+        #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("cannotReconstruct")) {
+            _ = try result.get()
+        }
+    }
+
+    /// A request that carried NO document — `provideContent` sends empty bytes — cannot have
+    /// anything spliced back into it, and must fail rather than return a half-document.
+    @Test func aStrippedReplyToARequestThatSentNothingFails() async throws {
+        let id = UUID()
+        let produced = document(blobId: id, tail: "after")
+        let stripped = StrippedDocument.strip(document: produced, against: produced,
+                                              basedOn: sha(produced), originalSHA256: sha(produced))
+
+        let result = try await requestAndReply(sentBytes: Data()) { _ in
+            (bytes: stripped.encoded(), kind: "strippedDoc")
+        }
+        #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("cannotReconstruct")) {
+            _ = try result.get()
+        }
+    }
+
+    /// The case the DIGEST checks exist for, and the only one that reaches them.
+    ///
+    /// The two tests above are refused earlier, by `restore` failing to find the blob at all — I
+    /// wrote them believing they pinned the digests, and removing BOTH digest checks left them
+    /// green. Here the same blob id names DIFFERENT bytes on the two sides, so the splice succeeds
+    /// structurally and yields a document that is not the one the device produced. Only a digest
+    /// can tell.
+    ///
+    /// It should be unreachable — a blob id names immutable bytes — which is exactly why the check
+    /// has to be here rather than trusted away.
+    ///
+    /// Mutation-verified as a pair: removing BOTH digest checks fails this test, removing either
+    /// alone does not. They are redundant for this case by design — `basedOn` is the cheap early
+    /// answer and `originalSHA256` the definitive one — so what is pinned here is the OUTCOME, that
+    /// a rebuild which is not the device's document is refused, not one particular guard.
+    @Test func aRebuildThatSucceedsButProducesTheWrongBytesIsRefused() async throws {
+        // The SAME blob id on both sides, naming different bytes.
+        let id = UUID()
+        func doc(payload: String, tail: String) -> Data {
+            Data("""
+            {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(id.uuidString)",\
+            "thumbnailData":"AA=="}]}
+            """.utf8)
+        }
+        let mine = doc(payload: String(repeating: "ab\\/cd", count: 4000), tail: "before")
+        let theirs = doc(payload: String(repeating: "zy\\/xw", count: 4000), tail: "before")
+        let produced = doc(payload: String(repeating: "zy\\/xw", count: 4000), tail: "after")
+
+        let stripped = StrippedDocument.strip(document: produced, against: theirs,
+                                              basedOn: sha(theirs), originalSHA256: sha(produced))
+        let result = try await requestAndReply(sentBytes: mine) { _ in
+            (bytes: stripped.encoded(), kind: "strippedDoc")
+        }
+        #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("cannotReconstruct")) {
+            _ = try result.get()
+        }
+    }
+
+    /// A whole reply is untouched — the ordinary case, and every render or selection reply.
+    @Test func aReplyWithoutAKindIsPassedThroughUnchanged() async throws {
+        let produced = document(blobId: UUID(), tail: "after")
+        let result = try await requestAndReply(sentBytes: Data("{}".utf8)) { _ in
+            (bytes: produced, kind: nil)
+        }
+        #expect(try result.get() == produced)
     }
 }

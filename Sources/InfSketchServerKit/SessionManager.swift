@@ -253,13 +253,18 @@ public actor SessionManager {
         return await session.latestFrame
     }
 
+    /// `submitter` is the writer's own subscription token, when it has one. It is used for a single
+    /// decision — whether a stripped broadcast is worth building — because a writer ignores the echo
+    /// of its own op.
     public func submit(
-        docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation = .none
+        docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
+        submitter: UUID? = nil
     ) async -> SubmitOutcome {
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
-        let outcome = await session.submit(opId: opId, payload: payload, expectation: expectation)
+        let outcome = await session.submit(opId: opId, payload: payload,
+                                           expectation: expectation, submitter: submitter)
         // The status event uses the seq the write itself returned — a
         // separate `await session.seq` read here could observe a LATER
         // racing write's seq (see SubmitOutcome).
