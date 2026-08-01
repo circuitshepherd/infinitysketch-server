@@ -430,6 +430,7 @@ actor DocumentSession {
         broadcast(.docDeleted(docId: docId))
         for (_, continuation) in subscribers { continuation.finish() }
         subscribers.removeAll()
+        strippedCapableSubscribers.removeAll()
     }
 
     /// Send a document to every subscriber — whole, or with the image blobs it already has left
@@ -459,8 +460,11 @@ actor DocumentSession {
             broadcast(whole)
             return
         }
-        let stripped = event(OpPayload(type: "strippedDoc", data: candidate.encoded()))
-        Self.report("\(docId): broadcasting \(candidate.encoded().count) B instead of "
+        // Encoded ONCE — it is a multi-megabyte copy, and the second call existed only to count
+        // its bytes for the line below.
+        let encoded = candidate.encoded()
+        let stripped = event(OpPayload(type: "strippedDoc", data: encoded))
+        Self.report("\(docId): broadcasting \(encoded.count) B instead of "
                     + "\(newBytes.count) B to \(strippedCapableSubscribers.count) subscriber(s)")
         for (token, continuation) in subscribers {
             deliver(strippedCapableSubscribers.contains(token) ? stripped : whole,
