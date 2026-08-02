@@ -41,7 +41,7 @@ do {
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory)
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 
-// MARK: - scan to join
+// MARK: - scan to join, and the agent address beside it
 
 /// Saved so the terminal can be put back however this process ends. At file scope because `atexit`
 /// and `signal` take C function pointers, which cannot capture context.
@@ -87,8 +87,12 @@ func drawJoinCode() {
         print("\u{1B}[\(drawnLineCount)A\u{1B}[0J", terminator: "")
     }
     guard let url = picker.currentURL else {
-        // No usable address, or Windows. Say why rather than printing nothing at all.
-        let text = "no reachable network address found — scan to join is unavailable here\n"
+        // No usable address, or Windows. Say why rather than printing nothing at all — and still
+        // give the loopback MCP url, which is the one thing that DOES work here: an agent on this
+        // machine needs no network address.
+        var text = "no reachable network address found — scan to join is unavailable here\n"
+        text += "Connect an AI agent on THIS machine (MCP):\n"
+        text += "  \(AddressPicker.mcpURL(ip: "127.0.0.1", port: picker.port))\n"
         print(text, terminator: "")
         fflush(nil)
         drawnLineCount = text.components(separatedBy: "\n").count - 1
@@ -96,6 +100,10 @@ func drawJoinCode() {
     }
     var text = (try? TerminalQRCode.render(url)) ?? ""
     text += "\nScan to sync a device with this server:\n  \(url)\n"
+    // Printed, not drawn as a second code: an agent reads a config file, it does not hold a camera.
+    if let mcp = picker.currentMCPURL {
+        text += "\nConnect an AI agent (MCP), on this machine or another:\n  \(mcp)\n"
+    }
     if picker.candidates.count > 1 {
         for (index, candidate) in picker.candidates.enumerated() {
             let marker = index == picker.selection ? "▸" : " "
