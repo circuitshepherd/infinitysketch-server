@@ -351,3 +351,36 @@ struct WirePingPongTests {
         #expect(try ClientMessage.pong.jsonText() == #"{"type":"pong"}"#)
     }
 }
+
+extension WireProtocolTests {
+    /// The REQUEST's `payloadKind` must survive both directions of chunking — the reply side has
+    /// exactly this pin (`StrippedSubmitTests`), and the request side shipped with the
+    /// implementation and the comment but no test. The nil-kind round-trip test passes trivially
+    /// if either hook drops the kind (nil == nil), so this one is NON-nil by construction:
+    /// dropped anywhere, a chunked stripped request is read as a whole document and every large
+    /// stripped request fails `undecodableDocument` — and in production MOST stripped requests
+    /// chunk, since the stripped remainder of a big document exceeds the 256 KB inline limit.
+    @Test func aStrippedRequestsKindSurvivesChunkingBothWays() throws {
+        let original = ServerMessage.strokeOpRequest(
+            requestId: 9, docId: "D", payload: .inline(Data([1, 2, 3])),
+            spec: Data("{}".utf8), payloadKind: BlobOmissionWire.strippedDocKind)
+        let descriptor = TransferDescriptor(transferId: 7, totalBytes: 3, chunkSize: 3)
+
+        let announced = original.replacingBulk(with: descriptor)
+        guard case .strokeOpRequest(_, _, .transfer, _, let announcedKind) = announced else {
+            Issue.record("replacingBulk changed the message shape"); return
+        }
+        #expect(announcedKind == BlobOmissionWire.strippedDocKind,
+                "the kind must ride the transfer descriptor")
+
+        let resolved = announced.resolvingBulk(with: Data([1, 2, 3]))
+        guard case .strokeOpRequest(let rid, let docId, .inline(let bytes), _, let resolvedKind) = resolved else {
+            Issue.record("resolvingBulk changed the message shape"); return
+        }
+        #expect(rid == 9)
+        #expect(docId == "D")
+        #expect(bytes == Data([1, 2, 3]))
+        #expect(resolvedKind == BlobOmissionWire.strippedDocKind,
+                "the kind must land back beside the reassembled bytes")
+    }
+}

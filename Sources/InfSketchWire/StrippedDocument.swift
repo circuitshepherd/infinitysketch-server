@@ -1,6 +1,18 @@
 import Foundation
 
 /// Which of a pasted image's two byte fields a reference stands for.
+/// The two tokens both peers must agree on, held ONCE in the shared wire package so the seam
+/// cannot drift: the payload-kind naming a `StrippedDocument`, and the failure reason a device
+/// answers when it cannot rebuild a stripped REQUEST (the broker matches it by prefix and retries
+/// the op whole). Each existed as two independent string literals — composed in the app, matched
+/// on the server — and drift there does not fail an op, it WEDGES the document: every subsequent
+/// request strips, is refused with an unrecognized reason, and errors until the connection dies
+/// (review finding, 2026-08-03; the reshape_strokes seam class, one layer up from the envelope).
+public enum BlobOmissionWire {
+    public static let strippedDocKind = "strippedDoc"
+    public static let cannotReconstructRequestReason = "cannotReconstructRequest"
+}
+
 public enum BlobField: String, Sendable, Equatable {
     case data, thumbnailData
 }

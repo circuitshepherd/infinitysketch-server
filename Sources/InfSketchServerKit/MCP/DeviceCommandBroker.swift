@@ -163,7 +163,7 @@ public actor DeviceCommandBroker {
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                           capability: capability, allowStripping: true)
         } catch DeviceCommandError.deviceFailed(let reason)
-            where reason.hasPrefix("cannotReconstructRequest") {
+            where reason.hasPrefix(BlobOmissionWire.cannotReconstructRequestReason) {
             // The device lost its copy (relaunch, eviction) or the ledger drifted past it — a
             // CACHE problem, not an op problem, so it must not surface as a tool error. Forget
             // what we thought it held and retry the SAME op once, whole. A second failure is a
@@ -217,7 +217,7 @@ public actor DeviceCommandBroker {
             if case .blob = $0 { return true } else { return false }
         }
         guard omittedSomething else { return (docBytes, nil) }
-        return (stripped.encoded(), "strippedDoc")
+        return (stripped.encoded(), BlobOmissionWire.strippedDocKind)
     }
 
     private func rememberSentDoc(connectionId: UUID, docId: String, bytes: Data) {
