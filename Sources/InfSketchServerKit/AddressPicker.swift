@@ -23,9 +23,23 @@ public struct AddressPicker: Sendable {
         "http://\(ip):\(port)/join"
     }
 
+    /// The url an AGENT is given: this server's MCP endpoint on the same address the code carries.
+    ///
+    /// An agent does not scan anything — it wants one string to put in a config file — so the
+    /// terminal prints this beside the code rather than drawing a second one.
+    public static func mcpURL(ip: String, port: UInt16) -> String {
+        "http://\(ip):\(port)/mcp"
+    }
+
     public var currentURL: String? {
         candidates.indices.contains(selection)
             ? Self.joinURL(ip: candidates[selection].ip, port: port)
+            : nil
+    }
+
+    public var currentMCPURL: String? {
+        candidates.indices.contains(selection)
+            ? Self.mcpURL(ip: candidates[selection].ip, port: port)
             : nil
     }
 

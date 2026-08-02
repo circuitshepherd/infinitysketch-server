@@ -183,6 +183,37 @@ public actor MCPAdapter {
         return server
     }
 
+    // MARK: - Request validation
+
+    /// The SDK's default pipeline with its `Host` check removed, so an agent on ANOTHER MACHINE
+    /// can reach `/mcp` — the whole point of a server that already advertises itself on the LAN
+    /// for devices.
+    ///
+    /// `StatefulHTTPServerTransport` defaults to `OriginValidator.localhost()`, which allows only
+    /// `127.0.0.1`, `localhost` and `[::1]` in the `Host` header. That is DNS-rebinding protection:
+    /// it stops a WEB PAGE the user visits from scripting a server bound to their own loopback.
+    /// It is NOT access control, and it never was — a direct client simply sends the header it
+    /// likes, which is how this was diagnosed (the same LAN request succeeded with `Host` set to
+    /// `127.0.0.1`). So what it actually bought here was refusing honest remote agents while
+    /// stopping no attacker who had already reached the port.
+    ///
+    /// **The four remaining validators are the SDK's own defaults, restated because passing a
+    /// pipeline REPLACES the whole thing rather than amending it.** Dropping one by accident would
+    /// not fail any MCP call — the transport would merely be more permissive — so
+    /// `MCPHostAccessTests.theOtherDefaultValidatorsSurvive` asserts each still refuses what it is
+    /// for. Re-check this list when the SDK is updated.
+    ///
+    /// This server has NO AUTHENTICATION, so anything that can reach the port now gets the full
+    /// tool surface, `delete_doc` included. That is the same exposure the device sync port has
+    /// always had, and it is a deliberate development-tool trade — do not add auth here without
+    /// deciding what it means for the app's own connection too.
+    static let validationPipeline = StandardValidationPipeline(validators: [
+        AcceptHeaderValidator(mode: .sseRequired),
+        ContentTypeValidator(),
+        ProtocolVersionValidator(),
+        SessionValidator(),
+    ])
+
     // MARK: - HTTP entry point (called by MCPMount)
 
     /// Routes one bridged MCP HTTP request, mirroring the SDK's own
@@ -225,7 +256,8 @@ public actor MCPAdapter {
 
         let newSessionID = UUID().uuidString
         let transport = StatefulHTTPServerTransport(
-            sessionIDGenerator: FixedSessionIDGenerator(sessionID: newSessionID))
+            sessionIDGenerator: FixedSessionIDGenerator(sessionID: newSessionID),
+            validationPipeline: Self.validationPipeline)
         let server = await makeServer()
         try? await server.start(transport: transport)
         sessions[newSessionID] = Session(server: server, transport: transport, lastAccessedAt: .now)
