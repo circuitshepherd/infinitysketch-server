@@ -275,7 +275,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // Frame 1: the descriptor announce (spec travels inline on this very
         // frame — it is never chunked, only the doc-bytes bulk field is).
         guard case .text(let announce) = try await receiveFrame(),
-              case .strokeOpRequest(let requestId, "sample", .transfer(let d), let announcedSpec)
+              case .strokeOpRequest(let requestId, "sample", .transfer(let d), let announcedSpec, _)
                 = try ServerMessage(jsonText: announce)
         else { Issue.record("expected strokeOpRequest descriptor"); return }
         #expect(d.totalBytes == bigBytes.count)
@@ -305,7 +305,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         }
         #expect(try ServerMessage(jsonText: endText) == .transferEnd(transferId: d.transferId))
         let resolved = try reassembler.consume(.text(endText))
-        guard case .strokeOpRequest(let resolvedRequestId, "sample", .inline(let resolvedBytes), let resolvedSpec) = resolved
+        guard case .strokeOpRequest(let resolvedRequestId, "sample", .inline(let resolvedBytes), let resolvedSpec, _) = resolved
         else { Issue.record("expected resolved strokeOpRequest"); return }
         #expect(resolvedRequestId == requestId)
         #expect(resolvedBytes == bigBytes)

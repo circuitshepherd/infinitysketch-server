@@ -15,7 +15,7 @@ public enum WireProtocol {
     /// happily until the moment some other device deletes a document it is subscribed to, at which
     /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
-    public static let version = 6
+    public static let version = 7
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -440,7 +440,13 @@ public enum ServerMessage: Equatable, Sendable {
     case frameAvailable(docId: String, seq: Int)
     case watchers(docId: String, count: Int)
     case createDocRequest(requestId: UInt32, docId: String)
-    case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data)
+    /// `payloadKind` names what the request's `payload` IS — byte-for-byte the `strokeOpReply`
+    /// pattern: nil means a whole document; "strippedDoc" means the binary `StrippedDocument`,
+    /// stripped against the bytes this connection was last sent for this doc (M4). The version
+    /// gate makes an absent kind from an older peer unreachable, but nil stays the whole-document
+    /// meaning regardless.
+    case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data,
+                         payloadKind: String? = nil)
     case subscribeFailed(docId: String, reason: String)
     /// The document was deleted on the server (by another device). Pushed to every live
     /// subscriber so a device holding the document can keep its copy as a LOCAL-ONLY document
@@ -450,7 +456,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind
     }
 
     public init(from decoder: any Decoder) throws {
@@ -519,11 +525,12 @@ extension ServerMessage: Codable {
             } else {
                 payload = .inline(try c.decode(Data.self, forKey: .data))
             }
-            self = .strokeOpRequest(
-                requestId: try c.decode(UInt32.self, forKey: .requestId),
-                docId: try c.decode(String.self, forKey: .docId),
-                payload: payload,
-                spec: try c.decode(Data.self, forKey: .spec))
+            let requestId = try c.decode(UInt32.self, forKey: .requestId)
+            let docId = try c.decode(String.self, forKey: .docId)
+            let spec = try c.decode(Data.self, forKey: .spec)
+            let payloadKind = try c.decodeIfPresent(String.self, forKey: .payloadKind)
+            self = .strokeOpRequest(requestId: requestId, docId: docId, payload: payload,
+                                    spec: spec, payloadKind: payloadKind)
         case "docDeleted":
             self = .docDeleted(docId: try c.decode(String.self, forKey: .docId))
         case "subscribeFailed":
@@ -597,7 +604,7 @@ extension ServerMessage: Codable {
             try c.encode("createDocRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
-        case .strokeOpRequest(let requestId, let docId, let payload, let spec):
+        case .strokeOpRequest(let requestId, let docId, let payload, let spec, let payloadKind):
             try c.encode("strokeOpRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
@@ -606,6 +613,7 @@ extension ServerMessage: Codable {
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
             try c.encode(spec, forKey: .spec)
+            try c.encodeIfPresent(payloadKind, forKey: .payloadKind)
         case .docDeleted(let docId):
             try c.encode("docDeleted", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -728,7 +736,7 @@ extension ServerMessage: TransferCarrying {
         switch self {
         case .subscribed(_, _, let snapshot): return snapshot.inlineData
         case .event(_, _, _, _, let payload): return payload.bulk.inlineData
-        case .strokeOpRequest(_, _, let payload, _): return payload.inlineData
+        case .strokeOpRequest(_, _, let payload, _, _): return payload.inlineData
         default: return nil
         }
     }
@@ -739,9 +747,13 @@ extension ServerMessage: TransferCarrying {
         case .event(let docId, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId,
                           payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
-        case .strokeOpRequest(let requestId, let docId, _, let spec):
+        case .strokeOpRequest(let requestId, let docId, _, let spec, let payloadKind):
+            // The kind names what the payload IS and must survive the move to a transfer
+            // descriptor — dropped here, a chunked stripped request would be read as a whole
+            // document and fail at decode (the reply's kind survives chunking the same way).
             return .strokeOpRequest(requestId: requestId, docId: docId,
-                                     payload: .transfer(descriptor), spec: spec)
+                                     payload: .transfer(descriptor), spec: spec,
+                                     payloadKind: payloadKind)
         default:
             return self
         }
@@ -752,7 +764,7 @@ extension ServerMessage: TransferCarrying {
         case .event(_, _, _, _, let payload):
             if case .transfer(let d) = payload.bulk { return d }
             return nil
-        case .strokeOpRequest(_, _, .transfer(let d), _): return d
+        case .strokeOpRequest(_, _, .transfer(let d), _, _): return d
         default: return nil
         }
     }
@@ -763,9 +775,12 @@ extension ServerMessage: TransferCarrying {
         case .event(let docId, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId,
                           payload: OpPayload(type: payload.type, data: bytes))
-        case .strokeOpRequest(let requestId, let docId, _, let spec):
+        case .strokeOpRequest(let requestId, let docId, _, let spec, let payloadKind):
+            // The RESOLVED side of the chunking round trip: the kind rode the descriptor message
+            // and must land back beside the reassembled bytes.
             return .strokeOpRequest(requestId: requestId, docId: docId,
-                                     payload: .inline(bytes), spec: spec)
+                                     payload: .inline(bytes), spec: spec,
+                                     payloadKind: payloadKind)
         default:
             return self
         }

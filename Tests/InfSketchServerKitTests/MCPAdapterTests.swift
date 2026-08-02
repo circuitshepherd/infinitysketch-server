@@ -419,7 +419,7 @@ private actor FakeStrokeOpDevice {
     private func pumpLoop() async {
         while true {
             guard let message = try? await Self.receiveOne(ws) else { return }
-            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec) = message else { continue }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, _) = message else { continue }
             receivedRequests.append(ReceivedRequest(
                 requestId: requestId, docId: docId, docBytes: payload.inlineData ?? Data(), spec: spec))
             switch autoReply {

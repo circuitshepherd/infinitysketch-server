@@ -11,13 +11,13 @@ final class ProvideContentBrokerTests: XCTestCase {
         let seen = Seen()
 
         await broker.register(connectionId: idA, deviceId: "devA", capabilities: ["provideContent"]) { msg in
-            if case .strokeOpRequest(let requestId, _, _, _) = msg {
+            if case .strokeOpRequest(let requestId, _, _, _, _) = msg {
                 Task { await seen.note(idA); await broker.handleReply(
                     requestId: requestId, bytes: Data("A".utf8), failureReason: nil) }
             }
         }
         await broker.register(connectionId: idB, deviceId: "devB", capabilities: ["provideContent"]) { msg in
-            if case .strokeOpRequest(let requestId, _, _, _) = msg {
+            if case .strokeOpRequest(let requestId, _, _, _, _) = msg {
                 Task { await seen.note(idB); await broker.handleReply(
                     requestId: requestId, bytes: Data("B".utf8), failureReason: nil) }
             }
@@ -57,7 +57,7 @@ final class ProvideContentBrokerTests: XCTestCase {
     func testDeviceFailurePropagates() async throws {
         let broker = DeviceCommandBroker(createTimeout: .seconds(1), strokeOpTimeout: .seconds(1))
         await broker.register(connectionId: UUID(), deviceId: "devA", capabilities: ["provideContent"]) { msg in
-            if case .strokeOpRequest(let requestId, _, _, _) = msg {
+            if case .strokeOpRequest(let requestId, _, _, _, _) = msg {
                 Task { await broker.handleReply(requestId: requestId, bytes: nil, failureReason: "noSuchDocument") }
             }
         }

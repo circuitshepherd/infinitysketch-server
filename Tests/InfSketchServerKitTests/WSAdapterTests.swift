@@ -535,7 +535,7 @@ private struct ServerMessageReader {
 
         // Address the request to THIS device's id — it must reach the client as a wire frame.
         let task = Task { try await broker.requestProvideContent(docId: "doc-1", deviceId: "device-A") }
-        guard case .strokeOpRequest(let requestId, "doc-1", _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "doc-1", _, _, _) = try await reader.next() else {
             Issue.record("expected a strokeOpRequest frame addressed to device-A"); return
         }
         // The client answers over the wire; the reply must resolve the pending request.
@@ -649,7 +649,7 @@ private struct ServerMessageReader {
         let task = Task {
             try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
         }
-        guard case .strokeOpRequest(let requestId, _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         let meta = Data(#"{"active":false,"elements":[]}"#.utf8)
@@ -671,7 +671,7 @@ private struct ServerMessageReader {
         let task = Task {
             try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
         }
-        guard case .strokeOpRequest(let requestId, _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(
@@ -773,7 +773,7 @@ private struct ServerMessageReader {
         let docBytes = Data("stroke-doc-bytes".utf8)
         let spec = Data("stroke-spec-bytes".utf8)
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: docBytes, spec: spec) }
-        guard case .strokeOpRequest(let requestId, "d", .inline(let sentBytes), let sentSpec) = try await reader.next()
+        guard case .strokeOpRequest(let requestId, "d", .inline(let sentBytes), let sentSpec, _) = try await reader.next()
         else {
             Issue.record("expected strokeOpRequest frame"); return
         }
@@ -799,7 +799,7 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         // The client answers over the wire; Connection.dispatch must route
@@ -823,7 +823,7 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         let metaJSON = Data(#"{"pixelSize":[512,512],"scale":2}"#.utf8)
@@ -855,7 +855,7 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(requestId: requestId, docId: "d", payload: nil, meta: nil, failureReason: nil))
@@ -875,7 +875,7 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(

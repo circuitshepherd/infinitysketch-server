@@ -80,6 +80,15 @@ public actor DeviceCommandBroker {
     /// Ordered oldest → newest; the last capability-matching element is the
     /// most-recently-registered connection, which request methods prefer.
     private var connections: [Connection] = []
+    /// The document bytes most recently SENT to each connection, per docId — the base a
+    /// stripped REQUEST is cut against (M4, spec 2026-08-03-request-blob-stripping-design.md).
+    /// Agent ops come in bursts against one document, and each request is itself the shared
+    /// document the next one needs; the first op pays full price, every later one ships the
+    /// delta. Updated at SEND time, optimistically: drift from a failed round trip is caught by
+    /// the digest checks and costs one whole resend (`cannotReconstructRequest` below). Ordered
+    /// oldest → newest per connection for LRU eviction under `ledgerBudgetPerConnection`.
+    private var lastSentDocs: [UUID: [(docId: String, bytes: Data)]] = [:]
+    private let ledgerBudgetPerConnection = 32 * 1024 * 1024   // the retainedBases budget
     private var pending: [UInt32: PendingRequest] = [:]
     /// docIds with a request currently in flight — the "requestInFlight"
     /// guard. Shared across request kinds by construction (keyed only by
@@ -116,6 +125,7 @@ public actor DeviceCommandBroker {
     /// requests immediately with .deviceTimeout.
     public func unregister(connectionId: UUID) {
         connections.removeAll { $0.id == connectionId }
+        lastSentDocs[connectionId] = nil
         let affected = pending.filter { $0.value.connectionId == connectionId }.map(\.key)
         for requestId in affected {
             guard let entry = completePending(requestId) else { continue }
@@ -126,7 +136,7 @@ public actor DeviceCommandBroker {
     /// MCP `create_doc` entry point. Throws DeviceCommandError.
     public func requestCreation(docId: String) async throws -> Data {
         try await performRequest(docId: docId, capability: "createDoc", timeout: createTimeout) {
-            connection, requestId in
+            _, connection, requestId in
             connection.send(.createDocRequest(requestId: requestId, docId: docId))
         }.bytes
     }
@@ -149,11 +159,81 @@ public actor DeviceCommandBroker {
     public func requestStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes"
     ) async throws -> StrokeOpReply {
+        do {
+            return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                          capability: capability, allowStripping: true)
+        } catch DeviceCommandError.deviceFailed(let reason)
+            where reason.hasPrefix("cannotReconstructRequest") {
+            // The device lost its copy (relaunch, eviction) or the ledger drifted past it — a
+            // CACHE problem, not an op problem, so it must not surface as a tool error. Forget
+            // what we thought it held and retry the SAME op once, whole. A second failure is a
+            // genuine device failure and surfaces normally.
+            forgetSentDoc(docId: docId)
+            return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                          capability: capability, allowStripping: false)
+        }
+    }
+
+    private func sendStrokeOp(
+        docId: String, docBytes: Data, spec: Data, capability: String, allowStripping: Bool
+    ) async throws -> StrokeOpReply {
         try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
-                                 sentBytes: docBytes) {
-            connection, requestId in
-            connection.send(
-                .strokeOpRequest(requestId: requestId, docId: docId, payload: .inline(docBytes), spec: spec))
+                                 sentBytes: docBytes) { broker, connection, requestId in
+            // The strip decision needs the CHOSEN connection, so it lives here — the closure
+            // runs isolated on the broker, which is what lets it read and update the ledger
+            // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
+            // the device's stripped REPLY is spliced back from (M2), and the device replies
+            // against the whole content it reconstructs, never against what rode the wire.
+            let payload = broker.requestPayload(for: connection, docId: docId,
+                                                docBytes: docBytes,
+                                                allowStripping: allowStripping)
+            connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
+                                             payload: .inline(payload.bytes), spec: spec,
+                                             payloadKind: payload.kind))
+        }
+    }
+
+    /// Decide what a request's payload IS for this connection, and keep the ledger current.
+    /// Nonisolated-unsafe free of suspension: called synchronously on the actor from inside
+    /// `performRequest`'s send closure.
+    private func requestPayload(for connection: Connection, docId: String, docBytes: Data,
+                                allowStripping: Bool) -> (bytes: Data, kind: String?) {
+        // Empty docBytes (provideContent) is never stripped and never ledgered — an empty entry
+        // would poison the next strip. The capability gate mirrors the broadcast direction:
+        // a peer that has not said `blobOmission` gets whole documents forever.
+        guard !docBytes.isEmpty else { return (docBytes, nil) }
+        defer { rememberSentDoc(connectionId: connection.id, docId: docId, bytes: docBytes) }
+        guard allowStripping,
+              connection.capabilities.contains("blobOmission"),
+              let base = lastSentDocs[connection.id]?.first(where: { $0.docId == docId })?.bytes
+        else { return (docBytes, nil) }
+        let stripped = StrippedDocument.strip(
+            document: docBytes, against: base,
+            basedOn: Data(SHA256.hash(data: base)),
+            originalSHA256: Data(SHA256.hash(data: docBytes)))
+        // Only pay for the alternative payload when something was actually left out — a document
+        // with no shared blobs strips to one literal part, the same bytes in a wrapper (M1's rule).
+        let omittedSomething = stripped.parts.contains {
+            if case .blob = $0 { return true } else { return false }
+        }
+        guard omittedSomething else { return (docBytes, nil) }
+        return (stripped.encoded(), "strippedDoc")
+    }
+
+    private func rememberSentDoc(connectionId: UUID, docId: String, bytes: Data) {
+        var entries = lastSentDocs[connectionId] ?? []
+        entries.removeAll { $0.docId == docId }
+        entries.append((docId, bytes))
+        var total = entries.reduce(0) { $0 + $1.bytes.count }
+        while total > ledgerBudgetPerConnection, !entries.isEmpty {
+            total -= entries.removeFirst().bytes.count
+        }
+        lastSentDocs[connectionId] = entries
+    }
+
+    private func forgetSentDoc(docId: String) {
+        for key in lastSentDocs.keys {
+            lastSentDocs[key]?.removeAll { $0.docId == docId }
         }
     }
 
@@ -169,7 +249,7 @@ public actor DeviceCommandBroker {
         return try await performRequest(
             docId: docId, capability: "provideContent", timeout: strokeOpTimeout,
             deviceId: deviceId
-        ) { connection, requestId in
+        ) { _, connection, requestId in
             connection.send(.strokeOpRequest(
                 requestId: requestId, docId: docId, payload: .inline(Data()), spec: spec))
         }.bytes
@@ -229,7 +309,7 @@ public actor DeviceCommandBroker {
     private func performRequest(
         docId: String, capability: String, timeout: Duration, deviceId: String? = nil,
         sentBytes: Data = Data(),
-        send: @escaping (Connection, UInt32) -> Void
+        send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
         guard let connection = connections.last(where: {
             $0.capabilities.contains(capability) && (deviceId == nil || $0.deviceId == deviceId)
@@ -255,7 +335,7 @@ public actor DeviceCommandBroker {
                 docId: docId, connectionId: connection.id, continuation: continuation,
                 sentBytes: sentBytes)
 
-            send(connection, requestId)
+            send(self, connection, requestId)
 
             let timeoutDuration = timeout
             let timeoutTask = Task { [weak self] in

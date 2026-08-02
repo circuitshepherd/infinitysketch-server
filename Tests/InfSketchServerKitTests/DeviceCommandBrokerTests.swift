@@ -169,7 +169,7 @@ private actor SentBox {
         let spec = Data("spec-bytes".utf8)
         async let result = broker.requestStrokeOp(docId: "D", docBytes: docBytes, spec: spec)
         let request = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, "D", .inline(let sentBytes), let sentSpec) = request else {
+        guard case .strokeOpRequest(let rid, "D", .inline(let sentBytes), let sentSpec, _) = request else {
             Issue.record("wrong msg: \(request)"); return
         }
         #expect(sentBytes == docBytes)
@@ -218,7 +218,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
-        guard case .strokeOpRequest(let strokeRid, "D2", _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
         await broker.handleReply(requestId: strokeRid, bytes: Data("stroke".utf8), failureReason: nil)
@@ -255,7 +255,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, "D", _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let rid, "D", _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
 
@@ -307,7 +307,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
-        guard case .strokeOpRequest(let strokeRid, "D2", _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
 
@@ -349,7 +349,7 @@ private actor SentBox {
             try await broker.requestStrokeOp(docId: "D", docBytes: sentBytes, spec: Data("{}".utf8))
         }
         let request = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, _, _, _) = request else {
+        guard case .strokeOpRequest(let rid, _, _, _, _) = request else {
             Issue.record("wrong message"); return .failure(DeviceCommandBroker.DeviceCommandError.deviceTimeout)
         }
         let reply = makeReply(rid)
@@ -451,5 +451,172 @@ private actor SentBox {
             (bytes: produced, kind: nil)
         }
         #expect(try result.get() == produced)
+    }
+}
+
+/// M4: the REQUEST direction leaves out the blobs this connection was already sent
+/// (spec 2026-08-03-request-blob-stripping-design.md). Agent ops come in bursts against one
+/// document, and each request is itself the base the next one is stripped against — the first op
+/// pays full price, every later one ships the delta. A device that lost its copy answers
+/// `cannotReconstructRequest`, and the broker retries the SAME op once, whole: a cache problem
+/// must never surface as a tool error.
+@Suite struct StrippedRequestTests {
+    private func document(blobId: UUID, tail: String) -> Data {
+        let payload = String(repeating: "ab\\/cd", count: 4000)
+        return Data("""
+        {"a":"\(tail)","pastedImagesData":[{"data":"\(payload)","id":"\(blobId.uuidString)",\
+        "thumbnailData":"AA=="}]}
+        """.utf8)
+    }
+
+    private actor Outbox {
+        private var messages: [ServerMessage] = []
+        func append(_ m: ServerMessage) { messages.append(m) }
+        func message(at index: Int) async -> ServerMessage? {
+            for _ in 0..<100 {
+                if messages.count > index { return messages[index] }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            return nil
+        }
+    }
+
+    private func makeBrokerAndOutbox(capabilities: Set<String>) async -> (DeviceCommandBroker, Outbox) {
+        let broker = DeviceCommandBroker()
+        let outbox = Outbox()
+        await broker.register(connectionId: UUID(), capabilities: capabilities) { msg in
+            Task { await outbox.append(msg) }
+        }
+        return (broker, outbox)
+    }
+
+    private func completeRequest(_ broker: DeviceCommandBroker, _ message: ServerMessage?) async -> UInt32? {
+        guard case .strokeOpRequest(let rid, _, _, _, _) = message else { return nil }
+        await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), meta: nil,
+                                 failureReason: nil, payloadKind: nil)
+        return rid
+    }
+
+    /// The heart of it: first request whole, second stripped — and the stripped payload restores
+    /// against the FIRST request's bytes to exactly the second document.
+    @Test func theSecondRequestIsStrippedAgainstTheFirst() async throws {
+        let id = UUID()
+        let doc1 = document(blobId: id, tail: "one")
+        let doc2 = document(blobId: id, tail: "two")
+        let (broker, outbox) = await makeBrokerAndOutbox(
+            capabilities: ["authorStrokes", "blobOmission"])
+
+        let t1 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc1, spec: Data("{}".utf8)) }
+        let first = await outbox.message(at: 0)
+        guard case .strokeOpRequest(_, _, .inline(let bytes1), _, let kind1) = first else {
+            Issue.record("no first request"); return
+        }
+        #expect(kind1 == nil, "the first request has no shared base and must be whole")
+        #expect(bytes1 == doc1)
+        _ = await completeRequest(broker, first)
+        _ = try await t1.value
+
+        let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc2, spec: Data("{}".utf8)) }
+        let second = await outbox.message(at: 1)
+        guard case .strokeOpRequest(_, _, .inline(let bytes2), _, let kind2) = second else {
+            Issue.record("no second request"); return
+        }
+        _ = await completeRequest(broker, second)
+        _ = try await t2.value
+
+        #expect(kind2 == "strippedDoc")
+        #expect(bytes2.count < doc2.count / 2, "the blob must actually be off the wire")
+        let restored = try StrippedDocument(encoded: bytes2).restore(using: doc1)
+        #expect(restored == doc2, "the device must be able to rebuild the exact document")
+    }
+
+    /// A peer that never said `blobOmission` gets whole documents forever — `infsketch-demo`
+    /// subscribes to this wire without knowing what a StrippedDocument is.
+    @Test func aConnectionWithoutTheCapabilityAlwaysGetsWhole() async throws {
+        let id = UUID()
+        let (broker, outbox) = await makeBrokerAndOutbox(capabilities: ["authorStrokes"])
+
+        for (i, tail) in ["one", "two"].enumerated() {
+            let doc = document(blobId: id, tail: tail)
+            let t = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc, spec: Data("{}".utf8)) }
+            let msg = await outbox.message(at: i)
+            guard case .strokeOpRequest(_, _, .inline(let bytes), _, let kind) = msg else {
+                Issue.record("no request \(i)"); return
+            }
+            #expect(kind == nil)
+            #expect(bytes == doc)
+            _ = await completeRequest(broker, msg)
+            _ = try await t.value
+        }
+    }
+
+    /// The device lost its copy: `cannotReconstructRequest` triggers exactly ONE whole retry of
+    /// the same op, transparent to the agent — and the ledger resets, so the retry re-seeds it.
+    @Test func aCannotReconstructReplyRetriesOnceWhole() async throws {
+        let id = UUID()
+        let doc1 = document(blobId: id, tail: "one")
+        let doc2 = document(blobId: id, tail: "two")
+        let (broker, outbox) = await makeBrokerAndOutbox(
+            capabilities: ["authorStrokes", "blobOmission"])
+
+        let t1 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc1, spec: Data("{}".utf8)) }
+        _ = await completeRequest(broker, await outbox.message(at: 0))
+        _ = try await t1.value
+
+        let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc2, spec: Data("{}".utf8)) }
+        let strippedReq = await outbox.message(at: 1)
+        guard case .strokeOpRequest(let rid2, _, _, _, "strippedDoc") = strippedReq else {
+            Issue.record("second request was not stripped"); return
+        }
+        // The device cannot rebuild — relaunched, cache gone.
+        await broker.handleReply(requestId: rid2, bytes: nil, meta: nil,
+                                 failureReason: "cannotReconstructRequest: no retained copy",
+                                 payloadKind: nil)
+        // The broker must retry the SAME op, whole, without surfacing anything.
+        let retry = await outbox.message(at: 2)
+        guard case .strokeOpRequest(_, _, .inline(let retryBytes), _, let retryKind) = retry else {
+            Issue.record("no whole retry was sent"); return
+        }
+        #expect(retryKind == nil, "the retry must be whole")
+        #expect(retryBytes == doc2)
+        _ = await completeRequest(broker, retry)
+        let reply = try await t2.value
+        #expect(reply.bytes == Data("ok".utf8), "the agent sees ONE successful op")
+    }
+
+    /// `provideContent` sends EMPTY docBytes — never stripped, and never allowed to poison the
+    /// ledger: a stripping-eligible request after it must still strip against the last REAL doc.
+    @Test func emptyRequestBytesNeitherStripNorPoisonTheLedger() async throws {
+        let id = UUID()
+        let doc1 = document(blobId: id, tail: "one")
+        let doc3 = document(blobId: id, tail: "three")
+        let (broker, outbox) = await makeBrokerAndOutbox(
+            capabilities: ["authorStrokes", "blobOmission"])
+
+        let t1 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc1, spec: Data("{}".utf8)) }
+        _ = await completeRequest(broker, await outbox.message(at: 0))
+        _ = try await t1.value
+
+        let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data("{}".utf8)) }
+        let empty = await outbox.message(at: 1)
+        guard case .strokeOpRequest(_, _, .inline(let emptyBytes), _, let emptyKind) = empty else {
+            Issue.record("no empty request"); return
+        }
+        #expect(emptyBytes.isEmpty)
+        #expect(emptyKind == nil)
+        _ = await completeRequest(broker, empty)
+        _ = try await t2.value
+
+        let t3 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc3, spec: Data("{}".utf8)) }
+        let third = await outbox.message(at: 2)
+        guard case .strokeOpRequest(_, _, .inline(let bytes3), _, let kind3) = third else {
+            Issue.record("no third request"); return
+        }
+        _ = await completeRequest(broker, third)
+        _ = try await t3.value
+
+        #expect(kind3 == "strippedDoc", "the empty request must not have clobbered the base")
+        let restored = try StrippedDocument(encoded: bytes3).restore(using: doc1)
+        #expect(restored == doc3)
     }
 }
