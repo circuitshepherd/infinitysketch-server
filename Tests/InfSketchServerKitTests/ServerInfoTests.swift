@@ -3,6 +3,6 @@ import Testing
 
 @Suite struct ServerInfoTests {
     @Test func serverInfoHasVersion() {
-        #expect(ServerInfo.version == "0.1.0")
+        #expect(ServerInfo.version == "1.0.0")
     }
 }
