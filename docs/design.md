@@ -1,7 +1,9 @@
 # infsketch-server — project scaffold design
 
 **Date:** 2026-07-08
-**Status:** implemented (initial scaffold)
+**Status:** historical — the day-one scaffold design, kept as history. The open questions below
+(role, wire format, networking stack, CI) have all long since been answered; see `README.md` for
+the current state and `protocol.md` for the wire protocol.
 
 ## Purpose
 
