@@ -81,10 +81,14 @@ nonisolated(unsafe) var openMessage: String?
 /// Whether a keypress can reach this process at all. ONE predicate, read by both the hint below and
 /// the reader further down, so the offer and the ability to honour it cannot drift apart: under
 /// `scripts/worktree-server` stdin is /dev/null, and the log was telling its reader to press keys
-/// that nothing would ever read. On Windows there are no candidates, so the hint never prints.
+/// that nothing would ever read. On Windows the terminal handling is not built at all.
 /// A function rather than a computed `var`: a top-level variable in `main.swift` is implicitly
 /// main-actor isolated, which `drawJoinCode` — an ordinary global function — cannot read.
-func addressSwitchingIsPossible() -> Bool {
+///
+/// It is deliberately NOT conditional on how many addresses there are. It was, and that made `q` —
+/// the documented way to stop the server — present on a machine with two addresses and absent on
+/// one with a single address, which is not a difference a user can be expected to know about.
+func keyReadingIsPossible() -> Bool {
     #if os(Windows)
     return false
     #else
@@ -105,6 +109,7 @@ func drawJoinCode() {
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
         text += "  \(AddressPicker.mcpURL(ip: "127.0.0.1", port: picker.port))\n"
+        if keyReadingIsPossible() { text += "    \(picker.keyHint)\n" }
         if let openMessage { text += "\n\(openMessage)\n" }
         print(text, terminator: "")
         fflush(nil)
@@ -122,11 +127,10 @@ func drawJoinCode() {
             let marker = index == picker.selection ? "▸" : " "
             text += "  \(marker) \(index + 1)) \(candidate.ip)  (\(candidate.interface))\n"
         }
-        if addressSwitchingIsPossible() {
-            text += "    ↑/↓ or 1–\(min(9, picker.candidates.count)) to switch"
-                + " · o to open in browser · q to stop showing\n"
-        }
     }
+    // The wording is `AddressPicker`'s, beside the code that honours the keys, so the line can
+    // never offer one the reader ignores.
+    if keyReadingIsPossible() { text += "    \(picker.keyHint)\n" }
     if let openMessage { text += "\n\(openMessage)\n" }
     print(text, terminator: "")
     // Flushed by hand: stdout is block-buffered when it is not a terminal, so under
@@ -180,9 +184,24 @@ func readExactly(_ count: Int, into buffer: inout [UInt8]) -> Bool {
     return true
 }
 
-// The picker needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this never
+/// Stops the server, from the reader thread, in answer to `q`.
+///
+/// The terminal is put back by the `atexit` handler the reader registers: `exit` does not unwind
+/// this thread, so its `defer` never runs. `exit` rather than `_exit` for exactly that reason —
+/// this is not a signal handler and there is nothing here that has to be async-signal-safe.
+///
+/// In-flight connections are dropped, which is what Ctrl-C has always done. A submit that reached
+/// `DocumentSession` has already been written by then, so nothing durable is lost.
+func quitFromKeyboard() -> Never {
+    // Below the drawn block rather than inside it: nothing will redraw over this.
+    print("\ninfsketch-server stopped.")
+    fflush(nil)
+    exit(0)
+}
+
+// The reader needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this never
 // arms at all and the first code simply stays in the log with the server running.
-if addressSwitchingIsPossible(), picker.candidates.count > 1 {
+if keyReadingIsPossible() {
     // A REAL THREAD, not `Task.detached`. `read` BLOCKS until a key arrives — which is to say, for
     // the whole life of the process — and a detached Task holds a cooperative-pool thread while it
     // does. The pool is sized to the core count, so on a single-core host that is the ONE thread the
@@ -207,16 +226,22 @@ if addressSwitchingIsPossible(), picker.candidates.count > 1 {
         var sequence = [UInt8](repeating: 0, count: 2)
         while true {
             guard readExactly(1, into: &byte) else { return }   // EOF: the terminal went away
-            var key: AddressPicker.Key?
-            switch byte[0] {
-            case 0x1B:                                    // Esc — an arrow arrives as Esc [ A / B
+            let key: AddressPicker.Key?
+            if byte[0] == 0x1B {                          // Esc — an arrow arrives as Esc [ A / B
                 guard readExactly(2, into: &sequence) else { return }
-                guard sequence[0] == UInt8(ascii: "[") else { continue }
-                key = sequence[1] == UInt8(ascii: "A") ? .up
-                    : sequence[1] == UInt8(ascii: "B") ? .down : nil
-            case UInt8(ascii: "q"), 0x03:                 // q, or Ctrl-C if it reaches us as a byte
-                return
-            case UInt8(ascii: "o"):
+                key = AddressPicker.arrowKey(for: sequence)
+            } else {
+                key = AddressPicker.key(for: byte[0])
+            }
+            guard let key else { continue }
+            // What each key MEANS is the picker's, so this loop only carries out the answer. The
+            // `.none` case is why: redrawing on a key that changed nothing makes the block flicker.
+            switch picker.handle(key) {
+            case .none:
+                continue
+            case .redraw:
+                drawJoinCode()
+            case .openBrowser:
                 // Opens the SELECTED address's own page, so that page's `Host` header shows that
                 // address's code large — no query parameter, no shared state. The selection does
                 // not move, so this redraws for the message rather than for the block.
@@ -224,14 +249,9 @@ if addressSwitchingIsPossible(), picker.candidates.count > 1 {
                     openMessage = BrowserLauncher.message(for: BrowserLauncher.open(url), url: url)
                     drawJoinCode()
                 }
-                continue
-            case UInt8(ascii: "1")...UInt8(ascii: "9"):
-                key = .digit(Int(byte[0] - UInt8(ascii: "0")))
-            default:
-                key = nil
+            case .quit:
+                quitFromKeyboard()
             }
-            // Redraw only when the selection actually moved, or the block flickers on every key.
-            if let key, picker.handle(key) { drawJoinCode() }
         }
     }
 }
