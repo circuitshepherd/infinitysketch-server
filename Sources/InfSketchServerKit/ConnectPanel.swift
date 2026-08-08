@@ -107,10 +107,17 @@ public enum ConnectPanel {
         """
         <section id="connect">
         <style>
-          #connect { border: 1px solid rgba(128,128,128,0.3); border-radius: 10px;
+          /* Every var() carries a fallback ON PURPOSE. This panel's contract is that its style
+             travels with its markup, so it must still render standalone, without WebStyle.tokens
+             on the page — "degrades gracefully" rather than "identical alone".
+             WebStyleTests.theConnectPanelStillRendersStandalone pins that none here is
+             fallback-less. */
+          #connect { border: 1px solid var(--line, rgba(128,128,128,0.3));
+                     border-radius: var(--radius, 10px);
+                     background: var(--surface, transparent);
                      padding: 1rem 1.25rem; margin-bottom: 1.5rem; }
-          #connect h2 { font-size: 1rem; margin: 0 0 0.75rem; text-transform: uppercase;
-                        letter-spacing: 0.06em; color: gray; }
+          #connect h2 { font-size: 0.7rem; margin: 0 0 0.75rem; text-transform: uppercase;
+                        letter-spacing: 0.06em; color: var(--fg-dim, gray); font-weight: 600; }
           #connect .address { display: flex; gap: 1.25rem; align-items: flex-start;
                               flex-wrap: wrap; }
           /* `display: flex` above OUTRANKS the browser's own `[hidden] { display: none }`, so
@@ -123,16 +130,20 @@ public enum ConnectPanel {
           /* Beside the code, wrapping under it only on a genuinely narrow window. Without a
              `flex` here the block's own minimum width pushed it below the code every time. */
           #connect .meta { flex: 1 1 16rem; min-width: 0; }
-          #connect .ip { font-size: 1.25rem; font-weight: 600; }
-          #connect .iface { color: gray; font-size: 0.85rem; margin-bottom: 0.5rem; }
-          #connect .agent { font-size: 0.85rem; color: gray; margin: 0.75rem 0 0; }
-          #connect code { font-size: 0.9rem; }
-          #connect .hint { font-size: 0.85rem; color: gray; margin: 1rem 0 0.35rem; }
+          #connect .ip { font-size: 1.25rem; font-weight: 600;
+                         font-variant-numeric: tabular-nums; }
+          #connect .iface { color: var(--fg-dim, gray); font-size: 0.85rem; margin-bottom: 0.5rem; }
+          #connect .agent { font-size: 0.85rem; color: var(--fg-dim, gray); margin: 0.75rem 0 0; }
+          #connect code { font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+                          font-size: 0.9rem; }
+          #connect .hint { font-size: 0.85rem; color: var(--fg-dim, gray); margin: 1rem 0 0.35rem; }
           #connect .chips { display: flex; gap: 0.5rem; flex-wrap: wrap; }
           #connect .chip { font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem;
-                           border-radius: 999px; border: 1px solid rgba(128,128,128,0.4);
+                           border-radius: 999px;
+                           border: 1px solid var(--line, rgba(128,128,128,0.4));
                            background: transparent; color: inherit; cursor: pointer; }
-          #connect .chip.selected { border-color: #2a9d2a; color: #2a9d2a; font-weight: 600; }
+          #connect .chip.selected { border-color: var(--live, #2a9d2a);
+                                    color: var(--live, #2a9d2a); font-weight: 600; }
           #connect .copy { font: inherit; font-size: 0.75rem; margin-left: 0.4rem;
                            cursor: pointer; }
         </style>

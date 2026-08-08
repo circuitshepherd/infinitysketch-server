@@ -25,6 +25,23 @@ import Testing
         #expect(JoinPage.html(host: "h").localizedCaseInsensitiveContains("isn't installed"))
     }
 
+    /// The store link sits beside the silent-failure note, which is exactly where a device that
+    /// cannot open the scheme ends up. The id matches the app's own review links.
+    @Test func thePageOffersTheAppStore() {
+        let html = JoinPage.html(host: "h")
+        #expect(html.contains("https://apps.apple.com/app/id6736661584"))
+        #expect(html.localizedCaseInsensitiveContains("App Store"))
+    }
+
+    /// The join link must stay the DOMINANT action: the store is a fallback for a device that does
+    /// not have the app, so it may not be presented first.
+    @Test func theJoinLinkComesBeforeTheStoreLink() throws {
+        let html = JoinPage.html(host: "h")
+        let join = try #require(html.range(of: "infinitysketch://join"))
+        let store = try #require(html.range(of: "apps.apple.com"))
+        #expect(join.lowerBound < store.lowerBound)
+    }
+
     /// The host arrives from the network and reaches both an href and the page's text.
     @Test func theHostIsEscaped() {
         let html = JoinPage.html(host: "\"><script>alert(1)</script>")
