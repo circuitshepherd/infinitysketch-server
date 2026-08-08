@@ -48,6 +48,11 @@ import InfSketchWire
         #expect(html.contains("infsketch.wheelMode"))
     }
 
+    @Test func theResolutionPickerExistsAndPersists() {
+        #expect(html.contains("id=\"respx\""))
+        #expect(html.contains("infsketch.framePx"))
+    }
+
     @Test func thePageEmbedsTheRealViewportSource() {
         // Deleting the \#(viewportJS) interpolation leaves the parse test green
         // (it parses, never executes) — this pins the embed itself.
