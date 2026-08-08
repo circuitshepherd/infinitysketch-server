@@ -164,4 +164,80 @@ final class LiveDocIndexTests: XCTestCase {
         let listed = try await manager.listDocuments()
         XCTAssertTrue(listed.isEmpty)
     }
+
+    // MARK: - Announcing the change (the web page and the app browser both re-list on this)
+
+    /// Collect the status kinds emitted while `body` runs. Deterministic, no sleeps: the emit
+    /// yields into a buffered continuation before `unsubscribeStatus` finishes it, and a finished
+    /// AsyncStream still delivers what it already holds.
+    private func statusKinds(_ manager: SessionManager,
+                             during body: () async -> Void) async -> [String] {
+        let (events, token) = await manager.subscribeStatus()
+        let collector = Task { () -> [String] in
+            var kinds: [String] = []
+            for await message in events {
+                if case .statusEvent(let payload) = message { kinds.append(payload.kind) }
+            }
+            return kinds
+        }
+        await body()
+        await manager.unsubscribeStatus(token)
+        return await collector.value
+    }
+
+    /// **The bug this pins.** An advertisement changes what `/api/docs` and `listDocs` return, but
+    /// it used to announce NOTHING — so a web page already open, and another device's browser,
+    /// kept showing the list from before the device connected. Opening a document was what made
+    /// them appear, because the resulting push emits `docUpdated` and everything re-listed then.
+    func testAdvertisingAnnouncesTheChangedDocumentSet() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let kinds = await statusKinds(manager) {
+            await manager.applyAdvertisements([ad("Ghost")], connectionId: conn("devA"),
+                                              deviceId: "devA")
+        }
+        XCTAssertEqual(kinds, ["docsAdvertised"])
+    }
+
+    /// A device re-advertising the SAME set must stay silent. `advertiseLocalDocs` runs on every
+    /// connect and on every local file change, and a listener refetches the whole listing for each
+    /// event — so announcing a no-op would cost every watcher a round trip for nothing.
+    func testReAdvertisingAnIdenticalSetAnnouncesNothing() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: conn("devA"),
+                                          deviceId: "devA")
+
+        let kinds = await statusKinds(manager) {
+            await manager.applyAdvertisements([ad("Ghost")], connectionId: conn("devA"),
+                                              deviceId: "devA")
+        }
+        XCTAssertEqual(kinds, [])
+    }
+
+    /// The symmetric half: a device going offline REMOVES its metadata-only rows, and a listener
+    /// that is not told keeps offering documents nothing can serve.
+    func testADeviceGoingOfflineAnnouncesItsDocumentsLeaving() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("Ghost")], connectionId: conn("devA"),
+                                          deviceId: "devA")
+
+        let kinds = await statusKinds(manager) {
+            await manager.removeConnection(connectionId: self.conn("devA"), deviceId: "devA")
+        }
+        XCTAssertEqual(kinds, ["docsAdvertised"])
+    }
+
+    /// A close for a device that held nothing changes no listing, so it announces nothing.
+    func testAnEmptyDisconnectAnnouncesNothing() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let kinds = await statusKinds(manager) {
+            await manager.removeConnection(connectionId: self.conn("devB"), deviceId: "devB")
+        }
+        XCTAssertEqual(kinds, [])
+    }
 }

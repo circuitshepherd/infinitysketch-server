@@ -447,6 +447,7 @@ public actor SessionManager {
     /// document nobody can produce.
     public func applyAdvertisements(_ ads: [DocAdvertisement], connectionId: UUID, deviceId: String?) {
         guard let deviceId else { return }
+        let before = liveIndex
         // Track this connection as live for its device, so a LATER close of a DIFFERENT (stale)
         // connection for the same device can't wipe its advertisements (`removeConnection` below).
         deviceConnections[deviceId, default: []].insert(connectionId)
@@ -472,6 +473,7 @@ public actor SessionManager {
                     thumbnail: ad.thumbnail, holders: [deviceId])
             }
         }
+        announceLiveIndexChange(from: before)
     }
 
     /// M2c-1: a connection closed. Its device's documents disappear from the index only when
@@ -480,6 +482,7 @@ public actor SessionManager {
     /// close wipe the live connection's advertisements until it happened to re-advertise.
     public func removeConnection(connectionId: UUID, deviceId: String) {
         guard var live = deviceConnections[deviceId] else { return }
+        let before = liveIndex
         live.remove(connectionId)
         if live.isEmpty {
             deviceConnections.removeValue(forKey: deviceId)
@@ -487,6 +490,31 @@ public actor SessionManager {
         } else {
             deviceConnections[deviceId] = live
         }
+        announceLiveIndexChange(from: before)
+    }
+
+    /// Tell status listeners that the metadata-only half of the listing moved.
+    ///
+    /// **Without this a device could connect, advertise its whole library, and nobody was told.**
+    /// `/api/docs` and `listDocs` both merge the live index, so the new rows were there to be
+    /// read — but the web page re-renders only on a `statusEvent`, and the app's browser refetches
+    /// only on one, so both kept showing the listing from before the device arrived. What made
+    /// them appear was OPENING a document: that pushes, which emits `docUpdated`, which re-listed
+    /// everything including the advertisements. Reported as "the document list only appeared after
+    /// opening a document in the app" (Josef, 2026-08-08).
+    ///
+    /// Gated on the index having ACTUALLY changed, by value: `advertiseLocalDocs` re-sends a
+    /// device's complete set on every connect and on every local file change, and each event costs
+    /// every listener a full re-listing — so a re-advertisement of an identical set must be silent.
+    ///
+    /// ONE event for the batch rather than one per document, with an empty `docId`: a device with
+    /// a large library would otherwise emit an event per document into a bounded outbound buffer,
+    /// and no listener uses the id — both of them re-list the lot. `kind` is deliberately its own
+    /// value and not `docUpdated`: no document's CONTENT moved, and a listener that caches per-doc
+    /// previews by `modifiedAt` would be told to throw them away for nothing.
+    private func announceLiveIndexChange(from before: [String: LiveDocEntry]) {
+        guard liveIndex != before else { return }
+        emitStatus(docId: "", kind: "docsAdvertised", seq: nil, count: nil)
     }
 
     /// Remove `deviceId` from every holder set, dropping any entry whose last holder just left.
