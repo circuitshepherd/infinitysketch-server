@@ -106,6 +106,24 @@ Targets (`Package.swift`):
 `docs/protocol.md` is the map of the wire protocol; `docs/design.md` is the original (2026-07)
 project scaffold design, kept as history.
 
+### Consumed as a submodule
+
+The InfinitySketch app repository vendors this repository as a git submodule at `server/`, and links
+**`InfSketchWire` as a local package reference** — not as a versioned dependency. The two are
+developed as pairs: an app worktree on branch `X` alongside this repository on branch `X`, so a
+change spanning both sides is one coherent pair of commits.
+
+Two consequences worth knowing before you push:
+
+- **This repository's `main` must be pushed *before* the app pushes the gitlink that names it.**
+  A gitlink pointing at a commit that never left one machine leaves every fresh clone of the app
+  unable to fetch it, and because `InfSketchWire` is a local package reference the app then does not
+  build at all. The app repository enforces the ordering with a `pre-push` hook, because plain
+  `git push` reports success in exactly this case.
+- **The wire-protocol check is exact equality**, so app and server deploy together. After merging
+  either side, rebuild both before concluding that sync is broken — a stale binary on either end
+  refuses the handshake and simply looks offline.
+
 ## Dependencies
 
 - [FlyingFox](https://github.com/swhitty/FlyingFox) (MIT) — HTTP + WebSocket server
