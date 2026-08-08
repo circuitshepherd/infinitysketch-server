@@ -92,6 +92,76 @@ public enum WebUI {
     </html>
     """#
 
+    /// The pan/zoom viewport core — a standalone constant so the test suite can
+    /// evaluate the REAL source in a JSContext rather than a Swift re-derivation.
+    /// Pure: no DOM, no globals; dpr is injected so tests can pin it.
+    public static let viewportJS = #"""
+    // A frame pixel (px, py) lands at (px * scale + tx, py * scale + ty).
+    function makeViewport(dpr) {
+      const MAX_DEVICE_PX = 8;   // never magnify a frame pixel beyond 8 device px
+      let scale = 1, tx = 0, ty = 0;
+      let boxW = 0, boxH = 0, imgW = 0, imgH = 0;
+      let atFit = true;
+
+      const fitScale = () => (imgW && imgH && boxW && boxH)
+        ? Math.min(boxW / imgW, boxH / imgH) : 1;
+      // The minimum is min(fit, 1:1): in the common case 1:1 is MORE zoomed out
+      // than fit, and clamping at fitScale would make the 1:1 button do nothing.
+      const clampScale = (s) => Math.min(MAX_DEVICE_PX / dpr(),
+        Math.max(Math.min(fitScale(), 1 / dpr()), s));
+
+      // No dead space: an axis where the image is smaller than the box is
+      // centred; otherwise the image edge may not come inside the box edge.
+      function clampTranslation() {
+        const w = imgW * scale, h = imgH * scale;
+        tx = (w <= boxW) ? (boxW - w) / 2 : Math.min(0, Math.max(boxW - w, tx));
+        ty = (h <= boxH) ? (boxH - h) / 2 : Math.min(0, Math.max(boxH - h, ty));
+      }
+
+      // Derives from the CLAMPED target, never the requested one — otherwise the
+      // image creeps sideways on every scroll tick taken against the zoom limit.
+      function setScaleAbout(cx, cy, target) {
+        const s = clampScale(target);
+        const r = s / scale;
+        tx = cx - (cx - tx) * r;
+        ty = cy - (cy - ty) * r;
+        scale = s;
+        atFit = false;
+        clampTranslation();
+      }
+
+      return {
+        get state() { return { scale, tx, ty, atFit, imgW, imgH, boxW, boxH }; },
+        panBy(dx, dy) { tx += dx; ty += dy; atFit = false; clampTranslation(); },
+        zoomAbout(cx, cy, factor) { setScaleAbout(cx, cy, scale * factor); },
+        fit() {
+          scale = fitScale();
+          tx = (boxW - imgW * scale) / 2;
+          ty = (boxH - imgH * scale) / 2;
+          atFit = true;
+        },
+        oneToOne() { setScaleAbout(boxW / 2, boxH / 2, 1 / dpr()); },
+        setBox(w, h) {
+          boxW = w; boxH = h;
+          if (atFit) this.fit(); else clampTranslation();
+        },
+        // A frame with a NEW pixel size keeps the same document region on screen:
+        // the content scales about the shared origin, so tx/ty do not move. Both
+        // frame sources are square (1024 live, 256 stored thumbnail), which is
+        // what licenses the single k.
+        setImageSize(w, h) {
+          if (!imgW || !imgH) { imgW = w; imgH = h; this.fit(); return; }
+          if (w === imgW && h === imgH) return;
+          const k = w / imgW;
+          imgW = w; imgH = h;
+          if (atFit) { this.fit(); return; }
+          scale = clampScale(scale / k);
+          clampTranslation();
+        },
+      };
+    }
+    """#
+
     /// The per-document live view. docId is embedded JSON-encoded (safe for
     /// any filename) and HTML-escaped for the title.
     public static func docHTML(docId: String) -> String {
