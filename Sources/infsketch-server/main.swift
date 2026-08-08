@@ -108,7 +108,7 @@ func drawJoinCode() {
         // machine needs no network address.
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
-        text += "  \(AddressPicker.mcpURL(ip: "127.0.0.1", port: picker.port))\n"
+        text += "  \(picker.loopbackMCPURL)\n"
         if keyReadingIsPossible() { text += "    \(picker.keyHint)\n" }
         if let openMessage { text += "\n\(openMessage)\n" }
         print(text, terminator: "")
@@ -119,10 +119,18 @@ func drawJoinCode() {
     var text = (try? TerminalQRCode.render(url)) ?? ""
     text += "\nScan to sync a device with this server:\n  \(url)\n"
     // Printed, not drawn as a second code: an agent reads a config file, it does not hold a camera.
+    // BOTH addresses, labelled: an agent on this machine should be given loopback (it needs no
+    // network address and that url survives a Wi-Fi change), and only a remote one needs the LAN
+    // address — which also moves when the selection below moves.
+    text += "\nConnect an AI agent (MCP):\n"
+    text += "  \(picker.loopbackMCPURL)   (on this machine)\n"
     if let mcp = picker.currentMCPURL {
-        text += "\nConnect an AI agent (MCP), on this machine or another:\n  \(mcp)\n"
+        text += "  \(mcp)   (from another machine)\n"
     }
     if picker.candidates.count > 1 {
+        // Blank line first: the list switches which network address BOTH urls above use, and run
+        // straight on from the labelled agent urls it reads as a list of agent addresses.
+        text += "\n"
         for (index, candidate) in picker.candidates.enumerated() {
             let marker = index == picker.selection ? "▸" : " "
             text += "  \(marker) \(index + 1)) \(candidate.ip)  (\(candidate.interface))\n"
