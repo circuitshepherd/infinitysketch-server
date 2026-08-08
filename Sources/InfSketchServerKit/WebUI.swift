@@ -9,6 +9,77 @@ import InfSketchWire
 /// symptom (the server answering `unsupportedVersion` to its own web UI) points nowhere near
 /// the cause.
 public enum WebUI {
+    /// The overview table's sort core — a standalone constant for the same reason
+    /// `viewportJS` is one: the suite drives the REAL source in a JSContext rather
+    /// than a Swift re-derivation of it. Pure: no DOM, no globals.
+    public static let tableSortJS = #"""
+    // Sort state for the document table: an ORDERED list of keys, most significant
+    // first, so "subscribers, then name" is expressible. One rule covers both
+    // buttons — a click CYCLES a column asc -> desc -> off — and `additive`
+    // (shift) is the only difference: without it the other columns are dropped
+    // first, so a plain click always means "sort by just this one".
+    function makeTableSort() {
+      const COLUMNS = {
+        name: (d) => d.name,
+        sizeBytes: (d) => d.sizeBytes,
+        seq: (d) => d.seq,
+        subscribers: (d) => d.subscriberCount,
+      };
+      let keys = [];   // [{ column, dir }], dir: 1 ascending, -1 descending
+
+      function toggle(column, additive) {
+        if (!(column in COLUMNS)) return;
+        const existing = keys.find(k => k.column === column);
+        // The survivor is the same object `existing` names, so the cycle below
+        // still sees the direction this column was already at.
+        if (!additive) keys = keys.filter(k => k.column === column);
+        if (!existing) keys.push({ column, dir: 1 });
+        else if (existing.dir === 1) existing.dir = -1;
+        else keys = keys.filter(k => k.column !== column);
+      }
+
+      // A missing value (an offline document has no seq and no subscriber count)
+      // sorts LAST in BOTH directions: a block of "–" at the top of a descending
+      // sort is noise, and it is not a small number — it is not a number at all.
+      function compareOne(a, b, key) {
+        const x = COLUMNS[key.column](a), y = COLUMNS[key.column](b);
+        const xGone = x === null || x === undefined, yGone = y === null || y === undefined;
+        if (xGone || yGone) return xGone && yGone ? 0 : (xGone ? 1 : -1);
+        if (typeof x === "string" || typeof y === "string") {
+          // numeric: "Doc 10" after "Doc 9"; base: case is not a sort key.
+          return key.dir * String(x).localeCompare(String(y), undefined,
+            { numeric: true, sensitivity: "base" });
+        }
+        return key.dir * (x < y ? -1 : x > y ? 1 : 0);
+      }
+
+      return {
+        get keys() { return keys.map(k => ({ column: k.column, dir: k.dir })); },
+        toggle,
+        // Array#sort is stable (ES2019), so rows equal on every key keep the
+        // order the server sent and cannot shuffle between refreshes.
+        apply(docs) {
+          if (keys.length === 0) return docs.slice();
+          return docs.slice().sort((a, b) => {
+            for (const k of keys) { const c = compareOne(a, b, k); if (c !== 0) return c; }
+            return 0;
+          });
+        },
+        // "" unsorted, else an arrow — plus the 1-based rank once a second key
+        // exists, which is the only thing that makes a multi-column sort legible.
+        indicator(column) {
+          const i = keys.findIndex(k => k.column === column);
+          if (i < 0) return "";
+          return (keys[i].dir === 1 ? "▲" : "▼") + (keys.length > 1 ? (i + 1) : "");
+        },
+        ariaSort(column) {
+          const k = keys.find(k => k.column === column);
+          return k ? (k.dir === 1 ? "ascending" : "descending") : "none";
+        },
+      };
+    }
+    """#
+
     /// `connectSection` is `ConnectPanel.html(…)`, built per request: it depends on this machine's
     /// current addresses and on the `Host` header the browser used.
     public static func indexHTML(connectSection: String) -> String {
@@ -44,6 +115,11 @@ public enum WebUI {
                   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
       td.thumb { width: 48px; padding-right: 0; }
       #empty { padding: 2rem 0.9rem; color: var(--fg-dim); font-size: 0.9rem; }
+      /* Sortable headers (from main) on the shared tokens: the hover matches the row
+         hover, and the mark takes the same dim colour as the header text. */
+      th[data-sort] { cursor: pointer; user-select: none; -webkit-user-select: none; }
+      th[data-sort]:hover { background: var(--bg); }
+      .sortmark { font-size: 0.8em; color: var(--fg-dim); margin-left: 0.35rem; }
     </style>
     </head>
     <body>
@@ -54,15 +130,27 @@ public enum WebUI {
     \#(connectSection)
     <div class="card">
       <table>
-        <thead><tr><th></th><th>Document</th><th class="num">Size</th><th class="num">Seq</th><th class="num">Subscribers</th></tr></thead>
+        <thead><tr>
+          <th></th>
+          <th data-sort="name" tabindex="0" title="Click to sort. Shift-click to add a column, so the sort can be e.g. subscribers then name. A third click clears the column.">Document<span class="sortmark"></span></th>
+          <th class="num" data-sort="sizeBytes" tabindex="0" title="Click to sort. Shift-click to add a column.">Size<span class="sortmark"></span></th>
+          <th class="num" data-sort="seq" tabindex="0" title="Click to sort. Shift-click to add a column.">Seq<span class="sortmark"></span></th>
+          <th class="num" data-sort="subscribers" tabindex="0" title="Click to sort. Shift-click to add a column.">Subscribers<span class="sortmark"></span></th>
+        </tr></thead>
         <tbody id="docs"></tbody>
       </table>
       <div id="empty" hidden>No documents yet — open a sketch on a connected device.</div>
     </div>
     <script>
+    \#(tableSortJS)
+
     const statusEl = document.getElementById("status");
     const docsEl = document.getElementById("docs");
     let refreshTimer = null;
+    const sorter = makeTableSort();
+    // The last payload, kept so a header click re-sorts what is on screen without
+    // re-fetching — and so a status-event refresh cannot drop the user's sort.
+    let docs = [];
 
     function esc(s) {
       return String(s).replace(/[&<>"']/g, c => ({
@@ -79,11 +167,12 @@ public enum WebUI {
       return `${(n / 1048576).toFixed(1)} MB`;
     }
 
-    async function refresh() {
-      const docs = await (await fetch("/api/docs")).json();
+    // `docs` is the module-level array the sort reads — deliberately NOT shadowed by a local
+    // here, which is what the pre-sort version of this function did.
+    function render() {
       docsEl.innerHTML = "";
       document.getElementById("empty").hidden = docs.length > 0;
-      for (const d of docs) {
+      for (const d of sorter.apply(docs)) {
         const row = document.createElement("tr");
         const live = d.subscriberCount != null;
         row.innerHTML =
@@ -95,6 +184,25 @@ public enum WebUI {
           `<td class="num badge${live ? " live" : ""}">${d.subscriberCount ?? "–"}</td>`;
         docsEl.appendChild(row);
       }
+      for (const th of document.querySelectorAll("th[data-sort]")) {
+        th.setAttribute("aria-sort", sorter.ariaSort(th.dataset.sort));
+        th.querySelector(".sortmark").textContent = sorter.indicator(th.dataset.sort);
+      }
+    }
+
+    for (const th of document.querySelectorAll("th[data-sort]")) {
+      const sortBy = (e) => { sorter.toggle(th.dataset.sort, e.shiftKey); render(); };
+      th.addEventListener("click", sortBy);
+      th.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();   // else Space scrolls the page
+        sortBy(e);
+      });
+    }
+
+    async function refresh() {
+      docs = await (await fetch("/api/docs")).json();
+      render();
     }
 
     function scheduleRefresh() {              // debounce bursts of status events

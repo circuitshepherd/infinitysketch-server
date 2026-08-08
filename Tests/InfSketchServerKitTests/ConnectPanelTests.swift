@@ -99,4 +99,35 @@ import Testing
         #expect(html.contains("navigator.clipboard"))
         #expect(html.contains("selectNodeContents"), "no fallback for a non-secure context")
     }
+
+    /// The page carries the same connect information the terminal prints, and the terminal prints
+    /// BOTH agent addresses — an agent on this machine needs no network address at all.
+    @Test func theLoopbackAgentUrlIsOffered() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains("http://127.0.0.1:8080/mcp"))
+    }
+
+    /// It must sit OUTSIDE the `.address` blocks the chips hide and show: loopback does not depend
+    /// on which network address is selected, so hiding it with one would make it vanish for every
+    /// address but the first — invisible to an assertion that only asks whether the url appears.
+    @Test func theLoopbackAgentUrlIsNotInsideASwitchableAddressBlock() throws {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        let loopback = try #require(html.range(of: "http://127.0.0.1:8080/mcp"))
+        // Every address block is balanced, so at any point OUTSIDE them the opened and closed
+        // `div`s match; anywhere INSIDE one, an open is still outstanding. (The inline QR is SVG
+        // and contributes no `div`s.) Asserting only that the url appears would pass with the
+        // line nested in the first block, where the chips would hide it for every other address.
+        let prefix = html[html.startIndex..<loopback.lowerBound]
+        let opened = prefix.components(separatedBy: "<div").count - 1
+        let closed = prefix.components(separatedBy: "</div>").count - 1
+        #expect(opened == closed, "loopback url sits inside \(opened - closed) unclosed div(s)")
+    }
+
+    /// One address means no chips at all — and the loopback url must still be there, since it is
+    /// the only one that works when the single candidate is unreachable from the phone.
+    @Test func theLoopbackAgentUrlSurvivesASingleCandidate() {
+        let html = ConnectPanel.html(candidates: [wifi], port: 8080, host: nil)
+        #expect(!html.contains("class=\"chips\""))
+        #expect(html.contains("http://127.0.0.1:8080/mcp"))
+    }
 }

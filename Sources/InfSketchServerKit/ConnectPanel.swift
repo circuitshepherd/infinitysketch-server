@@ -74,13 +74,23 @@ public enum ConnectPanel {
             """
         }
 
+        // OUTSIDE the per-address blocks, which the chips hide and show: loopback is the same url
+        // whichever network address is selected, and an agent on this machine should be given it
+        // rather than a LAN address that changes with the network. Matches what the terminal prints.
+        let local = """
+        <p class="agent">AI agent (MCP) on THIS machine<br>
+          <code id="mcp-local">\(HTML.escape(AddressPicker(candidates: candidates, port: port).loopbackMCPURL))</code>
+          <button class="copy" data-target="mcp-local">copy</button></p>
+
+        """
+
         // One address is one address: nothing to switch to.
         let switcher = candidates.count > 1 ? """
         <p class="hint">Not reachable from your phone? Try:</p>
         <div class="chips">\(chips)</div>
         """ : ""
 
-        return section(body: blocks + switcher, script: behaviour)
+        return section(body: blocks + local + switcher, script: behaviour)
     }
 
     private static func noAddressBody(port: UInt16) -> String {
