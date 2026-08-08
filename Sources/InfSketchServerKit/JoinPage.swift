@@ -20,7 +20,8 @@ enum JoinPage {
 
     /// `host` is the `Host` header verbatim — host and port as the device reached them.
     static func html(host: String) -> String {
-        let safe = escaped(host)
+        // The host reaches both an `href` and the page's text, and it arrives from the network.
+        let safe = HTML.escape(host)
         return """
         <!doctype html>
         <html><head><meta charset="utf-8">
@@ -47,13 +48,5 @@ enum JoinPage {
           an older version that doesn't know how to join a server yet.</p>
         </body></html>
         """
-    }
-
-    /// The host reaches both an `href` and the page's text, and it arrives from the network.
-    private static func escaped(_ raw: String) -> String {
-        raw.replacingOccurrences(of: "&", with: "&amp;")
-           .replacingOccurrences(of: "<", with: "&lt;")
-           .replacingOccurrences(of: ">", with: "&gt;")
-           .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }
