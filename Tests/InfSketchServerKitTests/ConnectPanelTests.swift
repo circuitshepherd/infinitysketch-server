@@ -83,6 +83,15 @@ import Testing
         #expect(html.contains("en&lt;0&gt;&amp;"))
     }
 
+    /// `display: flex` on `.address` OUTRANKS the browser's own `[hidden] { display: none }`, so
+    /// without an explicit rule every address renders at once and the chips appear to do nothing —
+    /// which is what shipped for one commit, invisible to every assertion above, because the markup
+    /// was already correct. A test cannot render CSS; it can insist the rule is there.
+    @Test func hiddenIsRestatedForTheFlexLayout() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains(".address[hidden] { display: none; }"))
+    }
+
     /// The copy button must survive a page that is NOT a secure context — plain http to a LAN
     /// address, which is exactly what this page is — where `navigator.clipboard` is undefined.
     @Test func theCopyButtonHasAFallbackPath() {

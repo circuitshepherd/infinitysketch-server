@@ -67,8 +67,13 @@ public final class InfSketchServer: Sendable {
         try await http.run()
     }
 
-    public func waitUntilListening() async throws {
-        try await http.waitUntilListening()
+    /// Throws if the socket is not accepting within `timeout`. The default matches FlyingFox's own.
+    ///
+    /// The caller that passes a SHORTER one is the startup path: it is deciding whether to open a
+    /// browser, and the failure it is really waiting out — a port already in use — has already
+    /// surfaced through `run()` by then.
+    public func waitUntilListening(timeout: TimeInterval = 5) async throws {
+        try await http.waitUntilListening(timeout: timeout)
     }
 
     /// `timeout: 0` is deliberate, and it does NOT make the shutdown abrupt.

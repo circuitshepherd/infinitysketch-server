@@ -103,9 +103,16 @@ public enum ConnectPanel {
                         letter-spacing: 0.06em; color: gray; }
           #connect .address { display: flex; gap: 1.25rem; align-items: flex-start;
                               flex-wrap: wrap; }
+          /* `display: flex` above OUTRANKS the browser's own `[hidden] { display: none }`, so
+             without this every address is visible at once and the chips appear to do nothing. */
+          #connect .address[hidden] { display: none; }
           /* The plate stays white in dark mode: an inverted code is one most scanners refuse. */
-          #connect .qr { background: #fff; padding: 0.35rem; border-radius: 6px; line-height: 0; }
+          #connect .qr { background: #fff; padding: 0.35rem; border-radius: 6px; line-height: 0;
+                         flex: 0 0 auto; }
           #connect .qr svg { width: 180px; height: 180px; display: block; }
+          /* Beside the code, wrapping under it only on a genuinely narrow window. Without a
+             `flex` here the block's own minimum width pushed it below the code every time. */
+          #connect .meta { flex: 1 1 16rem; min-width: 0; }
           #connect .ip { font-size: 1.25rem; font-weight: 600; }
           #connect .iface { color: gray; font-size: 0.85rem; margin-bottom: 0.5rem; }
           #connect .agent { font-size: 0.85rem; color: gray; margin: 0.75rem 0 0; }
