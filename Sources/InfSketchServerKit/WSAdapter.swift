@@ -269,12 +269,12 @@ actor Connection {
             emit(.error(reason: "transferViolation"))
             await close()
 
-        case .watchDoc(let docId):
+        case .watchDoc(let docId, let framePx):
             guard watchSubscriptions[docId] == nil else {
                 return emit(.error(reason: "alreadyWatching"))
             }
             do {
-                let result = try await manager.watch(docId: docId)
+                let result = try await manager.watch(docId: docId, framePx: framePx)
                 watchSubscriptions[docId] = (result.token, pumpWatch(result.events, docId: docId, token: result.token))
             } catch {
                 emit(.error(reason: "unknownDoc"))

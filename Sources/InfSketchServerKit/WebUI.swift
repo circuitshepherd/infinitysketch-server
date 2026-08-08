@@ -219,6 +219,7 @@ public enum WebUI {
           <button id="one" title="One frame pixel per device pixel (1)">1:1</button>
           <button id="pause" title="Stop live re-rendering">Pause</button>
           <button id="wheelmode" title="What a plain wheel does"></button>
+          <button id="respx" title="Requested live-frame resolution — the device renders at least this many pixels (it requests; a paused or absent device changes nothing)"></button>
         </div>
         <div id="stage">
           <img id="frame" draggable="false" alt="">
@@ -252,6 +253,18 @@ public enum WebUI {
         let wheelMode = "zoom";
         try { if (localStorage.getItem("infsketch.wheelMode") === "pan") wheelMode = "pan"; } catch (e) {}
 
+        let framePx = null;   // null = auto (the device's own default)
+        try {
+          const v = parseInt(localStorage.getItem("infsketch.framePx"), 10);
+          if (v === 1024 || v === 2048) framePx = v;
+        } catch (e) {}
+
+        function watchMessage() {
+          const m = { type: "watchDoc", docId: docId };
+          if (framePx) m.framePx = framePx;
+          return JSON.stringify(m);
+        }
+
         document.getElementById("fit").onclick = () => { vp.fit(); render(); };
         document.getElementById("one").onclick = () => { vp.oneToOne(); render(); };
         function toggleFitOne() {
@@ -265,8 +278,8 @@ public enum WebUI {
           // unwatchDoc, not a frozen picture: with zero watchers the device's
           // FrameScheduler goes inert, so pausing genuinely stops the rendering.
           if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(paused ? { type: "unwatchDoc", docId: docId }
-                                          : { type: "watchDoc", docId: docId }));
+            ws.send(paused ? JSON.stringify({ type: "unwatchDoc", docId: docId })
+                           : watchMessage());
           }
           if (!paused) refetch(`resume-${Date.now()}`);
           updateBadge();
@@ -281,6 +294,25 @@ public enum WebUI {
           showWheelMode();
         };
         showWheelMode();
+
+        const resBtn = document.getElementById("respx");
+        function showRes() {
+          resBtn.textContent = framePx ? `Res: ${framePx}` : "Res: auto";
+        }
+        resBtn.onclick = () => {
+          framePx = framePx === null ? 1024 : (framePx === 1024 ? 2048 : null);
+          try {
+            if (framePx) localStorage.setItem("infsketch.framePx", String(framePx));
+            else localStorage.removeItem("infsketch.framePx");
+          } catch (e) {}
+          showRes();
+          // Re-watch so the new request reaches the device; a paused page applies it on resume.
+          if (!paused && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "unwatchDoc", docId: docId }));
+            ws.send(watchMessage());
+          }
+        };
+        showRes();
 
         // ---- input ----
         stage.addEventListener("wheel", (e) => {
@@ -426,7 +458,7 @@ public enum WebUI {
           ws.onopen = () => {
             disconnected = false;
             ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
-            if (!paused) ws.send(JSON.stringify({ type: "watchDoc", docId: docId }));
+            if (!paused) ws.send(watchMessage());
             updateBadge();
           };
           ws.onmessage = (e) => {

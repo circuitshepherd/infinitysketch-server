@@ -215,7 +215,7 @@ public actor SessionManager {
 
     /// Register a viewer. Opens the session from the store if needed (no
     /// createIfMissing analog — you can't watch a doc that doesn't exist).
-    public func watch(docId: String) async throws -> WatchResult {
+    public func watch(docId: String, framePx: Int? = nil) async throws -> WatchResult {
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -225,7 +225,7 @@ public actor SessionManager {
             sessions[docId] = session
             emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
         }
-        let result = await session.watch()
+        let result = await session.watch(framePx: framePx)
         tokenWatchDocs[result.token] = docId
         watcherCounts[docId, default: 0] += 1
         return result

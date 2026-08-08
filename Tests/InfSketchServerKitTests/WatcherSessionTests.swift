@@ -23,9 +23,9 @@ import InfSketchWire
         let sub = try await manager.subscribe(docId: "d")
         var it = sub.events.makeAsyncIterator()
         let watch = try await manager.watch(docId: "d")
-        #expect(await it.next() == .watchers(docId: "d", count: 1))
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: nil))
         await manager.unwatch(docId: "d", token: watch.token)
-        #expect(await it.next() == .watchers(docId: "d", count: 0))
+        #expect(await it.next() == .watchers(docId: "d", count: 0, framePx: nil))
     }
 
     @Test func lateSubscriberLearnsExistingWatchers() async throws {
@@ -34,7 +34,7 @@ import InfSketchWire
         let sub = try await manager.subscribe(docId: "d")
         var it = sub.events.makeAsyncIterator()
         // First event on a fresh subscription to an already-watched doc:
-        #expect(await it.next() == .watchers(docId: "d", count: 1))
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: nil))
     }
 
     @Test func frameGoesToWatchersOnlyAndIsCached() async throws {
@@ -72,5 +72,37 @@ import InfSketchWire
         // Now both are zero: session tears down after grace.
         try await Task.sleep(for: .milliseconds(150))
         #expect(await manager.liveInfo()["d"] == nil)
+    }
+
+    @Test func theFramePxIsTheMaxOverWatchersAndFallsBackWhenOneLeaves() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        var it = sub.events.makeAsyncIterator()
+        let small = try await manager.watch(docId: "d", framePx: 1024)
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: 1024))
+        let big = try await manager.watch(docId: "d", framePx: 2048)
+        #expect(await it.next() == .watchers(docId: "d", count: 2, framePx: 2048))
+        await manager.unwatch(docId: "d", token: big.token)
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: 1024))
+        await manager.unwatch(docId: "d", token: small.token)
+        #expect(await it.next() == .watchers(docId: "d", count: 0, framePx: nil))
+    }
+
+    @Test func aRequestAboveTheCapIsCappedAndANonPositiveOneMeansNoPreference() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        var it = sub.events.makeAsyncIterator()
+        _ = try await manager.watch(docId: "d", framePx: 4096)
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: 2048))
+        _ = try await manager.watch(docId: "d", framePx: 0)
+        #expect(await it.next() == .watchers(docId: "d", count: 2, framePx: 2048))
+    }
+
+    @Test func aWatcherWithNoPreferenceLeavesFramePxNil() async throws {
+        let (_, manager) = try makeManager()
+        let sub = try await manager.subscribe(docId: "d")
+        var it = sub.events.makeAsyncIterator()
+        _ = try await manager.watch(docId: "d")
+        #expect(await it.next() == .watchers(docId: "d", count: 1, framePx: nil))
     }
 }
