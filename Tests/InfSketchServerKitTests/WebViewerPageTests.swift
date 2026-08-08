@@ -47,6 +47,12 @@ import InfSketchWire
     @Test func wheelModePersists() {
         #expect(html.contains("infsketch.wheelMode"))
     }
+
+    @Test func thePageEmbedsTheRealViewportSource() {
+        // Deleting the \#(viewportJS) interpolation leaves the parse test green
+        // (it parses, never executes) — this pins the embed itself.
+        #expect(html.contains(WebUI.viewportJS))
+    }
 }
 
 #if canImport(JavaScriptCore)

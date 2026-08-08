@@ -110,5 +110,22 @@ import Testing
         #expect(abs(s2.tx - (1000 - 1024 * s.scale)) < 1e-9)       // bottom-right limit
         #expect(abs(s2.ty - (800 - 1024 * s.scale)) < 1e-9)
     }
+
+    /// When the fitted scale exceeds the 8-device-px cap (a 256 px thumbnail in a
+    /// big box), the cap yields to fit: the first zoom-in tick must NOT snap the
+    /// view down to the cap. fit = min(1200/256, 1200/256) = 4.6875 > 4.
+    @Test func aFitAboveTheZoomCapDoesNotSnapDownOnZoomIn() {
+        let ctx = JSContext()!
+        ctx.exceptionHandler = { _, ex in Issue.record("JS threw: \(ex?.toString() ?? "?")") }
+        ctx.evaluateScript(WebUI.viewportJS)
+        ctx.evaluateScript("var vp = makeViewport(function () { return 2.0; });")
+        let vp = ctx.objectForKeyedSubscript("vp")!
+        vp.invokeMethod("setBox", withArguments: [1200, 1200])
+        vp.invokeMethod("setImageSize", withArguments: [256, 256])
+        let fitted = vp.forProperty("state")!.forProperty("scale")!.toDouble()
+        #expect(abs(fitted - 4.6875) < 1e-12)
+        vp.invokeMethod("zoomAbout", withArguments: [600, 600, 1.5])
+        #expect(vp.forProperty("state")!.forProperty("scale")!.toDouble() >= fitted - 1e-12)
+    }
 }
 #endif

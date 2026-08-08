@@ -107,7 +107,9 @@ public enum WebUI {
         ? Math.min(boxW / imgW, boxH / imgH) : 1;
       // The minimum is min(fit, 1:1): in the common case 1:1 is MORE zoomed out
       // than fit, and clamping at fitScale would make the 1:1 button do nothing.
-      const clampScale = (s) => Math.min(MAX_DEVICE_PX / dpr(),
+      // the cap yields to fit: a small frame in a big box must still fit without
+      // the next zoom-in tick snapping down
+      const clampScale = (s) => Math.min(Math.max(MAX_DEVICE_PX / dpr(), fitScale()),
         Math.max(Math.min(fitScale(), 1 / dpr()), s));
 
       // No dead space: an axis where the image is smaller than the box is
@@ -360,6 +362,7 @@ public enum WebUI {
         stage.addEventListener("dragstart", (e) => e.preventDefault());
 
         window.addEventListener("keydown", (e) => {
+          if (e.ctrlKey || e.metaKey || e.altKey) return;
           const PAN = 60;
           const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2;
           switch (e.key) {
