@@ -9,7 +9,10 @@ import InfSketchWire
 /// symptom (the server answering `unsupportedVersion` to its own web UI) points nowhere near
 /// the cause.
 public enum WebUI {
-    public static let indexHTML = #"""
+    /// `connectSection` is `ConnectPanel.html(…)`, built per request: it depends on this machine's
+    /// current addresses and on the `Host` header the browser used.
+    public static func indexHTML(connectSection: String) -> String {
+        #"""
     <!doctype html>
     <html>
     <head>
@@ -30,6 +33,7 @@ public enum WebUI {
     <body>
     <h1>infsketch-server</h1>
     <div id="status">connecting…</div>
+    \#(connectSection)
     <table>
       <thead><tr><th></th><th>Document</th><th>Size</th><th>Seq</th><th>Subscribers</th></tr></thead>
       <tbody id="docs"></tbody>
@@ -91,6 +95,7 @@ public enum WebUI {
     </body>
     </html>
     """#
+    }
 
     /// The per-document live view. docId is embedded JSON-encoded (safe for
     /// any filename) and HTML-escaped for the title.

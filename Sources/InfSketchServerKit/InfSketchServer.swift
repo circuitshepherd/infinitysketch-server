@@ -18,6 +18,9 @@ public final class InfSketchServer: Sendable {
     private let store: any DocumentStore
     private let http: HTTPServer
     private let config: SessionConfig
+    /// The port this server was CONSTRUCTED with. `listeningPort` is the truth and is what the
+    /// pages use; this is the fallback for the window before the socket is up.
+    private let requestedPort: UInt16
     /// One broker per process, shared by the WS layer (registers
     /// capability-tagged connections, routes replies) and the MCP layer
     /// (calls `requestCreation` from the `create_doc` tool; will call
@@ -47,6 +50,7 @@ public final class InfSketchServer: Sendable {
         self.manager = manager
         self.http = HTTPServer(port: port)
         self.config = config
+        self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
             createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout)
         self.deviceCommandBroker = deviceCommandBroker
@@ -228,9 +232,17 @@ public final class InfSketchServer: Sendable {
         }
 
         await http.appendRoute("GET,HEAD /") { request in
-            self.headAware(
+            // Per request, not per launch: `candidates()` is a `getifaddrs` walk, so a network that
+            // changed since startup shows up on a reload. The port comes from the LISTENING socket
+            // — a server constructed with port 0 (every test, and any caller letting the OS pick)
+            // would otherwise print `:0` into every url on the page.
+            let port = await self.listeningPort ?? self.requestedPort
+            let connect = ConnectPanel.html(
+                candidates: LocalAddresses.candidates(), port: port,
+                host: request.headers[.host])
+            return self.headAware(
                 request, headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.indexHTML.utf8))
+                body: Data(WebUI.indexHTML(connectSection: connect).utf8))
         }
     }
 
