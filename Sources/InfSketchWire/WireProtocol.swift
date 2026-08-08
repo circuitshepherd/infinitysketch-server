@@ -15,7 +15,7 @@ public enum WireProtocol {
     /// happily until the moment some other device deletes a document it is subscribed to, at which
     /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
-    public static let version = 7
+    public static let version = 8
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -220,7 +220,7 @@ public enum ClientMessage: Equatable, Sendable {
     case pong
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
-    case watchDoc(docId: String)
+    case watchDoc(docId: String, framePx: Int?)
     case unwatchDoc(docId: String)
     case frame(docId: String, payload: BulkPayload)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
@@ -240,7 +240,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind
+        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx
     }
 
     public init(from decoder: any Decoder) throws {
@@ -281,7 +281,8 @@ extension ClientMessage: Codable {
                 transferId: try c.decode(UInt32.self, forKey: .transferId),
                 reason: try c.decode(String.self, forKey: .reason))
         case "watchDoc":
-            self = .watchDoc(docId: try c.decode(String.self, forKey: .docId))
+            self = .watchDoc(docId: try c.decode(String.self, forKey: .docId),
+                             framePx: try c.decodeIfPresent(Int.self, forKey: .framePx))
         case "unwatchDoc":
             self = .unwatchDoc(docId: try c.decode(String.self, forKey: .docId))
         case "frame":
@@ -376,9 +377,10 @@ extension ClientMessage: Codable {
             try c.encode("transferAbort", forKey: .type)
             try c.encode(transferId, forKey: .transferId)
             try c.encode(reason, forKey: .reason)
-        case .watchDoc(let docId):
+        case .watchDoc(let docId, let framePx):
             try c.encode("watchDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
+            try c.encodeIfPresent(framePx, forKey: .framePx)
         case .unwatchDoc(let docId):
             try c.encode("unwatchDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -438,7 +440,7 @@ public enum ServerMessage: Equatable, Sendable {
     case transferEnd(transferId: UInt32)
     case transferAbort(transferId: UInt32, reason: String)
     case frameAvailable(docId: String, seq: Int)
-    case watchers(docId: String, count: Int)
+    case watchers(docId: String, count: Int, framePx: Int?)
     case createDocRequest(requestId: UInt32, docId: String)
     /// `payloadKind` names what the request's `payload` IS — byte-for-byte the `strokeOpReply`
     /// pattern: nil means a whole document; "strippedDoc" means the binary `StrippedDocument`,
@@ -456,7 +458,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx
     }
 
     public init(from decoder: any Decoder) throws {
@@ -513,7 +515,8 @@ extension ServerMessage: Codable {
         case "watchers":
             self = .watchers(
                 docId: try c.decode(String.self, forKey: .docId),
-                count: try c.decode(Int.self, forKey: .count))
+                count: try c.decode(Int.self, forKey: .count),
+                framePx: try c.decodeIfPresent(Int.self, forKey: .framePx))
         case "createDocRequest":
             self = .createDocRequest(
                 requestId: try c.decode(UInt32.self, forKey: .requestId),
@@ -596,10 +599,11 @@ extension ServerMessage: Codable {
             try c.encode("frameAvailable", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(seq, forKey: .seq)
-        case .watchers(let docId, let count):
+        case .watchers(let docId, let count, let framePx):
             try c.encode("watchers", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(count, forKey: .count)
+            try c.encodeIfPresent(framePx, forKey: .framePx)
         case .createDocRequest(let requestId, let docId):
             try c.encode("createDocRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)

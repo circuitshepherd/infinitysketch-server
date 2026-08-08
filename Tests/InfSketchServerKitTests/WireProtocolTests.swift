@@ -10,7 +10,8 @@ import InfSketchWire
     /// this from 1 to 2; `deleteDoc`/`docDeleted` took it from 2 to 3; `WriteExpectation.matchHash`
     /// took it from 3 to 4; the `strippedDoc` op payload took it from 4 to 5;
     /// `strokeOpReply.payloadKind` took it from 5 to 6; `strokeOpRequest.payloadKind` (M4,
-    /// request stripping) took it from 6 to 7; the next addition takes it to 8.
+    /// request stripping) took it from 6 to 7; `framePx` on `watchDoc`/`watchers` (frame
+    /// resolution) took it from 7 to 8; the next addition takes it to 9.
     ///
     /// An addition is not only a new MESSAGE: `matchHash` is a new CASE inside an existing
     /// message's payload, and an older peer would throw on its unknown `kind` exactly the same
@@ -19,7 +20,7 @@ import InfSketchWire
     /// This test earning its keep is not hypothetical: the delete work added both messages and
     /// left the version at 2, and this is what caught it.
     @Test func theVersionIsBumpedForEveryWireAddition() {
-        #expect(WireProtocol.version == 7)
+        #expect(WireProtocol.version == 8)
     }
 
     @Test func clientMessagesRoundTrip() throws {
@@ -103,6 +104,20 @@ import InfSketchWire
         #expect(try roundTripClient(.transferAbort(transferId: 9, reason: "cancelled"))
             == .transferAbort(transferId: 9, reason: "cancelled"))
     }
+    @Test func framePxRoundTripsAndAbsenceDecodesNil() throws {
+        #expect(try roundTripClient(.watchDoc(docId: "d", framePx: 2048))
+                == .watchDoc(docId: "d", framePx: 2048))
+        #expect(try roundTripServer(.watchers(docId: "d", count: 2, framePx: 1024))
+                == .watchers(docId: "d", count: 2, framePx: 1024))
+        // A v7 peer's message carries no framePx key — it must decode as nil…
+        let legacy = Data(#"{"type":"watchDoc","docId":"d"}"#.utf8)
+        #expect(try JSONDecoder().decode(ClientMessage.self, from: legacy)
+                == .watchDoc(docId: "d", framePx: nil))
+        // …and an absent request must ENCODE no key (byte-shape unchanged).
+        let encoded = try JSONEncoder().encode(ClientMessage.watchDoc(docId: "d", framePx: nil))
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("framePx"))
+    }
+
     @Test func inlineEncodingStaysV0Compatible() throws {
         // Below-threshold traffic must be byte-compatible with v0: same keys, base64 data.
         let subscribed = try ServerMessage.subscribed(docId: "a", seq: 0, snapshot: .inline(Data([9]))).jsonText()
@@ -132,7 +147,7 @@ import InfSketchWire
 
 @Suite struct RenderDelegationWireTests {
     @Test func watchMessagesRoundTrip() throws {
-        let w = ClientMessage.watchDoc(docId: "d")
+        let w = ClientMessage.watchDoc(docId: "d", framePx: nil)
         #expect(try ClientMessage(jsonText: w.jsonText()) == w)
         let u = ClientMessage.unwatchDoc(docId: "d")
         #expect(try ClientMessage(jsonText: u.jsonText()) == u)
@@ -159,7 +174,7 @@ import InfSketchWire
     @Test func serverFrameMessagesRoundTrip() throws {
         let fa = ServerMessage.frameAvailable(docId: "d", seq: 7)
         #expect(try ServerMessage(jsonText: fa.jsonText()) == fa)
-        let w = ServerMessage.watchers(docId: "d", count: 2)
+        let w = ServerMessage.watchers(docId: "d", count: 2, framePx: nil)
         #expect(try ServerMessage(jsonText: w.jsonText()) == w)
     }
 }
