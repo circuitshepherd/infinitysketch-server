@@ -31,6 +31,15 @@ public struct AddressPicker: Sendable {
         "http://\(ip):\(port)/mcp"
     }
 
+    /// The overview page on this address — what the terminal's `o` key opens.
+    ///
+    /// Deliberately the address's OWN url rather than `localhost`: the page reads the `Host` header
+    /// it was reached on and shows that address's code large, so switching in the terminal and
+    /// pressing `o` needs no query parameter and no shared state.
+    public static func overviewURL(ip: String, port: UInt16) -> String {
+        "http://\(ip):\(port)/"
+    }
+
     public var currentURL: String? {
         candidates.indices.contains(selection)
             ? Self.joinURL(ip: candidates[selection].ip, port: port)
@@ -40,6 +49,12 @@ public struct AddressPicker: Sendable {
     public var currentMCPURL: String? {
         candidates.indices.contains(selection)
             ? Self.mcpURL(ip: candidates[selection].ip, port: port)
+            : nil
+    }
+
+    public var currentOverviewURL: String? {
+        candidates.indices.contains(selection)
+            ? Self.overviewURL(ip: candidates[selection].ip, port: port)
             : nil
     }
 
