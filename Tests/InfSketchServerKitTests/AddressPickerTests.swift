@@ -60,4 +60,24 @@ import Testing
         let moved = empty.handle(.down)
         #expect(moved == false)
     }
+
+    /// The url the `o` key opens: the overview page on the SELECTED address, so the page's own
+    /// Host header selects that address's code. Every url shape this feature has lives on
+    /// `AddressPicker`, so the terminal and the web page can never disagree about one.
+    @Test func theOverviewUrlIsTheRootOfTheSelectedAddress() {
+        #expect(AddressPicker.overviewURL(ip: "192.168.1.42", port: 18551)
+                == "http://192.168.1.42:18551/")
+        #expect(picker().currentOverviewURL == "http://192.168.1.42:18551/")
+    }
+
+    @Test func withNoCandidatesThereIsNoOverviewUrl() {
+        #expect(AddressPicker(candidates: [], port: 18551).currentOverviewURL == nil)
+    }
+
+    @Test func theOverviewUrlFollowsTheSelection() {
+        var p = picker()
+        let moved = p.handle(.down)
+        #expect(moved)
+        #expect(p.currentOverviewURL == "http://10.0.0.5:18551/")
+    }
 }

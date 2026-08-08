@@ -10,6 +10,7 @@ import WinSDK          // the C runtime, for `fflush` — the terminal handling 
 
 var port: UInt16 = 8080
 var docsPath = "./docs"
+var openBrowser = true
 
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
@@ -24,8 +25,12 @@ while let argument = arguments.next() {
             print("--docs requires a path"); exit(1)
         }
         docsPath = value
+    case "--no-open":
+        // For anything that starts a server without a person watching — `scripts/worktree-server`
+        // above all, one per worktree and usually started by an agent.
+        openBrowser = false
     default:
-        print("usage: infsketch-server [--port N] [--docs DIR]")
+        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open]")
         exit(argument == "--help" ? 0 : 1)
     }
 }
@@ -66,6 +71,13 @@ func restoreTerminalSettings() {
 nonisolated(unsafe) var picker = AddressPicker(candidates: LocalAddresses.candidates(), port: port)
 nonisolated(unsafe) var drawnLineCount = 0
 
+/// The last thing the browser-open attempt had to say, drawn as part of the block below the code.
+///
+/// It lives INSIDE the redrawn region on purpose. `drawJoinCode` erases exactly the lines it drew
+/// last time, so anything printed between two draws — the startup message, or the reply to the `o`
+/// key — would leave the cursor somewhere the erase does not expect and tear the block apart.
+nonisolated(unsafe) var openMessage: String?
+
 /// Whether a keypress can reach this process at all. ONE predicate, read by both the hint below and
 /// the reader further down, so the offer and the ability to honour it cannot drift apart: under
 /// `scripts/worktree-server` stdin is /dev/null, and the log was telling its reader to press keys
@@ -93,6 +105,7 @@ func drawJoinCode() {
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
         text += "  \(AddressPicker.mcpURL(ip: "127.0.0.1", port: picker.port))\n"
+        if let openMessage { text += "\n\(openMessage)\n" }
         print(text, terminator: "")
         fflush(nil)
         drawnLineCount = text.components(separatedBy: "\n").count - 1
@@ -110,15 +123,41 @@ func drawJoinCode() {
             text += "  \(marker) \(index + 1)) \(candidate.ip)  (\(candidate.interface))\n"
         }
         if addressSwitchingIsPossible() {
-            text += "    ↑/↓ or 1–\(min(9, picker.candidates.count)) to switch · q to stop showing\n"
+            text += "    ↑/↓ or 1–\(min(9, picker.candidates.count)) to switch"
+                + " · o to open in browser · q to stop showing\n"
         }
     }
+    if let openMessage { text += "\n\(openMessage)\n" }
     print(text, terminator: "")
     // Flushed by hand: stdout is block-buffered when it is not a terminal, so under
     // `scripts/worktree-server` — which redirects to a log — the code would sit in the buffer until
     // something else filled it, and be lost entirely if the server were killed first.
     fflush(nil)
     drawnLineCount = text.components(separatedBy: "\n").count - 1
+}
+
+/// Set by the server task when `run()` throws, which is how a port already in use arrives — routine
+/// here, one server per worktree.
+nonisolated(unsafe) var serverFailure: (any Error)?
+
+let serverTask = Task {
+    do { try await server.run() } catch { serverFailure = error }
+}
+
+// Nothing invites the user to act before the socket is up: a browser tab that lands on a refused
+// connection, or a join code for a server that never bound, are both worse than a few milliseconds
+// of waiting. A FAILED bind — a second server on the same port, routine here, one per worktree —
+// costs this whole timeout before the message appears, which is why it is 2 seconds rather than
+// FlyingFox's 5: `serverFailure` already holds the real reason by then, and it is what decides.
+let listening = (try? await server.waitUntilListening(timeout: 2)) != nil
+if let failure = serverFailure {
+    print("infsketch-server stopped: \(failure)")
+    exit(1)
+}
+
+let localURL = "http://localhost:\(port)/"
+if openBrowser, listening {
+    openMessage = BrowserLauncher.message(for: BrowserLauncher.open(localURL), url: localURL)
 }
 
 drawJoinCode()
@@ -177,6 +216,15 @@ if addressSwitchingIsPossible(), picker.candidates.count > 1 {
                     : sequence[1] == UInt8(ascii: "B") ? .down : nil
             case UInt8(ascii: "q"), 0x03:                 // q, or Ctrl-C if it reaches us as a byte
                 return
+            case UInt8(ascii: "o"):
+                // Opens the SELECTED address's own page, so that page's `Host` header shows that
+                // address's code large — no query parameter, no shared state. The selection does
+                // not move, so this redraws for the message rather than for the block.
+                if let url = picker.currentOverviewURL {
+                    openMessage = BrowserLauncher.message(for: BrowserLauncher.open(url), url: url)
+                    drawJoinCode()
+                }
+                continue
             case UInt8(ascii: "1")...UInt8(ascii: "9"):
                 key = .digit(Int(byte[0] - UInt8(ascii: "0")))
             default:
@@ -189,12 +237,12 @@ if addressSwitchingIsPossible(), picker.candidates.count > 1 {
 }
 #endif
 
-// Caught rather than propagated: an error thrown out of top-level code is a TRAP, which runs neither
-// `atexit` nor any `defer` — so a second server on the same port would leave the terminal in raw
-// mode. `exit` runs them. The message is also better than a stack trace.
-do {
-    try await server.run()
-} catch {
-    print("infsketch-server stopped: \(error)")
+// The server is already running (started above). Awaiting the task here keeps the process alive and
+// keeps the failure out of a `throw` from top-level code, which is a TRAP: it runs neither `atexit`
+// nor any `defer`, so a second server on the same port would leave the terminal in raw mode. `exit`
+// runs them, and the message is better than a stack trace.
+await serverTask.value
+if let failure = serverFailure {
+    print("infsketch-server stopped: \(failure)")
     exit(1)
 }
