@@ -116,6 +116,14 @@ import InfSketchWire
         // …and an absent request must ENCODE no key (byte-shape unchanged).
         let encoded = try JSONEncoder().encode(ClientMessage.watchDoc(docId: "d", framePx: nil))
         #expect(!String(decoding: encoded, as: UTF8.self).contains("framePx"))
+
+        // The watchers side, symmetric: absent key decodes nil, nil encodes no key.
+        let legacyWatchers = Data(#"{"type":"watchers","docId":"d","count":1}"#.utf8)
+        #expect(try JSONDecoder().decode(ServerMessage.self, from: legacyWatchers)
+                == .watchers(docId: "d", count: 1, framePx: nil))
+        let encodedWatchers = try JSONEncoder().encode(
+            ServerMessage.watchers(docId: "d", count: 1, framePx: nil))
+        #expect(!String(decoding: encodedWatchers, as: UTF8.self).contains("framePx"))
     }
 
     @Test func inlineEncodingStaysV0Compatible() throws {
