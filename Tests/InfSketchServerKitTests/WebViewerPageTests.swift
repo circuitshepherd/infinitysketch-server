@@ -53,6 +53,44 @@ import InfSketchWire
         #expect(html.contains("infsketch.framePx"))
     }
 
+    @Test func immersiveModeIsThePagesOwnChromeNotTheBrowsers() {
+        // Josef: "don't touch the browsers fullscreen control, this should work independent."
+        // The Fullscreen API must not appear at all, so F11 composes with this rather than
+        // competing with it. Scanned with comments stripped — the prose explaining the rule
+        // names the API, and unstripped it defeated this very assertion.
+        let code = WebPageScan.stripComments(html)
+        #expect(!code.contains("requestFullscreen"))
+        #expect(!code.contains("fullscreenElement"))
+        #expect(html.contains("id=\"full\""))
+        // The bar leaves the flow, which is what lets #stage fill the window.
+        #expect(html.contains("body.immersive #bar"))
+        #expect(html.contains("position: absolute"))
+    }
+
+    @Test func immersiveChromeAutoFadesAndPersists() {
+        #expect(html.contains("body.immersive.idle #bar"))
+        #expect(html.contains("pointer-events: none"))
+        #expect(html.contains("infsketch.immersive"))
+        // The controls must not fade out from under a hand reaching for them.
+        #expect(html.contains("pointerOverBar"))
+    }
+
+    @Test func theImmersiveKeysAreHandled() {
+        #expect(html.contains("case \"f\":"))
+        #expect(html.contains("case \"Escape\":"))
+        // Escape falls through untouched when there is no immersive mode to leave.
+        #expect(html.contains("if (!immersive) return;"))
+    }
+
+    @Test func theBadgeKeepsItsBaseClassOnEveryWrite() {
+        // The badge carries a shared `.badge` class now; a bare className = "live" would drop it
+        // and lose the type styling, which no visual assertion here would notice.
+        #expect(!html.contains("badge.className = \"\""))
+        #expect(!html.contains("badge.className = fresh ? \"live\" : \"\""))
+        #expect(html.contains("badge.className = \"badge\""))
+        #expect(html.contains("badge.className = fresh ? \"badge live\" : \"badge\""))
+    }
+
     @Test func thePageEmbedsTheRealViewportSource() {
         // Deleting the \#(viewportJS) interpolation leaves the parse test green
         // (it parses, never executes) — this pins the embed itself.

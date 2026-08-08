@@ -20,24 +20,45 @@ public enum WebUI {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>infsketch-server</title>
     <style>
-      :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
-      body { margin: 2rem auto; max-width: 720px; padding: 0 1rem; }
-      h1 { font-size: 1.3rem; }
-      #status { color: gray; font-size: 0.85rem; }
-      table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-      td, th { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(128,128,128,0.3); text-align: left; }
-      img.thumb { width: 48px; height: 48px; object-fit: contain; background: rgba(128,128,128,0.15); border-radius: 4px; }
-      .live { color: #2a9d2a; font-weight: 600; }
+    \#(WebStyle.tokens)
+      body { margin: 0 auto; max-width: 880px; padding: 2rem 1rem 3rem; }
+      header.page { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 1.5rem; }
+      h1 { font-size: 1.35rem; margin: 0; }
+
+      /* The table sits on its own surface so it reads as one object against --bg. */
+      .card { background: var(--surface); border: 1px solid var(--line);
+              border-radius: var(--radius); overflow: hidden; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line);
+               text-align: left; }
+      thead th { font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+                 letter-spacing: 0.06em; color: var(--fg-dim); }
+      tbody tr:last-child td { border-bottom: none; }
+      tbody tr:hover { background: var(--bg); }
+      /* Right-aligned and tabular so the columns actually line up digit by digit —
+         which is most of what makes a dense table read as designed. */
+      .num { text-align: right; font-variant-numeric: tabular-nums; }
+      td.name a { font-weight: 500; text-decoration: none; }
+      td.name a:hover { text-decoration: underline; }
+      img.thumb { width: 48px; height: 48px; object-fit: contain; display: block;
+                  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+      td.thumb { width: 48px; padding-right: 0; }
+      #empty { padding: 2rem 0.9rem; color: var(--fg-dim); font-size: 0.9rem; }
     </style>
     </head>
     <body>
-    <h1>infsketch-server</h1>
-    <div id="status">connecting…</div>
+    <header class="page">
+      <h1>infsketch-server</h1>
+      <span id="status" class="badge">connecting…</span>
+    </header>
     \#(connectSection)
-    <table>
-      <thead><tr><th></th><th>Document</th><th>Size</th><th>Seq</th><th>Subscribers</th></tr></thead>
-      <tbody id="docs"></tbody>
-    </table>
+    <div class="card">
+      <table>
+        <thead><tr><th></th><th>Document</th><th class="num">Size</th><th class="num">Seq</th><th class="num">Subscribers</th></tr></thead>
+        <tbody id="docs"></tbody>
+      </table>
+      <div id="empty" hidden>No documents yet — open a sketch on a connected device.</div>
+    </div>
     <script>
     const statusEl = document.getElementById("status");
     const docsEl = document.getElementById("docs");
@@ -49,18 +70,29 @@ public enum WebUI {
       }[c]));
     }
 
+    // A raw byte count is unreadable past about five digits, and this column exists to be
+    // compared down its length.
+    function fmtBytes(n) {
+      if (typeof n !== "number") return "–";
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / 1048576).toFixed(1)} MB`;
+    }
+
     async function refresh() {
       const docs = await (await fetch("/api/docs")).json();
       docsEl.innerHTML = "";
+      document.getElementById("empty").hidden = docs.length > 0;
       for (const d of docs) {
         const row = document.createElement("tr");
         const live = d.subscriberCount != null;
         row.innerHTML =
-          `<td><img class="thumb" src="/api/docs/${encodeURIComponent(d.id)}/frame?v=${d.seq ?? "s"}"` +
+          `<td class="thumb"><img class="thumb" src="/api/docs/${encodeURIComponent(d.id)}/frame?v=${d.seq ?? "s"}"` +
           ` onerror="this.style.visibility='hidden'"></td>` +
-          `<td><a href="/doc/${encodeURIComponent(d.id)}">${esc(d.name)}</a></td><td>${d.sizeBytes} B</td>` +
-          `<td>${d.seq ?? "–"}</td>` +
-          `<td class="${live ? "live" : ""}">${d.subscriberCount ?? "–"}</td>`;
+          `<td class="name"><a href="/doc/${encodeURIComponent(d.id)}">${esc(d.name)}</a></td>` +
+          `<td class="num">${fmtBytes(d.sizeBytes)}</td>` +
+          `<td class="num">${d.seq ?? "–"}</td>` +
+          `<td class="num badge${live ? " live" : ""}">${d.subscriberCount ?? "–"}</td>`;
         docsEl.appendChild(row);
       }
     }
@@ -74,6 +106,7 @@ public enum WebUI {
       const ws = new WebSocket(`ws://${location.host}/ws`);
       ws.onopen = () => {
         statusEl.textContent = "live";
+        statusEl.className = "badge live";
         ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
         ws.send(JSON.stringify({ type: "subscribeStatus" }));
       };
@@ -85,6 +118,7 @@ public enum WebUI {
       };
       ws.onclose = () => {
         statusEl.textContent = "disconnected — retrying…";
+        statusEl.className = "badge";
         setTimeout(connect, 2000);
       };
     }
@@ -185,41 +219,57 @@ public enum WebUI {
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>\#(htmlId) — infsketch</title>
         <style>
-          :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+        \#(WebStyle.tokens)
           html, body { height: 100%; }
-          body { margin: 0; display: flex; flex-direction: column; }
-          header { display: flex; align-items: baseline; gap: 1rem;
-                   width: 100%; max-width: 1100px; margin: 0 auto;
-                   box-sizing: border-box; padding: 0.75rem 1rem 0.25rem; }
-          h1 { font-size: 1.2rem; margin: 0; }
-          #badge { font-size: 0.85rem; color: gray; }
-          #badge.live { color: #2a9d2a; font-weight: 600; }
-          #toolbar { display: flex; gap: 0.5rem; padding: 0.25rem 1rem 0.5rem; }
-          #toolbar button { font: inherit; font-size: 0.85rem; padding: 0.2rem 0.7rem;
-                            border: 1px solid rgba(128,128,128,0.5); border-radius: 6px;
-                            background: transparent; color: inherit; cursor: pointer; }
+          body { margin: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+          /* One bar, not a header row plus a toolbar row: two rows of chrome over a
+             viewer is most of what made the page look unfinished. */
+          #bar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+                 box-sizing: border-box; padding: 0.6rem 0.9rem;
+                 border-bottom: 1px solid var(--line); background: var(--surface); }
+          #bar .back { text-decoration: none; font-size: 1.1rem; line-height: 1;
+                       padding: 0.15rem 0.35rem; border-radius: 6px; }
+          #bar .back:hover { background: var(--bg); }
+          #bar h1 { font-size: 1.05rem; margin: 0; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis; }
+          #bar .spacer { flex: 1 1 auto; }
+          #controls { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+          /* Immersive mode: the bar leaves the flow, so #stage (already flex: 1) fills
+             the window. Nothing about the browser's OWN fullscreen is involved. */
+          body.immersive #bar { position: absolute; z-index: 2; top: 0; left: 0; right: 0;
+                                background: var(--bar); border-bottom: none;
+                                backdrop-filter: blur(12px);
+                                -webkit-backdrop-filter: blur(12px);
+                                transition: opacity 0.25s ease; }
+          body.immersive.idle #bar { opacity: 0; pointer-events: none; }
+
           /* touch-action: none is load-bearing: the stage owns every gesture inside
              it (native pan/pinch suppressed HERE ONLY; the page keeps browser zoom). */
           #stage { flex: 1; overflow: hidden; position: relative;
                    touch-action: none; user-select: none; -webkit-user-select: none;
                    -webkit-touch-callout: none; cursor: grab;
-                   background: rgba(128,128,128,0.1); }
+                   background: var(--stage); }
           #stage.dragging { cursor: grabbing; }
-          img#frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+          img#frame { position: absolute; left: 0; top: 0; transform-origin: 0 0;
+                      image-rendering: -webkit-optimize-contrast; }
         </style>
         </head>
         <body>
-        <header>
-          <a href="/">← overview</a>
+        <div id="bar">
+          <a class="back" href="/" title="Back to the overview">&larr;</a>
           <h1>\#(htmlId)</h1>
-          <span id="badge">connecting…</span>
-        </header>
-        <div id="toolbar">
-          <button id="fit" title="Fit the whole sketch (0)">Fit</button>
-          <button id="one" title="One frame pixel per device pixel (1)">1:1</button>
-          <button id="pause" title="Stop live re-rendering">Pause</button>
-          <button id="wheelmode" title="What a plain wheel does"></button>
-          <button id="respx" title="Requested live-frame resolution — the device renders at least this many pixels (it requests; a paused or absent device changes nothing)"></button>
+          <span id="badge" class="badge">connecting…</span>
+          <span class="spacer"></span>
+          <div id="controls">
+            <button class="btn" id="fit" title="Fit the whole sketch (0)">Fit</button>
+            <button class="btn" id="one" title="One frame pixel per device pixel (1)">1:1</button>
+            <button class="btn" id="pause" title="Stop live re-rendering">Pause</button>
+            <button class="btn" id="wheelmode" title="What a plain wheel does"></button>
+            <button class="btn" id="respx" title="Requested live-frame resolution — the device renders at least this many pixels (it requests; a paused or absent device changes nothing)"></button>
+            <button class="btn" id="full" title="Immersive mode — overlay the header (f, Escape to exit)">&#10530;</button>
+          </div>
         </div>
         <div id="stage">
           <img id="frame" draggable="false" alt="">
@@ -314,6 +364,53 @@ public enum WebUI {
         };
         showRes();
 
+        // ---- immersive mode ----
+        // The page's OWN chrome, deliberately independent of the browser's fullscreen
+        // control: no requestFullscreen anywhere, so F11 composes with this instead of
+        // fighting it. The bar leaves the flow and the ResizeObserver above re-fits.
+        const fullBtn = document.getElementById("full");
+        const bar = document.getElementById("bar");
+        let immersive = false;
+        let idleTimer = null;
+        let pointerOverBar = false;
+
+        function goIdle() {
+          // Never fade out from under a hand that is reaching for the controls.
+          if (immersive && !pointerOverBar) document.body.classList.add("idle");
+        }
+        function wake() {
+          document.body.classList.remove("idle");
+          clearTimeout(idleTimer);
+          if (immersive) idleTimer = setTimeout(goIdle, 2200);
+        }
+        bar.addEventListener("pointerenter", () => { pointerOverBar = true; wake(); });
+        bar.addEventListener("pointerleave", () => { pointerOverBar = false; wake(); });
+
+        function setImmersive(on) {
+          immersive = on;
+          document.body.classList.toggle("immersive", on);
+          fullBtn.classList.toggle("on", on);
+          fullBtn.title = on ? "Leave immersive mode (f or Escape)"
+                             : "Immersive mode — overlay the header (f, Escape to exit)";
+          try {
+            if (on) localStorage.setItem("infsketch.immersive", "1");
+            else localStorage.removeItem("infsketch.immersive");
+          } catch (e) {}
+          wake();   // entering always starts un-faded: never a chromeless mystery
+        }
+        fullBtn.onclick = () => setImmersive(!immersive);
+        try { if (localStorage.getItem("infsketch.immersive") === "1") setImmersive(true); } catch (e) {}
+
+        // Any sign of life re-arms the timer. Passive: these only observe — the stage's
+        // own wheel/pointer handlers still own the gesture.
+        // `mousemove` is listed BESIDE `pointermove` on purpose. Real mouse input fires both,
+        // but the compatibility event is all some environments emit (measured: this page's own
+        // browser-driven check woke the bar on pointermove and not on mousemove), and a bar that
+        // will not come back is a page with no controls at all.
+        for (const ev of ["pointermove", "mousemove", "pointerdown", "keydown", "wheel"]) {
+          document.addEventListener(ev, wake, { passive: true });
+        }
+
         // ---- input ----
         stage.addEventListener("wheel", (e) => {
           e.preventDefault();   // or ctrl+wheel zooms the whole page
@@ -403,6 +500,12 @@ public enum WebUI {
           const PAN = 60;
           const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2;
           switch (e.key) {
+            // Both return rather than break: neither touches the viewport, and Escape
+            // must fall through untouched when there is no immersive mode to leave.
+            case "f": case "F": setImmersive(!immersive); e.preventDefault(); return;
+            case "Escape":
+              if (!immersive) return;
+              setImmersive(false); e.preventDefault(); return;
             case "0": vp.fit(); break;
             case "1": vp.oneToOne(); break;
             case "+": case "=": vp.zoomAbout(cx, cy, 1.25); break;
@@ -439,16 +542,17 @@ public enum WebUI {
         }
 
         function updateBadge() {
-          if (paused) { badge.textContent = "paused"; badge.className = ""; return; }
+          // Every write keeps the "badge" base class — dropping it loses the type styling.
+          if (paused) { badge.textContent = "paused"; badge.className = "badge"; return; }
           if (disconnected) {
             badge.textContent = "disconnected — retrying…";
-            badge.className = "";
+            badge.className = "badge";
             return;
           }
           const fresh = Date.now() - lastFrameAt < 4000;
           badge.textContent = fresh ? "live"
             : (lastSeq === null ? "stale (no live client)" : `as of seq ${lastSeq}`);
-          badge.className = fresh ? "live" : "";
+          badge.className = fresh ? "badge live" : "badge";
         }
         setInterval(updateBadge, 1000);
 
