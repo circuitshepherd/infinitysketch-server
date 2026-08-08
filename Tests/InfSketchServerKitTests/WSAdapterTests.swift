@@ -436,10 +436,10 @@ private struct ServerMessageReader {
         var browserReader = ServerMessageReader(browser.output)
         try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await browserReader.next()
-        try browser.send(.watchDoc(docId: "d"))
+        try browser.send(.watchDoc(docId: "d", framePx: nil))
 
         // The app learns it is watched.
-        #expect(try await appReader.next() == .watchers(docId: "d", count: 1))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 1, framePx: nil))
 
         // The app pushes a frame; the browser gets the nudge.
         try app.send(.frame(docId: "d", payload: .inline(Data([7, 7]))))
@@ -447,7 +447,7 @@ private struct ServerMessageReader {
 
         // Unwatch: the app learns the viewer left.
         try browser.send(.unwatchDoc(docId: "d"))
-        #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 0, framePx: nil))
     }
 
     @Test func frameWithoutSubscriptionErrors() async throws {
@@ -464,7 +464,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.watchDoc(docId: "ghost"))
+        try harness.send(.watchDoc(docId: "ghost", framePx: nil))
         #expect(try await reader.next() == .error(reason: "unknownDoc"))
     }
 
@@ -482,13 +482,13 @@ private struct ServerMessageReader {
         var browserReader = ServerMessageReader(browser.output)
         try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await browserReader.next()
-        try browser.send(.watchDoc(docId: "d"))
-        #expect(try await appReader.next() == .watchers(docId: "d", count: 1))
+        try browser.send(.watchDoc(docId: "d", framePx: nil))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 1, framePx: nil))
 
         // Browser vanishes without unwatchDoc: Connection.close() must release
         // the watch, observable as the count dropping back to 0.
         browser.input.finish()
-        #expect(try await appReader.next() == .watchers(docId: "d", count: 0))
+        #expect(try await appReader.next() == .watchers(docId: "d", count: 0, framePx: nil))
     }
 }
 

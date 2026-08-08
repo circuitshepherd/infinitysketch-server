@@ -155,6 +155,11 @@ actor DocumentSession {
     /// so every existing use of that dictionary reads exactly as it did.
     private var strippedCapableSubscribers: Set<UUID> = []
     private var watchers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
+    /// A watcher's requested live-frame long side, in pixels — capped here so no page can ask
+    /// the device for an unbounded raster. 2048 is the 4-megapixel ceiling the rest of the
+    /// render surface already uses.
+    static let maxWatcherFramePx = 2048
+    private var watcherFramePx: [UUID: Int] = [:]
     /// One-slot live-frame cache; dies with the session (the HTTP route then
     /// falls back to the stored thumbnail, marked stale).
     private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date)?
@@ -232,7 +237,8 @@ actor DocumentSession {
         // A reconnecting app must learn it is already watched: deliver the
         // current watcher count as this subscription's first event.
         if !watchers.isEmpty {
-            continuation.yield(.watchers(docId: docId, count: watchers.count))
+            continuation.yield(.watchers(docId: docId, count: watchers.count,
+                                         framePx: watcherFramePx.values.max()))
         }
         return SubscribeResult(
             snapshot: .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes)),
@@ -247,17 +253,23 @@ actor DocumentSession {
 
     var watcherCount: Int { watchers.count }
 
-    func watch() -> WatchResult {
+    func watch(framePx: Int? = nil) -> WatchResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
             bufferingPolicy: .bufferingOldest(bufferLimit))
         watchers[token] = continuation
+        // A non-positive request means "no preference" — the page never sends one,
+        // but the wire cannot promise that.
+        if let px = framePx, px > 0 {
+            watcherFramePx[token] = min(px, Self.maxWatcherFramePx)
+        }
         notifyWatcherCount()
         return WatchResult(events: stream, token: token)
     }
 
     func unwatch(_ token: UUID) {
         guard watchers.removeValue(forKey: token) != nil else { return }
+        watcherFramePx.removeValue(forKey: token)
         notifyWatcherCount()
     }
 
@@ -272,6 +284,7 @@ actor DocumentSession {
                 // Frame nudges are refetch hints — a stalled watcher is dropped;
                 // the page reconnects like the overview does.
                 watchers.removeValue(forKey: token)?.finish()
+                watcherFramePx.removeValue(forKey: token)
                 notifyWatcherCount()
             default:
                 break
@@ -281,7 +294,8 @@ actor DocumentSession {
 
     /// Tell subscribers (the app) the current viewer count.
     private func notifyWatcherCount() {
-        broadcast(.watchers(docId: docId, count: watchers.count))
+        broadcast(.watchers(docId: docId, count: watchers.count,
+                            framePx: watcherFramePx.values.max()))
     }
 
     /// Returns `.accepted(seq:)` carrying the newly assigned seq (the
