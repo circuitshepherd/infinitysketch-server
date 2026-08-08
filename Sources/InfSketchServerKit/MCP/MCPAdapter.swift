@@ -1092,11 +1092,13 @@ public actor MCPAdapter {
                 subscribers}]}`.
 
                 CALL THIS INSTEAD OF GUESSING A docId FROM CONVERSATION. A document's `docId` is \
-                its filename stem captured when the app opened it, so a rename mid-session leaves \
-                the name a human says ("grok2 test") different from the live id ("Untitled 16 1 \
-                1") until the document is reopened — and every tool aimed at the spoken name \
-                fails against a device that is working perfectly. `openDocs` is the truth: those \
-                are the ids the selection tools, and every write to an open document, will accept.
+                its filename stem, so the name a human says ("grok2 test") can differ from the \
+                live id ("Untitled 16 1 1") — and every tool aimed at the spoken name fails \
+                against a device that is working perfectly. A rename moves the id with the file, \
+                so what remains is an id quoted from earlier in the conversation, a document \
+                whose sync is off, and one skipped as a same-stem duplicate. `openDocs` is the \
+                truth: those are the ids the selection tools, and every write to an open \
+                document, will accept.
 
                 An empty `openDocs` with `devices.count == 0` means no device is connected at all \
                 (open the app with the mirror enabled, and check it points at THIS server's port). \
@@ -2674,11 +2676,14 @@ public actor MCPAdapter {
 
     /// Turn a dead-end error into a self-correcting one.
     ///
-    /// The failure this exists for: a document renamed while open keeps the mirror `docId` it was
-    /// registered under (the filename stem at `beginMirroring`), so an agent aiming at the name
-    /// the user now sees misses the live session and is told `noSelectionActive` — with no way to
+    /// The failure this exists for: an agent aiming at a name that is not the live mirror `docId`
+    /// (a filename stem) misses the live session and is told `noSelectionActive` — with no way to
     /// learn that `grok2 test` and `Untitled 16 1 1` are the same open document. The server knows
     /// both. Saying so costs nothing and removes the guesswork.
+    ///
+    /// The original trigger was a document renamed WHILE OPEN, which kept the id it was registered
+    /// under. The app now re-keys its mirror entry at the rename, so that particular divergence is
+    /// closed at the source; an id quoted from earlier in a conversation still produces it.
     ///
     /// Applied at THIS seam rather than at the ~57 `errorResult("unknownDoc")` call sites: one
     /// place to keep correct, and it also catches the device-relayed `deviceFailed:
