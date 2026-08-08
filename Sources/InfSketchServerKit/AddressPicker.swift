@@ -52,6 +52,16 @@ public struct AddressPicker: Sendable {
             : nil
     }
 
+    /// The MCP url for an agent on THIS machine.
+    ///
+    /// Printed beside the LAN one rather than instead of it: an agent on this machine needs no
+    /// network address, and unlike the LAN address this one survives a Wi-Fi change — so it is the
+    /// better string to put in a config file whenever the agent is local. It exists even with no
+    /// candidates at all, which is what the no-address fallback prints.
+    public var loopbackMCPURL: String {
+        Self.mcpURL(ip: "127.0.0.1", port: port)
+    }
+
     public var currentOverviewURL: String? {
         candidates.indices.contains(selection)
             ? Self.overviewURL(ip: candidates[selection].ip, port: port)

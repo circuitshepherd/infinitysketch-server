@@ -80,4 +80,22 @@ import Testing
         #expect(moved)
         #expect(p.currentOverviewURL == "http://10.0.0.5:18551/")
     }
+
+    /// An agent on this machine needs no network address, so the loopback MCP url exists even when
+    /// nothing else does — the case where the terminal can offer no code at all.
+    @Test func theLoopbackMcpUrlExistsWithNoCandidates() {
+        #expect(AddressPicker(candidates: [], port: 18551).loopbackMCPURL
+                == "http://127.0.0.1:18551/mcp")
+    }
+
+    /// It is the address that does NOT move: switching the offered address in the terminal changes
+    /// which LAN url is shown, and an agent already configured against loopback keeps working.
+    @Test func theLoopbackMcpUrlDoesNotFollowTheSelection() {
+        var p = picker()
+        #expect(p.loopbackMCPURL == "http://127.0.0.1:18551/mcp")
+        let moved = p.handle(.down)
+        #expect(moved)
+        #expect(p.currentMCPURL == "http://10.0.0.5:18551/mcp")
+        #expect(p.loopbackMCPURL == "http://127.0.0.1:18551/mcp")
+    }
 }
