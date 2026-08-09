@@ -1,9 +1,9 @@
-// macOS-only: the SDK's HTTPClientTransport does not support SSE on Linux
-// (documented in its source), so its Client cannot complete initialize against
-// StatefulHTTPServerTransport there; the server-side mount + adapter are
-// Linux-safe to compile — see task-1-report.md (gate resolution) and
-// MCPSpikeTests.swift, which carries the identical gate.
-#if !os(Linux)
+// Apple-platforms-only: the SDK's HTTPClientTransport does not support SSE without its
+// `EventSource` dependency (documented in its source), so its Client cannot complete initialize
+// against StatefulHTTPServerTransport there; the server-side mount + adapter are safe to compile
+// everywhere — see task-1-report.md (gate resolution) and MCPSpikeTests.swift, which carries the
+// identical gate. The flag is defined in Package.swift, beside the dependency that causes it.
+#if MCP_SSE_CLIENT
 
 import Foundation
 import Testing
@@ -6423,8 +6423,8 @@ private actor FakeStrokeOpDevice {
     }
 }
 
-// EVERYTHING in this file lives inside the `#if !os(Linux)` above, and this must stay the
+// EVERYTHING in this file lives inside the `#if MCP_SSE_CLIENT` above, and this must stay the
 // LAST line. A suite appended below it compiles on Linux with no `import Testing` and no
 // `startServer`/`connectedClient` — which is exactly what `DeleteDocToolTests` did, breaking
 // the Linux build while macOS stayed green, because on macOS the gate is true either way.
-#endif  // !os(Linux)
+#endif  // MCP_SSE_CLIENT

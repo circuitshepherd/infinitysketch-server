@@ -5,8 +5,9 @@ iOS/iPadOS sketching app. Run it on a machine in your home or studio network and
 their sketches in sync — and AI agents can read, draw into, and rework the same documents through
 an [MCP](https://modelcontextprotocol.io) endpoint.
 
-A cross-platform Swift command-line application: **macOS** and **Linux** are tested on every commit;
-**Windows** is intended but currently unverified.
+A cross-platform Swift command-line application: **macOS** and **Linux** are tested on every commit,
+and **Windows** builds and passes the full suite natively (verified 2026-08-09 on Windows 11 with
+Swift 6.3.3 — see [Windows](#windows) below).
 
 ## What it does
 
@@ -40,7 +41,33 @@ join. Or type the address by hand in the app under Settings. The web overview is
 
 Flags: `--port N` (default 8080), `--docs DIR` (default `./docs` — created if missing; documents
 are stored there as plain `.infsketch` files, deletions go to a `.trash/` folder pruned after 30
-days, matching the iOS *Recently Deleted* window).
+days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a browser at startup).
+
+### Windows
+
+Install [Swift for Windows](https://www.swift.org/install/windows/) (`winget install Swift.Toolchain`)
+**and** Visual Studio 2022 with the *Desktop development with C++* workload — Swift links through
+MSVC's `link.exe`, and without it `swift build` fails with *"toolchain is invalid: could not find CLI
+tool `link`"*. Build from a **x64 Native Tools Command Prompt for VS 2022** (or run `vcvars64.bat`
+first) so that environment is present.
+
+```pwsh
+git clone https://gitlab.com/pepi.woess/infinitysketch-server.git
+cd infinitysketch-server
+swift run infsketch-server --docs $env:USERPROFILE\infsketch-docs
+```
+
+Three Windows-specific things worth knowing:
+
+- **`~` is not expanded by PowerShell**, so `--docs ~/infsketch-docs` creates a directory literally
+  named `~`. Use `$env:USERPROFILE\...` as above.
+- **Turn on Developer Mode** (Settings → System → For developers) if you hit *"unable to create
+  symlink … Permission denied"* while dependencies are checked out. Windows needs it to create
+  symlinks unprivileged; without it SwiftPM also cannot create its `.build\debug` shortcut, and the
+  built binaries are under `.build\x86_64-unknown-windows-msvc\debug\` instead.
+- **The QR code needs a terminal that renders ANSI colour.** Windows Terminal does; the server also
+  turns on virtual-terminal processing itself, so the classic console works too. If you ever see
+  escape sequences as literal text, the code on screen will not scan.
 
 ## App compatibility
 
@@ -91,8 +118,14 @@ Linux here before. The CI image is `swift:6.1` (see `.gitlab-ci.yml`); to run it
 docker run --rm -v "$PWD:/src" -w /src swift:6.1 swift test
 ```
 
-The macOS suite runs more tests than Linux — the difference is the MCP adapter tests, which need
-an SSE client transport that is not available on Linux.
+The macOS suite runs more tests than Linux and Windows — the difference is the MCP adapter tests,
+which drive a real client over real HTTP and so need an SSE client transport. The SDK compiles that
+in only on Apple platforms, so the gate is the `MCP_SSE_CLIENT` flag defined in `Package.swift`
+beside the dependency that causes it. It is written as a POSITIVE list of the platforms that HAVE
+the capability, because it used to say `!os(Linux)` — naming the one platform then known to lack it
+— and Windows silently fell on the wrong side of that.
+
+Windows is built by `.github/workflows/windows.yml` on the GitHub mirror (inert on GitLab).
 
 Targets (`Package.swift`):
 
@@ -127,7 +160,13 @@ Two consequences worth knowing before you push:
 ## Dependencies
 
 - [FlyingFox](https://github.com/swhitty/FlyingFox) (MIT) — HTTP + WebSocket server
-- [MCP Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) (MIT) — the MCP endpoint
+- [MCP Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) (MIT) — the MCP endpoint.
+  **Temporarily pinned to a [fork](https://github.com/circuitshepherd/swift-sdk) — upstream 0.12.1
+  plus one commit** that lets the MCP module compile on Windows: upstream guards `import
+  EventSource` with `#if !os(Linux)` while its manifest links EventSource on Apple platforms only,
+  so on Windows the guard is true and the module is absent. The fix expresses the condition as
+  `canImport(EventSource)`; see `docs/swift-sdk-windows-eventsource.patch`. The pin is dropped once
+  an upstream release carries it.
 - [swift-crypto](https://github.com/apple/swift-crypto) (Apache-2.0) — SHA-256 for write guards
 - [swift-qrcode-generator](https://github.com/fwcd/swift-qrcode-generator) (MIT) — the terminal
   join code

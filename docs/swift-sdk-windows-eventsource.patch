@@ -1,0 +1,71 @@
+﻿Fix: build MCP on Windows -- gate EventSource by capability, not by "not Linux"
+
+swift-sdk's manifest links the EventSource product on Apple platforms only:
+
+    .product(name: "EventSource", package: "eventsource",
+             condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS, .macCatalyst]))
+
+but HTTPClientTransport.swift gates its use with #if !os(Linux). On Windows that guard is TRUE
+while the module is absent, so the MCP target fails to build:
+
+    Sources/MCP/Base/Transports/HTTPClientTransport.swift:5:12: error: no such module 'EventSource'
+
+EventSource cannot simply be linked on Windows instead -- it depends on swift-nio and declares only
+Apple platforms -- so Windows belongs on the same no-SSE path Linux already takes. Expressing the
+condition as the capability it actually is fixes Windows and stays correct for any future platform,
+since canImport is false exactly when the manifest did not link the module.
+
+Verified against swift-sdk 0.12.1 on Windows 11 / Swift 6.3.3 (x86_64-unknown-windows-msvc):
+the MCP module builds, and a downstream server using StatefulHTTPServerTransport answers a real
+initialize handshake over HTTP.
+
+Applies to Sources/MCP/Base/Transports/HTTPClientTransport.swift, 5 conditional sites.
+diff --git a/Sources/MCP/Base/Transports/HTTPClientTransport.swift b/Sources/MCP/Base/Transports/HTTPClientTransport.swift
+index 060cd13..ce02592 100644
+--- a/Sources/MCP/Base/Transports/HTTPClientTransport.swift
++++ b/Sources/MCP/Base/Transports/HTTPClientTransport.swift
+@@ -1,7 +1,7 @@
+ import Foundation
+ import Logging
+ 
+-#if !os(Linux)
++#if canImport(EventSource)
+     import EventSource
+ #endif
+ 
+@@ -266,7 +266,7 @@ public actor HTTPClientTransport: Transport {
+             request = requestModifier(request)
+ 
+             do {
+-                #if os(Linux)
++                #if !canImport(EventSource)
+                     let (responseData, response) = try await session.data(for: request)
+                     try await processResponse(response: response, data: responseData)
+                 #else
+@@ -304,7 +304,7 @@ public actor HTTPClientTransport: Transport {
+         }
+     }
+ 
+-    #if os(Linux)
++    #if !canImport(EventSource)
+         private func processResponse(response: URLResponse, data: Data) async throws {
+             guard let httpResponse = response as? HTTPURLResponse else {
+                 throw MCPError.internalError("Invalid HTTP response")
+@@ -467,7 +467,7 @@ public actor HTTPClientTransport: Transport {
+     // MARK: - SSE
+ 
+     private func startListeningForServerEvents() async {
+-        #if os(Linux)
++        #if !canImport(EventSource)
+             if streaming {
+                 logger.warning(
+                     "SSE streaming was requested but is not fully supported on Linux. SSE connection will not be attempted."
+@@ -563,7 +563,7 @@ public actor HTTPClientTransport: Transport {
+         #endif
+     }
+ 
+-    #if !os(Linux)
++    #if canImport(EventSource)
+         private func connectToEventStream() async throws {
+             guard isConnected else {
+                 logger.debug("⚠️ Skipping connectToEventStream - transport not connected")

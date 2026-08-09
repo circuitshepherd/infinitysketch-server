@@ -5,7 +5,7 @@ import Glibc
 #elseif canImport(Darwin)
 import Darwin
 #elseif canImport(WinSDK)
-import WinSDK          // the C runtime, for `fflush` — the terminal handling below is POSIX-only
+import WinSDK          // the console API and the C runtime (`fflush`, `atexit`, `exit`)
 #endif
 
 var port: UInt16 = 8080
@@ -59,7 +59,42 @@ print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs
 /// same port — routine here, one per worktree — makes `run()` throw, and an error thrown from
 /// top-level code TRAPS rather than exits, so neither `atexit` nor the `defer` ever runs. Catching
 /// it and calling `exit` is the whole difference between a tidy message and a broken shell.
-#if !os(Windows)
+#if os(Windows)
+/// Windows has no `termios`; the equivalent state is the console's two mode words, and BOTH are
+/// changed — input for raw keys, output for the ANSI the code and the redraw are made of. A console
+/// left in raw input mode is the same wrecked shell a POSIX one is.
+nonisolated(unsafe) var savedConsoleInputMode: DWORD?
+nonisolated(unsafe) var savedConsoleOutputMode: DWORD?
+
+func restoreTerminalSettings() {
+    if let mode = savedConsoleInputMode {
+        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), mode)
+    }
+    if let mode = savedConsoleOutputMode {
+        SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode)
+    }
+}
+
+/// Turns on `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, without which this program prints garbage.
+///
+/// Everything below the socket is ANSI: `TerminalQRCode` sets an explicit foreground and background
+/// on every module — because a dark theme inverts the code and scanners refuse inverted ones — and
+/// `drawJoinCode` erases its previous block with a cursor-up and a clear. Windows Terminal enables
+/// VT for a new console itself, but conhost (still what a double-clicked .exe and many CI shells
+/// get) does NOT, and there the user sees the escapes as literal text and the code cannot be
+/// scanned at all. Enabled unconditionally rather than only when keys are read: output being a
+/// console and input being one are independent (`infsketch-server > log` redirects only stdout).
+///
+/// A handle with no console — a redirect to a file — fails `GetConsoleMode`, and there is nothing
+/// to enable and nothing to restore. That is a success, not an error.
+func enableVirtualTerminalOutput() {
+    let handle = GetStdHandle(STD_OUTPUT_HANDLE)
+    var mode: DWORD = 0
+    guard GetConsoleMode(handle, &mode) else { return }
+    savedConsoleOutputMode = mode
+    SetConsoleMode(handle, mode | DWORD(ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+}
+#else
 nonisolated(unsafe) var savedTerminalSettings: termios?
 
 func restoreTerminalSettings() {
@@ -81,7 +116,7 @@ nonisolated(unsafe) var openMessage: String?
 /// Whether a keypress can reach this process at all. ONE predicate, read by both the hint below and
 /// the reader further down, so the offer and the ability to honour it cannot drift apart: under
 /// `scripts/worktree-server` stdin is /dev/null, and the log was telling its reader to press keys
-/// that nothing would ever read. On Windows the terminal handling is not built at all.
+/// that nothing would ever read.
 /// A function rather than a computed `var`: a top-level variable in `main.swift` is implicitly
 /// main-actor isolated, which `drawJoinCode` — an ordinary global function — cannot read.
 ///
@@ -90,7 +125,11 @@ nonisolated(unsafe) var openMessage: String?
 /// one with a single address, which is not a difference a user can be expected to know about.
 func keyReadingIsPossible() -> Bool {
     #if os(Windows)
-    return false
+    // `GetConsoleMode` succeeds only for a handle that IS a console, which makes it the exact
+    // counterpart of `isatty` — and it is the same call the raw-mode switch needs, so the offer
+    // and the ability to honour it are answered by one mechanism here too.
+    var mode: DWORD = 0
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode)
     #else
     return isatty(STDIN_FILENO) == 1
     #endif
@@ -103,9 +142,9 @@ func drawJoinCode() {
         print("\u{1B}[\(drawnLineCount)A\u{1B}[0J", terminator: "")
     }
     guard let url = picker.currentURL else {
-        // No usable address, or Windows. Say why rather than printing nothing at all — and still
-        // give the loopback MCP url, which is the one thing that DOES work here: an agent on this
-        // machine needs no network address.
+        // No usable address. Say why rather than printing nothing at all — and still give the
+        // loopback MCP url, which is the one thing that DOES work here: an agent on this machine
+        // needs no network address.
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
         text += "  \(picker.loopbackMCPURL)\n"
@@ -172,22 +211,39 @@ if openBrowser, listening {
     openMessage = BrowserLauncher.message(for: BrowserLauncher.open(localURL), url: localURL)
 }
 
+#if os(Windows)
+// Before the FIRST draw: everything below is ANSI, and on conhost it is literal text until this
+// runs. Also before the reader arms, so a console that can only be written to still gets a code
+// it can read.
+enableVirtualTerminalOutput()
+#endif
+
 drawJoinCode()
 
-#if !os(Windows)
 /// Read exactly `count` bytes, or report that the stream ended.
 ///
-/// A single `read` is allowed to return SHORT, and an arrow key is three bytes: over ssh, or after a
+/// A single read is allowed to return SHORT, and an arrow key is three bytes: over ssh, or after a
 /// paste, `Esc [ B` can arrive split. Demanding all of it in one call made the picker mistake that
-/// for the terminal going away and quit silently for the rest of the session.
+/// for the terminal going away and quit silently for the rest of the session. The same is true of
+/// `ReadFile` on a console handle, so both platforms need the loop.
 func readExactly(_ count: Int, into buffer: inout [UInt8]) -> Bool {
     var filled = 0
     while filled < count {
+        #if os(Windows)
+        var got: DWORD = 0
+        let ok = buffer.withUnsafeMutableBytes { raw in
+            ReadFile(GetStdHandle(STD_INPUT_HANDLE), raw.baseAddress! + filled,
+                     DWORD(count - filled), &got, nil)
+        }
+        guard ok, got > 0 else { return false }      // failure, or the console went away
+        filled += Int(got)
+        #else
         let got = buffer.withUnsafeMutableBufferPointer {
             read(STDIN_FILENO, $0.baseAddress! + filled, count - filled)
         }
         guard got > 0 else { return false }          // 0 = EOF, -1 = error
         filled += got
+        #endif
     }
     return true
 }
@@ -207,6 +263,53 @@ func quitFromKeyboard() -> Never {
     exit(0)
 }
 
+/// Puts the terminal into raw mode and wires the restore to every way this process can end.
+///
+/// Called from the reader thread, which is where the restore has to be owned: `exit` does not
+/// unwind that thread, so on the `q` path it is the `atexit` handler that actually runs, not the
+/// `defer`.
+///
+/// The two platforms differ only in HOW the mode is set. What is read afterwards is byte-identical,
+/// which is the whole point of `ENABLE_VIRTUAL_TERMINAL_INPUT` below.
+func enterRawModeAndArmRestore() {
+    #if os(Windows)
+    let handle = GetStdHandle(STD_INPUT_HANDLE)
+    var original: DWORD = 0
+    guard GetConsoleMode(handle, &original) else { return }
+    savedConsoleInputMode = original
+    atexit(restoreTerminalSettings)
+    // The counterpart of the SIGINT/SIGTERM handlers, and wider: ONE callback covers Ctrl-C,
+    // Ctrl-Break, the window's close box, logoff and shutdown. Windows never raises SIGTERM at all,
+    // so a `signal` port of this would silently cover less than the POSIX version does.
+    SetConsoleCtrlHandler({ _ in restoreTerminalSettings(); _exit(130) }, true)
+
+    // Clearing ENABLE_LINE_INPUT and ENABLE_ECHO_INPUT is what `~(ICANON | ECHO)` says on POSIX.
+    // ENABLE_PROCESSED_INPUT is KEPT, and deliberately: it is what still turns Ctrl-C into a
+    // control event, exactly as the POSIX side leaves `ISIG` on — so `0x03` almost never reaches
+    // the read there either, and is mapped anyway because that is what Ctrl-C has always meant.
+    //
+    // ENABLE_VIRTUAL_TERMINAL_INPUT is the reason both platforms can share one reader: with it an
+    // arrow arrives as `Esc [ A`, the same three bytes `AddressPicker.arrowKey` already parses,
+    // instead of a Windows KEY_EVENT_RECORD that would need a second, drifting key mapping.
+    let raw = (original & ~DWORD(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+        | DWORD(ENABLE_PROCESSED_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT)
+    SetConsoleMode(handle, raw)
+    #else
+    var original = termios()
+    tcgetattr(STDIN_FILENO, &original)
+    savedTerminalSettings = original
+    atexit(restoreTerminalSettings)
+    // `_exit`, not `exit`: only async-signal-safe calls are allowed here, and `exit` would also
+    // run the `atexit` handler a second time. The restore has already happened by then.
+    signal(SIGINT) { _ in restoreTerminalSettings(); _exit(130) }
+    signal(SIGTERM) { _ in restoreTerminalSettings(); _exit(143) }
+
+    var raw = original
+    raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw)
+    #endif
+}
+
 // The reader needs a terminal. Under `scripts/worktree-server` stdin is /dev/null, so this never
 // arms at all and the first code simply stays in the log with the server running.
 if keyReadingIsPossible() {
@@ -216,19 +319,8 @@ if keyReadingIsPossible() {
     // accept loop and every connection need. Same rule the app already follows for PencilKit's
     // blocking rasterizer, and the same deadlock if it is broken.
     Thread.detachNewThread {
-        var original = termios()
-        tcgetattr(STDIN_FILENO, &original)
-        savedTerminalSettings = original
-        atexit(restoreTerminalSettings)
-        // `_exit`, not `exit`: only async-signal-safe calls are allowed here, and `exit` would also
-        // run the `atexit` handler a second time. The restore has already happened by then.
-        signal(SIGINT) { _ in restoreTerminalSettings(); _exit(130) }
-        signal(SIGTERM) { _ in restoreTerminalSettings(); _exit(143) }
+        enterRawModeAndArmRestore()
         defer { restoreTerminalSettings() }
-
-        var raw = original
-        raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw)
 
         var byte = [UInt8](repeating: 0, count: 1)
         var sequence = [UInt8](repeating: 0, count: 2)
@@ -263,7 +355,6 @@ if keyReadingIsPossible() {
         }
     }
 }
-#endif
 
 // The server is already running (started above). Awaiting the task here keeps the process alive and
 // keeps the failure out of a `throw` from top-level code, which is a TRAP: it runs neither `atexit`

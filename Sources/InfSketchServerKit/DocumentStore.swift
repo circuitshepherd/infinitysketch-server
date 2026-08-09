@@ -82,7 +82,7 @@ public struct DirectoryDocumentStore: DocumentStore {
     }
 
     public func save(docId: String, bytes: Data) throws {
-        try bytes.write(to: try resolvedFileURL(for: docId), options: .atomic)
+        try bytes.write(to: try canonicalFileURL(for: docId), options: .atomic)
     }
 
     public func exists(docId: String) throws -> Bool {
@@ -201,6 +201,37 @@ public struct DirectoryDocumentStore: DocumentStore {
             // same one every time rather than whatever the directory happens to enumerate first.
             .min()
         guard let match else { return exact }
+        return try fileURL(for: match)
+    }
+
+    /// Where a SAVE must land: the spelling the document is ALREADY stored under.
+    ///
+    /// `resolvedFileURL`'s fast path above is correct for READING — on a case-insensitive
+    /// filesystem `RAINFALL.infsketch` opens `Rainfall.infsketch` — but writing through the
+    /// caller's spelling RENAMES the document, because an atomic write replaces the destination BY
+    /// NAME. Measured on Windows/NTFS: saving `Rainfall` and then `RAINFALL` left ONE document
+    /// called `RAINFALL`, where macOS and Linux both leave it called `Rainfall`.
+    ///
+    /// That is not cosmetic, which is why it is worth an enumeration. A docId IS this server's
+    /// document identity — the filename stem the app captured when it opened the document, and what
+    /// the mirror, the holder index and every agent tool key off — so a silent re-spelling leaves a
+    /// device keyed on `Rainfall` and a server holding `RAINFALL` disagreeing about which document
+    /// they are syncing, on one platform only.
+    ///
+    /// The cost is deliberately kept OFF the read path: a save writes the whole document, beside
+    /// which one directory listing is noise, while `exists` — which runs on every byte-CAS — keeps
+    /// its single `fileExists`.
+    private func canonicalFileURL(for docId: String) throws -> URL {
+        let stored = ((try? list()) ?? []).map(\.docId)
+        // Already the stored spelling, or a document that does not exist yet: either way the
+        // caller's own docId is the right name to write.
+        guard !stored.contains(docId) else { return try fileURL(for: docId) }
+        let wanted = docId.lowercased()
+        // `.min()` for the same reason `resolvedFileURL` uses it: two files differing only by case
+        // can exist on a case-sensitive filesystem, and the same one must win every time.
+        guard let match = stored.filter({ $0.lowercased() == wanted }).min() else {
+            return try fileURL(for: docId)
+        }
         return try fileURL(for: match)
     }
 }

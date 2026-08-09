@@ -51,6 +51,31 @@ import Testing
         #expect(LocalAddresses.ranked([]).isEmpty)
     }
 
+    /// Windows names an interface for a person to read, so the POSIX-shaped prefixes miss it
+    /// entirely: `Ethernet` is not `eth` until the comparison is case-insensitive, and `Wi-Fi`
+    /// matches nothing at all. With every adapter falling into the same class, a Hyper-V or WSL
+    /// bridge sorts purely on discovery order and can be offered ahead of the Wi-Fi the phone is
+    /// actually on — which is the one outcome this ranking exists to prevent.
+    @Test func windowsAdapterNamesAreRecognisedAsHardware() {
+        let ranked = LocalAddresses.ranked([
+            LocalAddress(interface: "vEthernet (WSL)", ip: "172.28.0.1"),
+            LocalAddress(interface: "VMware Network Adapter VMnet1", ip: "192.168.56.1"),
+            LocalAddress(interface: "Wi-Fi", ip: "192.168.1.42"),
+        ])
+        #expect(ranked.first == LocalAddress(interface: "Wi-Fi", ip: "192.168.1.42"))
+        #expect(ranked.count == 3, "the others stay in the list — the user can switch to them")
+    }
+
+    /// `Ethernet` must not be read as hardware by accident of the `en` prefix — it matches `eth`
+    /// once case is folded, and a virtual adapter whose name merely STARTS with a letter pair must
+    /// still miss. Pinned because the fold is what makes the prefix list ambiguous.
+    @Test func aVirtualAdapterIsNotPromotedByTheCaseFold() {
+        #expect(LocalAddresses.ranked([
+            LocalAddress(interface: "Bluetooth Network Connection", ip: "192.168.137.1"),
+            LocalAddress(interface: "Ethernet", ip: "10.0.0.7"),
+        ]).first == LocalAddress(interface: "Ethernet", ip: "10.0.0.7"))
+    }
+
     /// The real enumeration, on whatever machine this runs on. It cannot assert a specific address,
     /// but it can assert the invariants: no loopback survives, and nothing is malformed.
     @Test func theRealMachineYieldsUsableAddresses() {
