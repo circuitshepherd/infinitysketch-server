@@ -9,15 +9,26 @@ import Testing
 /// Every test starts from a 1000x800 box holding a 1024x1024 frame: fit = 800/1024
 /// = 0.78125, letterboxed left/right (tx 100), flush top/bottom (ty 0).
 @Suite struct WebViewerViewportTests {
-    private func makeVP(dpr: Double = 2.0) -> JSValue {
+    /// The default frame reports NO canvas rect, which is the stale-thumbnail path and
+    /// the weaker frame-pixel rule — so every test below that does not pass one is
+    /// pinning that fallback.
+    private func makeVP(dpr: Double = 2.0, rect: Any = NSNull()) -> JSValue {
         let ctx = JSContext()!
         ctx.exceptionHandler = { _, ex in Issue.record("JS threw: \(ex?.toString() ?? "?")") }
         ctx.evaluateScript(WebUI.viewportJS)
         ctx.evaluateScript("var vp = makeViewport(function () { return \(dpr); });")
         let vp = ctx.objectForKeyedSubscript("vp")!
         vp.invokeMethod("setBox", withArguments: [1000, 800])
-        vp.invokeMethod("setImageSize", withArguments: [1024, 1024])
+        vp.invokeMethod("setFrame", withArguments: [1024, 1024, rect])
         return vp
+    }
+
+    /// Where a canvas point currently lands in the box, given the rect the frame covers.
+    /// Two distinct points holding still across a frame change pins scale AND translation.
+    private func cssX(_ vp: JSValue, canvas: Double, rectX: Double, rectW: Double,
+                      imgW: Double = 1024) -> Double {
+        let s = state(vp)
+        return (canvas - rectX) * (imgW / rectW) * s.scale + s.tx
     }
 
     private func state(_ vp: JSValue) -> (scale: Double, tx: Double, ty: Double, atFit: Bool) {
@@ -84,7 +95,7 @@ import Testing
         vp.invokeMethod("zoomAbout", withArguments: [500, 400, 1.27])
         let s0 = state(vp)
         let frameFrac = ((500.0 - s0.tx) / s0.scale) / 1024.0   // doc-relative point at x=500
-        vp.invokeMethod("setImageSize", withArguments: [256, 256])
+        vp.invokeMethod("setFrame", withArguments: [256, 256, NSNull()])
         let s1 = state(vp)
         #expect(abs(frameFrac * 256.0 * s1.scale + s1.tx - 500) < 1e-9)
     }
@@ -121,11 +132,100 @@ import Testing
         ctx.evaluateScript("var vp = makeViewport(function () { return 2.0; });")
         let vp = ctx.objectForKeyedSubscript("vp")!
         vp.invokeMethod("setBox", withArguments: [1200, 1200])
-        vp.invokeMethod("setImageSize", withArguments: [256, 256])
+        vp.invokeMethod("setFrame", withArguments: [256, 256, NSNull()])
         let fitted = vp.forProperty("state")!.forProperty("scale")!.toDouble()
         #expect(abs(fitted - 4.6875) < 1e-12)
         vp.invokeMethod("zoomAbout", withArguments: [600, 600, 1.5])
         #expect(vp.forProperty("state")!.forProperty("scale")!.toDouble() >= fitted - 1e-12)
+    }
+
+    // MARK: - Holding a canvas region while the document's bounds move underneath
+
+    /// The bug this feature exists for. The frame keeps its 1024 px size while the
+    /// document's content grows, so the OLD rule saw nothing to do and the picture slid
+    /// out from under a zoomed viewer. Two distinct canvas points must stay put, which
+    /// pins the translation and the rescale together.
+    ///
+    /// Numbers chosen so neither clamp can mask a wrong answer: after the zoom the image
+    /// is 1016 CSS px against a 1000x800 box (overflowing, so no dead-space re-centring),
+    /// and the resulting scale 1.389 is under the 4 cap.
+    @Test func aContentRectChangeHoldsTheCanvasRegionWhileZoomed() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        vp.invokeMethod("zoomAbout", withArguments: [500, 400, 1.27])
+        let before = (a: cssX(vp, canvas: 120, rectX: 0, rectW: 500),
+                      b: cssX(vp, canvas: 300, rectX: 0, rectW: 500))
+
+        // A stroke lands up and to the left: the same 1024 pixels now cover more canvas.
+        vp.invokeMethod("setFrame", withArguments: [1024, 1024, [-100, -100, 700, 700]])
+
+        #expect(abs(cssX(vp, canvas: 120, rectX: -100, rectW: 700) - before.a) < 1e-9)
+        #expect(abs(cssX(vp, canvas: 300, rectX: -100, rectW: 700) - before.b) < 1e-9)
+        #expect(!state(vp).atFit)
+    }
+
+    /// The other half of the ask: at fit the view SHOULD follow the content.
+    @Test func aContentRectChangeRefitsWhileAtFit() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        #expect(state(vp).atFit)
+        vp.invokeMethod("setFrame", withArguments: [512, 512, [-100, -100, 700, 700]])
+        let s = state(vp)
+        #expect(s.atFit)
+        #expect(abs(s.scale - 800.0 / 512.0) < 1e-12)   // re-fitted to the new pixel size
+        #expect(abs(s.tx - (1000 - 800) / 2) < 1e-9)
+    }
+
+    /// A frame that reports no rect cannot be compensated for, so the weaker
+    /// frame-pixel rule takes over rather than the viewer inventing a mapping. This is
+    /// the live-frame -> stale-thumbnail transition.
+    @Test func aFrameWithNoRectFallsBackToTheFrameSizeRule() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        vp.invokeMethod("zoomAbout", withArguments: [500, 400, 1.27])
+        let s0 = state(vp)
+        let frameFrac = ((500.0 - s0.tx) / s0.scale) / 1024.0
+        vp.invokeMethod("setFrame", withArguments: [256, 256, NSNull()])
+        let s1 = state(vp)
+        #expect(abs(frameFrac * 256.0 * s1.scale + s1.tx - 500) < 1e-9)
+    }
+
+    /// Content growing far enough asks for a scale past the 8-device-px cap, and the
+    /// region genuinely cannot be held. Anchoring on the BOX CENTRE is what makes the
+    /// degradation "same middle, wrong zoom" instead of the view sliding sideways —
+    /// the reason this is not the algebraic tx += (newX - oldX) * s_c.
+    @Test func theBoxCentreSurvivesTheZoomClamp() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        vp.invokeMethod("zoomAbout", withArguments: [500, 400, 3.0 / (800.0 / 1024.0)])
+        #expect(abs(state(vp).scale - 3.0) < 1e-9)
+        let anchor = 250.0   // canvas point under the box centre, by symmetry
+
+        vp.invokeMethod("setFrame", withArguments: [1024, 1024, [0, 0, 2000, 2000]])
+
+        let s = state(vp)
+        #expect(abs(s.scale - 4.0) < 1e-12)   // 6.144 / 0.512 = 12, clamped to 8 / dpr
+        #expect(abs(cssX(vp, canvas: anchor, rectX: 0, rectW: 2000) - 500) < 1e-9)
+    }
+
+    /// A malformed rect must read as ABSENT, not as a rect: dividing by a zero width
+    /// would put NaN into scale and blank the viewer for the rest of the session.
+    @Test func aDegenerateRectIsTreatedAsAbsent() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        vp.invokeMethod("zoomAbout", withArguments: [500, 400, 1.27])
+        let before = state(vp)
+        vp.invokeMethod("setFrame", withArguments: [1024, 1024, [0, 0, 0, 500]])
+        let s = state(vp)
+        #expect(s.scale.isFinite && s.tx.isFinite && s.ty.isFinite)
+        #expect(abs(s.scale - before.scale) < 1e-12)   // same pixel size, fallback k = 1
+    }
+
+    /// Re-sending the SAME frame must not disturb a zoomed view — the page refetches on
+    /// every nudge, and a no-op that re-clamped would creep the picture once a second.
+    @Test func anUnchangedFrameMovesNothing() {
+        let vp = makeVP(rect: [0, 0, 500, 500])
+        vp.invokeMethod("zoomAbout", withArguments: [500, 400, 1.27])
+        vp.invokeMethod("panBy", withArguments: [-30, -20])
+        let before = state(vp)
+        vp.invokeMethod("setFrame", withArguments: [1024, 1024, [0, 0, 500, 500]])
+        let s = state(vp)
+        #expect(s.scale == before.scale && s.tx == before.tx && s.ty == before.ty)
     }
 }
 #endif

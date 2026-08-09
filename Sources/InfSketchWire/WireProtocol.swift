@@ -15,7 +15,7 @@ public enum WireProtocol {
     /// happily until the moment some other device deletes a document it is subscribed to, at which
     /// point the `docDeleted` push it cannot decode kills the connection — a disconnect with no
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
-    public static let version = 8
+    public static let version = 9
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -222,7 +222,12 @@ public enum ClientMessage: Equatable, Sendable {
     case transferAbort(transferId: UInt32, reason: String)
     case watchDoc(docId: String, framePx: Int?)
     case unwatchDoc(docId: String)
-    case frame(docId: String, payload: BulkPayload)
+    /// `canvasRect` is `[x, y, width, height]`: the canvas region the WHOLE square
+    /// frame covers, paper padding included — not the content bounds. It is what
+    /// lets a browser hold a canvas region still while the document's own bounds
+    /// move underneath it; without it the frame's pixels silently change meaning.
+    /// `nil` when the document draws nothing, so nothing is covered.
+    case frame(docId: String, payload: BulkPayload, canvasRect: [Double]?)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
     /// `meta` (additive) rides small JSON inline — never chunked — alongside
     /// the (possibly chunked) PNG `payload`; see the `render` op (Task 4).
@@ -240,7 +245,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx
+        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect
     }
 
     public init(from decoder: any Decoder) throws {
@@ -292,7 +297,8 @@ extension ClientMessage: Codable {
             } else {
                 payload = .inline(try c.decode(Data.self, forKey: .data))
             }
-            self = .frame(docId: try c.decode(String.self, forKey: .docId), payload: payload)
+            self = .frame(docId: try c.decode(String.self, forKey: .docId), payload: payload,
+                          canvasRect: try c.decodeIfPresent([Double].self, forKey: .canvasRect))
         case "advertiseDocs":
             let payload: BulkPayload
             if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
@@ -384,13 +390,14 @@ extension ClientMessage: Codable {
         case .unwatchDoc(let docId):
             try c.encode("unwatchDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
-        case .frame(let docId, let payload):
+        case .frame(let docId, let payload, let canvasRect):
             try c.encode("frame", forKey: .type)
             try c.encode(docId, forKey: .docId)
             switch payload {
             case .inline(let data): try c.encode(data, forKey: .data)
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
+            try c.encodeIfPresent(canvasRect, forKey: .canvasRect)
         case .advertiseDocs(let payload):
             try c.encode("advertiseDocs", forKey: .type)
             switch payload {
@@ -651,7 +658,7 @@ extension ClientMessage: TransferCarrying {
     public var bulkBytes: Data? {
         switch self {
         case .op(_, _, let payload, _): return payload.bulk.inlineData
-        case .frame(_, let payload): return payload.inlineData
+        case .frame(_, let payload, _): return payload.inlineData
         case .advertiseDocs(let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
         case .strokeOpReply(_, _, let payload, _, _, _): return payload?.inlineData
@@ -664,8 +671,11 @@ extension ClientMessage: TransferCarrying {
             return .op(docId: docId, opId: opId,
                        payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)),
                        expectation: expectation)
-        case .frame(let docId, _):
-            return .frame(docId: docId, payload: .transfer(descriptor))
+        case .frame(let docId, _, let canvasRect):
+            // canvasRect rides through the swap for the same reason `meta` does below:
+            // chunking changes how the bytes travel, never what they are. Dropping it
+            // here would be silent — the viewer's fallback is simply the old behaviour.
+            return .frame(docId: docId, payload: .transfer(descriptor), canvasRect: canvasRect)
         case .advertiseDocs:
             return .advertiseDocs(payload: .transfer(descriptor))
         case .createDocReply(let requestId, let docId, _, let failureReason):
@@ -689,7 +699,7 @@ extension ClientMessage: TransferCarrying {
         case .op(_, _, let payload, _):
             if case .transfer(let d) = payload.bulk { return d }
             return nil
-        case .frame(_, .transfer(let d)):
+        case .frame(_, .transfer(let d), _):
             return d
         case .advertiseDocs(.transfer(let d)):
             return d
@@ -707,8 +717,8 @@ extension ClientMessage: TransferCarrying {
         case .op(let docId, let opId, let payload, let expectation):
             return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes),
                        expectation: expectation)
-        case .frame(let docId, _):
-            return .frame(docId: docId, payload: .inline(bytes))
+        case .frame(let docId, _, let canvasRect):
+            return .frame(docId: docId, payload: .inline(bytes), canvasRect: canvasRect)
         case .advertiseDocs:
             return .advertiseDocs(payload: .inline(bytes))
         case .createDocReply(let requestId, let docId, _, let failureReason):

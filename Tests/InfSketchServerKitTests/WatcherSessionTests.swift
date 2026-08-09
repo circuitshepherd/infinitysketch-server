@@ -45,19 +45,33 @@ import InfSketchWire
         _ = await subIt.next()   // watchers(count:1)
         var watchIt = watch.events.makeAsyncIterator()
 
-        let accepted = await manager.submitFrame(docId: "d", bytes: Data([9, 9]))
+        let accepted = await manager.submitFrame(docId: "d", bytes: Data([9, 9]), canvasRect: [1, 2, 30, 40])
         #expect(accepted)
         #expect(await watchIt.next() == .frameAvailable(docId: "d", seq: 0))
         let cached = await manager.latestFrame(docId: "d")
         #expect(cached?.png == Data([9, 9]))
         #expect(cached?.seq == 0)
+        #expect(cached?.canvasRect == [1, 2, 30, 40])
         // Frames are ephemeral: the subscriber saw no event and seq did not move.
         #expect(await manager.liveInfo()["d"]?.seq == 0)
     }
 
+    /// A rect a viewer could not divide by is dropped at submission, so both read paths
+    /// see the one state the browser has a defined behaviour for: absent. A zero width
+    /// arriving intact would put NaN into the page's transform.
+    @Test func aRectAViewerCannotUseIsNotCached() async throws {
+        for bad: [Double]? in [[0, 0, 0, 100], [0, 0, 100, 0], [1, 2, 3], nil,
+                               [0, 0, .infinity, 100], [0, 0, .nan, 100]] {
+            let (_, manager) = try makeManager()
+            _ = try await manager.subscribe(docId: "d", createIfMissing: true)
+            #expect(await manager.submitFrame(docId: "d", bytes: Data([1]), canvasRect: bad))
+            #expect(await manager.latestFrame(docId: "d")?.canvasRect == nil)
+        }
+    }
+
     @Test func submitFrameWithoutSessionReturnsFalse() async throws {
         let (_, manager) = try makeManager()
-        #expect(await manager.submitFrame(docId: "d", bytes: Data([1])) == false)
+        #expect(await manager.submitFrame(docId: "d", bytes: Data([1]), canvasRect: nil) == false)
     }
 
     @Test func watchersHoldTheSessionOpen() async throws {

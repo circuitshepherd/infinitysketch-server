@@ -154,12 +154,22 @@ public final class InfSketchServer: Sendable {
             // "%" (e.g. "50%off" round-trips through the wire as
             // "50%25off" and arrives at `parts[2]` as "50%off" already).
             if let frame = await manager.latestFrame(docId: parts[2]) {
-                return self.headAware(request, headers: [
+                var headers: [HTTPHeader: String] = [
                     .contentType: "image/png",
                     .cacheControl: "no-store",
                     HTTPHeader("X-Frame-Stale"): "false",
                     HTTPHeader("X-Frame-Seq"): "\(frame.seq)",
-                ], body: frame.png)
+                ]
+                // Travels with the bytes it describes, never on the frameAvailable
+                // nudge: the page fetches the LATEST frame, so a rect carried by the
+                // nudge would pair with a newer PNG whenever two frames land inside one
+                // fetch — a wrong compensation that looks exactly like no compensation.
+                // Omitted rather than emptied when unknown; the viewer reads absence.
+                if let rect = frame.canvasRect {
+                    headers[HTTPHeader("X-Frame-Canvas-Rect")] =
+                        rect.map { "\($0)" }.joined(separator: ",")
+                }
+                return self.headAware(request, headers: headers, body: frame.png)
             }
 
             if let bytes = try? store.load(docId: parts[2]),

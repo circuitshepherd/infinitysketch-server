@@ -242,13 +242,13 @@ public actor SessionManager {
     }
 
     /// Returns false when the doc has no live session (frame dropped).
-    public func submitFrame(docId: String, bytes: Data) async -> Bool {
+    public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?) async -> Bool {
         guard let session = sessions[docId] else { return false }
-        await session.submitFrame(bytes: bytes)
+        await session.submitFrame(bytes: bytes, canvasRect: canvasRect)
         return true
     }
 
-    public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date)? {
+    public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?)? {
         guard let session = sessions[docId] else { return nil }
         return await session.latestFrame
     }
