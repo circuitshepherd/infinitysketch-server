@@ -109,11 +109,19 @@ private actor SentBox {
     @Test func unregisterFailsPendingImmediately() async {
         let broker = DeviceCommandBroker(createTimeout: .seconds(10))
         let connectionId = UUID()
-        await broker.register(connectionId: connectionId, capabilities: ["createDoc"]) { _ in }
+        let sent = SentBox()
+        await broker.register(connectionId: connectionId, capabilities: ["createDoc"]) { msg in
+            Task { await sent.set(msg) }
+        }
         let task = Task { try await broker.requestCreation(docId: "D") }
-        // Give requestCreation a moment to register its continuation before
-        // we unregister the connection out from under it.
-        try? await Task.sleep(for: .milliseconds(20))
+        // Wait for the REQUEST TO HAVE BEEN SENT rather than for 20 ms of wall
+        // clock. `performRequest` registers the continuation BEFORE it sends
+        // (deliberately — see its comment), so a sent message proves there is
+        // a pending entry for `unregister` to fail. The fixed sleep did not
+        // prove it: on a starved runner `requestCreation` had not yet run, so
+        // `unregister` found nothing to fail and the request then threw
+        // `noDeviceAvailable` instead of `deviceTimeout`.
+        _ = await sent.awaitMessage()
         await broker.unregister(connectionId: connectionId)
         await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
             _ = try await task.value
@@ -274,8 +282,14 @@ private actor SentBox {
         // the stroke op must time out on its own schedule without waiting
         // for (or being affected by) the create timeout. The elapsed-time
         // bound is what makes a parameter swap (the stroke op accidentally
-        // running on createTimeout) FAIL — 10 s > 1 s — instead of merely
+        // running on createTimeout) FAIL — 10 s > 5 s — instead of merely
         // making the test slow.
+        //
+        // The bound is 5 s rather than 1 s because it must separate 100 ms
+        // from 10 s, and nothing finer: a 1 s bound was ALSO measuring how
+        // promptly the runner gets round to a timer task, and a 2-vCPU CI
+        // machine took 1.196 s to fire a 100 ms one. Tightening this back
+        // down buys no extra defect detection and re-arms that flake.
         let broker = DeviceCommandBroker(createTimeout: .seconds(10), strokeOpTimeout: .milliseconds(100))
         await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { _ in }
         let clock = ContinuousClock()
@@ -283,7 +297,7 @@ private actor SentBox {
         await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
             _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         }
-        #expect(clock.now - start < .seconds(1))
+        #expect(clock.now - start < .seconds(5))
     }
 
     // MARK: - Kind-agnostic replies

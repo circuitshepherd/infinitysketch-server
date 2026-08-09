@@ -66,11 +66,13 @@ import InfSketchWire
         let watch = try await manager.watch(docId: "d")
         await manager.unsubscribe(docId: "d", token: sub.token)
         // Watcher still present: session must survive the (50 ms) grace period.
+        // Waiting longer only strengthens this half — the watcher suppresses
+        // teardown outright, so no amount of delay can reap it.
         try await Task.sleep(for: .milliseconds(150))
         #expect(await manager.liveInfo()["d"] != nil)
         await manager.unwatch(docId: "d", token: watch.token)
         // Now both are zero: session tears down after grace.
-        try await Task.sleep(for: .milliseconds(150))
+        await waitFor { await manager.liveInfo()["d"] == nil }
         #expect(await manager.liveInfo()["d"] == nil)
     }
 
