@@ -249,6 +249,15 @@ public enum WebUI {
       let scale = 1, tx = 0, ty = 0;
       let boxW = 0, boxH = 0, imgW = 0, imgH = 0;
       let atFit = true;
+      // The canvas region the WHOLE square frame covers, [x, y, w, h], or null when
+      // the server did not report one (the stale-thumbnail path cannot know it). This
+      // is what makes a pinned view possible at all: the frame is an auto-fit render
+      // of the document's bounds, so its pixels change meaning whenever those bounds
+      // move, while scale/tx/ty sit still.
+      let rect = null;
+      const validRect = (r) => (Array.isArray(r) && r.length === 4
+        && r.every((v) => typeof v === "number" && isFinite(v))
+        && r[2] > 0 && r[3] > 0) ? r : null;
 
       const fitScale = () => (imgW && imgH && boxW && boxH)
         ? Math.min(boxW / imgW, boxH / imgH) : 1;
@@ -279,8 +288,16 @@ public enum WebUI {
         clampTranslation();
       }
 
+      // Canvas point under a CSS point in the box, using the CURRENT geometry.
+      // Only meaningful with a rect; callers check.
+      function canvasAt(cx, cy) {
+        const ppc = imgW / rect[2];               // frame px per canvas point
+        return [rect[0] + (cx - tx) / (scale * ppc),
+                rect[1] + (cy - ty) / (scale * ppc)];
+      }
+
       return {
-        get state() { return { scale, tx, ty, atFit, imgW, imgH, boxW, boxH }; },
+        get state() { return { scale, tx, ty, atFit, imgW, imgH, boxW, boxH, rect }; },
         panBy(dx, dy) { tx += dx; ty += dy; atFit = false; clampTranslation(); },
         zoomAbout(cx, cy, factor) { setScaleAbout(cx, cy, scale * factor); },
         fit() {
@@ -294,17 +311,43 @@ public enum WebUI {
           boxW = w; boxH = h;
           if (atFit) this.fit(); else clampTranslation();
         },
-        // A frame with a NEW pixel size keeps the same document region on screen:
-        // the content scales about the shared origin, so tx/ty do not move. Both
-        // frame sources are square (1024 live, 256 stored thumbnail), which is
-        // what licenses the single k.
-        setImageSize(w, h) {
-          if (!imgW || !imgH) { imgW = w; imgH = h; this.fit(); return; }
-          if (w === imgW && h === imgH) return;
-          const k = w / imgW;
-          imgW = w; imgH = h;
-          if (atFit) { this.fit(); return; }
-          scale = clampScale(scale / k);
+        // A new frame. At fit the view follows the content, by design; otherwise the
+        // CANVAS region on screen is held still, whatever the frame did underneath.
+        //
+        // With both rects known the invariant is CSS pixels per canvas point. The
+        // anchor is the canvas point under the BOX CENTRE rather than an algebraic
+        // tx' = tx + (newX - oldX) * s_c, and the difference shows only when the scale
+        // clamp bites (content growing far enough pushes past the 8/dpr ceiling):
+        // centre-anchored degrades to the same middle at a slightly wrong zoom instead
+        // of sliding sideways. Same idea as oneToOne.
+        //
+        // Without a rect on either side — the stale-thumbnail path never reports one —
+        // this falls back to the older, weaker rule: hold the same FRAME-pixel region,
+        // which is exactly right there because that path does not re-render. Both frame
+        // sources are square (1024 live, 256 stored thumbnail), licensing the single k.
+        setFrame(w, h, newRect) {
+          const prev = rect;
+          const next = validRect(newRect);
+          if (!imgW || !imgH) { imgW = w; imgH = h; rect = next; this.fit(); return; }
+          const moved = !prev || !next || prev[0] !== next[0] || prev[1] !== next[1]
+            || prev[2] !== next[2] || prev[3] !== next[3];
+          if (w === imgW && h === imgH && !moved) { rect = next; return; }
+          if (atFit) { imgW = w; imgH = h; rect = next; this.fit(); return; }
+
+          if (prev && next) {
+            const ppcOld = imgW / prev[2];
+            const anchor = canvasAt(boxW / 2, boxH / 2);
+            const sc = scale * ppcOld;            // CSS px per canvas point — the invariant
+            imgW = w; imgH = h; rect = next;
+            const ppcNew = imgW / rect[2];
+            scale = clampScale(sc / ppcNew);
+            tx = boxW / 2 - (anchor[0] - rect[0]) * ppcNew * scale;
+            ty = boxH / 2 - (anchor[1] - rect[1]) * ppcNew * scale;
+          } else {
+            const k = w / imgW;
+            imgW = w; imgH = h; rect = next;
+            scale = clampScale(scale / k);
+          }
           clampTranslation();
         },
       };
@@ -394,9 +437,20 @@ public enum WebUI {
         const vp = makeViewport(() => window.devicePixelRatio || 1);
         window.__viewport = vp;   // deliberately exposed: how the browser checks drive the math
 
+        const fitBtn = document.getElementById("fit");
+
         function render() {
           img.style.transform =
             `translate(${vp.state.tx}px, ${vp.state.ty}px) scale(${vp.state.scale})`;
+          // Read live on every render rather than tracked as a second flag: the button
+          // says what the viewport IS, so it cannot fall out of step with it. The title
+          // carries what the highlight MEANS — that lit is the one state in which the
+          // view follows the sketch — which the border alone cannot say.
+          const following = vp.state.atFit;
+          fitBtn.classList.toggle("on", following);
+          fitBtn.title = following
+            ? "Following the sketch: the view re-fits as the drawing grows. Zoom or pan to pin it. (0)"
+            : "View pinned — it stays put as the drawing changes. Press to fit the whole sketch and follow it again. (0)";
         }
 
         new ResizeObserver(() => {
@@ -423,7 +477,7 @@ public enum WebUI {
           return JSON.stringify(m);
         }
 
-        document.getElementById("fit").onclick = () => { vp.fit(); render(); };
+        fitBtn.onclick = () => { vp.fit(); render(); };
         document.getElementById("one").onclick = () => { vp.oneToOne(); render(); };
         function toggleFitOne() {
           if (vp.state.atFit) vp.oneToOne(); else vp.fit();
@@ -634,19 +688,40 @@ public enum WebUI {
         let loadGen = 0;
         let disconnected = false;
 
-        // Load into a detached Image and swap on load: assigning img.src directly
-        // blanks the element for the whole download, once a second. On error keep
-        // the last good frame. A zoomed inspection must never flicker.
+        // fetch, not `new Image()`: the frame's canvas rect arrives as a response
+        // HEADER, which an <img> load cannot read. Still decoded into a detached Image
+        // and swapped only on load — assigning img.src directly blanks the element for
+        // the whole download, once a second, and a zoomed inspection must never
+        // flicker. On any failure keep the last good frame.
+        let objectUrl = null;
         function refetch(tag) {
           const gen = ++loadGen;
-          const probe = new Image();
-          probe.onload = () => {
-            if (gen !== loadGen) return;   // superseded by a newer frame
-            img.src = probe.src;
-            vp.setImageSize(probe.naturalWidth, probe.naturalHeight);
-            render();
-          };
-          probe.src = `/api/docs/${encodeURIComponent(docId)}/frame?v=${tag}`;
+          fetch(`/api/docs/${encodeURIComponent(docId)}/frame?v=${tag}`, { cache: "no-store" })
+            .then((res) => {
+              if (!res.ok) throw new Error(`frame ${res.status}`);
+              // Absent header = unknown rect, which the viewport handles as its own
+              // case. Parse defensively: a malformed value must read as absent, never
+              // as a rect full of NaN.
+              const raw = res.headers.get("X-Frame-Canvas-Rect");
+              const rect = raw ? raw.split(",").map(Number) : null;
+              return res.blob().then((blob) => ({ blob, rect }));
+            })
+            .then(({ blob, rect }) => {
+              if (gen !== loadGen) return;   // superseded by a newer frame
+              const url = URL.createObjectURL(blob);
+              const probe = new Image();
+              probe.onload = () => {
+                if (gen !== loadGen) return URL.revokeObjectURL(url);
+                img.src = url;
+                if (objectUrl) URL.revokeObjectURL(objectUrl);
+                objectUrl = url;
+                vp.setFrame(probe.naturalWidth, probe.naturalHeight, rect);
+                render();
+              };
+              probe.onerror = () => URL.revokeObjectURL(url);
+              probe.src = url;
+            })
+            .catch(() => {});
         }
 
         function updateBadge() {

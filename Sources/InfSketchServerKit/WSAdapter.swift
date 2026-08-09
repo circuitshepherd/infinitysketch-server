@@ -286,14 +286,14 @@ actor Connection {
                 await manager.unwatch(docId: docId, token: watch.token)
             }
 
-        case .frame(let docId, let payload):
+        case .frame(let docId, let payload, let canvasRect):
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
             guard case .inline(let bytes) = payload else {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
-            if await manager.submitFrame(docId: docId, bytes: bytes) == false {
+            if await manager.submitFrame(docId: docId, bytes: bytes, canvasRect: canvasRect) == false {
                 emit(.error(reason: "unknownDoc"))
             }
 

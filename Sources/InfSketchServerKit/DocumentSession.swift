@@ -162,7 +162,11 @@ actor DocumentSession {
     private var watcherFramePx: [UUID: Int] = [:]
     /// One-slot live-frame cache; dies with the session (the HTTP route then
     /// falls back to the stored thumbnail, marked stale).
-    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date)?
+    /// `canvasRect` is the canvas region the whole square PNG covers, as the device
+    /// reported it — `nil` from a device that drew nothing. It travels WITH the bytes
+    /// rather than on the frameAvailable nudge so a browser can never pair a new PNG
+    /// with an older rect.
+    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?)?
 
     /// Designated: session over already-known bytes (createIfMissing path uses
     /// empty bytes; nothing is persisted until the first op's store.save).
@@ -273,10 +277,22 @@ actor DocumentSession {
         notifyWatcherCount()
     }
 
+    /// A canvas rect is kept only if a viewer could actually divide by it. The
+    /// browser reads an ABSENT rect as "unknown" and falls back to holding the
+    /// frame-pixel region, which is a defined behaviour; a zero width would instead
+    /// give it an infinity to compute a transform from. Rejecting here rather than at
+    /// the route keeps the one rule off the two read paths.
+    static func validCanvasRect(_ rect: [Double]?) -> [Double]? {
+        guard let rect, rect.count == 4, rect.allSatisfy({ $0.isFinite }),
+              rect[2] > 0, rect[3] > 0 else { return nil }
+        return rect
+    }
+
     /// Cache the frame and nudge every watcher. Ephemeral: no seq, no store,
     /// no subscriber echo.
-    func submitFrame(bytes: Data) {
-        latestFrame = (png: bytes, seq: seq, receivedAt: Date())
+    func submitFrame(bytes: Data, canvasRect: [Double]?) {
+        latestFrame = (png: bytes, seq: seq, receivedAt: Date(),
+                       canvasRect: DocumentSession.validCanvasRect(canvasRect))
         let message = ServerMessage.frameAvailable(docId: docId, seq: seq)
         for (token, continuation) in watchers {
             switch continuation.yield(message) {

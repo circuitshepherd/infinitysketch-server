@@ -40,6 +40,27 @@ import InfSketchWire
         #expect(html.contains("new Image()"))
     }
 
+    /// The frame's canvas rect arrives as a response HEADER, which is why the page
+    /// fetches rather than assigning an <img> src: an image load cannot read headers.
+    /// The name is a cross-file contract with the route in `InfSketchServer`.
+    @Test func theFrameFetchReadsTheCanvasRectHeader() {
+        #expect(html.contains("X-Frame-Canvas-Rect"))
+        #expect(html.contains("fetch(`/api/docs/"))
+        #expect(html.contains("vp.setFrame("))
+        // Each superseded blob is released; a page left open re-fetches once a second.
+        #expect(html.contains("URL.revokeObjectURL"))
+    }
+
+    /// Josef asked for the fit state to be visible, and it is read from the viewport on
+    /// every render rather than tracked as a second flag that could fall out of step.
+    @Test func theFitButtonShowsWhetherTheViewIsAtFit() {
+        #expect(html.contains(#"const following = vp.state.atFit;"#))
+        #expect(html.contains(#"fitBtn.classList.toggle("on", following)"#))
+        // The highlight's MEANING lives in the title: lit is the one state that follows.
+        #expect(html.contains("Following the sketch"))
+        #expect(html.contains("View pinned"))
+    }
+
     @Test func theHelloStillInterpolatesTheWireVersion() {
         #expect(html.contains("protocolVersion: \(WireProtocol.version)"))
     }

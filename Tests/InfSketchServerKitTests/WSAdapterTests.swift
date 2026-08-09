@@ -442,7 +442,7 @@ private struct ServerMessageReader {
         #expect(try await appReader.next() == .watchers(docId: "d", count: 1, framePx: nil))
 
         // The app pushes a frame; the browser gets the nudge.
-        try app.send(.frame(docId: "d", payload: .inline(Data([7, 7]))))
+        try app.send(.frame(docId: "d", payload: .inline(Data([7, 7])), canvasRect: [0, 0, 100, 100]))
         #expect(try await browserReader.next() == .frameAvailable(docId: "d", seq: 0))
 
         // Unwatch: the app learns the viewer left.
@@ -455,7 +455,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.frame(docId: "d", payload: .inline(Data([1]))))
+        try harness.send(.frame(docId: "d", payload: .inline(Data([1])), canvasRect: nil))
         #expect(try await reader.next() == .error(reason: "notSubscribed"))
     }
 

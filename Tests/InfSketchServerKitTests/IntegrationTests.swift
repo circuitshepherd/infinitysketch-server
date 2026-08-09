@@ -131,14 +131,21 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         let frameURL = URL(string: "http://127.0.0.1:\(port)/api/docs/sample/frame")!
         let (_, staleResponse) = try await URLSession.shared.data(from: frameURL)
         #expect((staleResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Frame-Stale") == "true")
+        // The stored thumbnail's covered rect is not persisted anywhere, so the header
+        // is ABSENT rather than guessed — absence is what the viewer reads as "unknown".
+        #expect((staleResponse as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "X-Frame-Canvas-Rect") == nil)
 
         // Submit a frame through the manager; the route now serves it live.
         _ = try await server.manager.subscribe(docId: "sample")
-        #expect(await server.manager.submitFrame(docId: "sample", bytes: Fixtures.thumbnailPNG))
+        #expect(await server.manager.submitFrame(docId: "sample", bytes: Fixtures.thumbnailPNG, canvasRect: [10, 20, 300, 300]))
         let (liveData, liveResponse) = try await URLSession.shared.data(from: frameURL)
         let http = try #require(liveResponse as? HTTPURLResponse)
         #expect(http.value(forHTTPHeaderField: "X-Frame-Stale") == "false")
         #expect(http.value(forHTTPHeaderField: "X-Frame-Seq") == "0")
+        // The canvas region these pixels cover, riding WITH the bytes rather than on the
+        // frameAvailable nudge — a rect from the nudge could pair with a newer PNG.
+        #expect(http.value(forHTTPHeaderField: "X-Frame-Canvas-Rect") == "10.0,20.0,300.0,300.0")
         #expect(liveData == Fixtures.thumbnailPNG)
         await server.stop()
     }
@@ -328,7 +335,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // A document whose name contains a literal percent — the regression case
         // for double-decoding (FlyingFox already decodes the path once).
         _ = try await server.manager.subscribe(docId: "50%off", createIfMissing: true)
-        #expect(await server.manager.submitFrame(docId: "50%off", bytes: Fixtures.thumbnailPNG))
+        #expect(await server.manager.submitFrame(docId: "50%off", bytes: Fixtures.thumbnailPNG, canvasRect: nil))
         let frameURL = URL(string: "http://127.0.0.1:\(port)/api/docs/50%25off/frame")!
         let (data, response) = try await URLSession.shared.data(from: frameURL)
         #expect((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Frame-Stale") == "false")

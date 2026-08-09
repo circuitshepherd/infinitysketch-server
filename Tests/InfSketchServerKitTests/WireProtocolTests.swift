@@ -11,7 +11,9 @@ import InfSketchWire
     /// took it from 3 to 4; the `strippedDoc` op payload took it from 4 to 5;
     /// `strokeOpReply.payloadKind` took it from 5 to 6; `strokeOpRequest.payloadKind` (M4,
     /// request stripping) took it from 6 to 7; `framePx` on `watchDoc`/`watchers` (frame
-    /// resolution) took it from 7 to 8; the next addition takes it to 9.
+    /// resolution) took it from 7 to 8; `canvasRect` on `frame` (a browser holding a canvas
+    /// region still while the document's bounds move) took it from 8 to 9; the next addition
+    /// takes it to 10.
     ///
     /// An addition is not only a new MESSAGE: `matchHash` is a new CASE inside an existing
     /// message's payload, and an older peer would throw on its unknown `kind` exactly the same
@@ -20,7 +22,7 @@ import InfSketchWire
     /// This test earning its keep is not hypothetical: the delete work added both messages and
     /// left the version at 2, and this is what caught it.
     @Test func theVersionIsBumpedForEveryWireAddition() {
-        #expect(WireProtocol.version == 8)
+        #expect(WireProtocol.version == 9)
     }
 
     @Test func clientMessagesRoundTrip() throws {
@@ -161,23 +163,40 @@ import InfSketchWire
         #expect(try ClientMessage(jsonText: u.jsonText()) == u)
     }
     @Test func frameMessageRoundTripsInline() throws {
-        let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])))
+        let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])),
+                                    canvasRect: [-10.5, 20, 512, 512])
         #expect(try ClientMessage(jsonText: f.jsonText()) == f)
+    }
+    /// A device that drew nothing reports no rect, and absence must survive the round
+    /// trip as absence — the browser reads it as "unknown" and keeps its own mapping.
+    @Test func frameMessageRoundTripsWithoutACanvasRect() throws {
+        let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])), canvasRect: nil)
+        let decoded = try ClientMessage(jsonText: f.jsonText())
+        #expect(decoded == f)
+        guard case .frame(_, _, let rect) = decoded else { return #expect(Bool(false)) }
+        #expect(rect == nil)
     }
     @Test func frameMessageRoundTripsAsDescriptor() throws {
         let d = TransferDescriptor(transferId: 3, totalBytes: 100, chunkSize: 8)
-        let f = ClientMessage.frame(docId: "d", payload: .transfer(d))
+        let f = ClientMessage.frame(docId: "d", payload: .transfer(d), canvasRect: [0, 0, 8, 8])
         #expect(try ClientMessage(jsonText: f.jsonText()) == f)
     }
+    /// The chunk-swap trap: `replacingBulk`/`resolvingBulk` rebuild the message around
+    /// the descriptor, so a field they forget is dropped for exactly the frames big
+    /// enough to chunk — and silently, because a missing rect degrades to the old
+    /// behaviour rather than failing. Chunking changes how the bytes travel, never
+    /// what they are.
     @Test func frameChunksThroughSenderAndReassembler() throws {
         let png = Data((0..<100).map { UInt8($0 % 256) })
+        let rect: [Double] = [3, 4, 1024, 1024]
         var sender = TransferSender<ClientMessage>(inlineLimit: 16, chunkSize: 8)
         var reassembler = TransferReassembler<ClientMessage>()
         var results: [ClientMessage] = []
-        for frame in try sender.frames(for: .frame(docId: "d", payload: .inline(png))) {
+        for frame in try sender.frames(for: .frame(docId: "d", payload: .inline(png),
+                                                   canvasRect: rect)) {
             if let m = try reassembler.consume(frame) { results.append(m) }
         }
-        #expect(results == [.frame(docId: "d", payload: .inline(png))])
+        #expect(results == [.frame(docId: "d", payload: .inline(png), canvasRect: rect)])
     }
     @Test func serverFrameMessagesRoundTrip() throws {
         let fa = ServerMessage.frameAvailable(docId: "d", seq: 7)
