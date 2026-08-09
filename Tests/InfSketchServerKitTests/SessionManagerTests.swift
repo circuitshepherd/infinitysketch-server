@@ -36,21 +36,28 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
     }
 
     @Test func sessionSurvivesWithinGracePeriodAndTearsDownAfter() async throws {
-        let manager = try makeManager(gracePeriod: .milliseconds(50))
+        // A full second of grace, not 50 ms: the "still alive" half asserts
+        // between two adjacent statements, so a short grace makes it a race
+        // against a scheduling stall rather than against the code.
+        let manager = try makeManager(gracePeriod: .seconds(1))
         let r = try await manager.subscribe(docId: "d")
         await manager.unsubscribe(docId: "d", token: r.token)
         // Still alive within grace period.
         #expect(await manager.liveInfo()["d"] != nil)
-        try await Task.sleep(for: .milliseconds(300))
+        await waitFor { await manager.liveInfo()["d"] == nil }
         #expect(await manager.liveInfo()["d"] == nil)
     }
 
     @Test func resubscribeWithinGraceCancelsTeardown() async throws {
-        let manager = try makeManager(gracePeriod: .milliseconds(100))
+        // The resubscribe has to land INSIDE the grace period for this test to
+        // test anything, so the grace must comfortably outlast a stalled
+        // scheduler — and the wait afterwards must then outlast the grace, or
+        // "still alive" would hold for a session nothing had rescued.
+        let manager = try makeManager(gracePeriod: .seconds(1))
         let r1 = try await manager.subscribe(docId: "d")
         await manager.unsubscribe(docId: "d", token: r1.token)
         _ = try await manager.subscribe(docId: "d")
-        try await Task.sleep(for: .milliseconds(300))
+        try await Task.sleep(for: .milliseconds(1500))
         #expect(await manager.liveInfo()["d"] != nil)
     }
 
@@ -118,17 +125,26 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
 }
 
 @Suite struct MCPWritePathTests {
-    private func makeStoreAndManager() throws -> (DirectoryDocumentStore, SessionManager) {
+    /// The grace period defaults to LONG, and only the one test that is about
+    /// reaping shortens it. It used to be 50 ms for every test in the suite,
+    /// which quietly made `acceptedSubmitCarriesItsOwnAssignedSeq` a race: a
+    /// stall between its two submits reaped the session, the reopen started a
+    /// fresh one, and `seq` — which resets on recycle — came back 1 instead of
+    /// 2. Nothing in that test is about teardown; the short grace was purely
+    /// inherited from the shared helper.
+    private func makeStoreAndManager(
+        gracePeriod: Duration = .seconds(60)
+    ) throws -> (DirectoryDocumentStore, SessionManager) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mcp-write-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let store = DirectoryDocumentStore(directory: dir)
         try store.save(docId: "d", bytes: Fixtures.docBytes)
-        return (store, SessionManager(store: store, config: SessionConfig(gracePeriod: .milliseconds(50))))
+        return (store, SessionManager(store: store, config: SessionConfig(gracePeriod: gracePeriod)))
     }
 
     @Test func submitToClosedDocOpensSessionAndPersists() async throws {
-        let (store, manager) = try makeStoreAndManager()
+        let (store, manager) = try makeStoreAndManager(gracePeriod: .milliseconds(50))
         let result = await manager.submitOpeningSession(
             docId: "d", createIfMissing: false, opId: "mcp-1",
             payload: OpPayload(type: "fullDoc", data: Data([9])))
@@ -137,7 +153,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         #expect(result == .accepted(seq: 1))
         #expect(try store.load(docId: "d") == Data([9]))
         // No subscribers: session must reap itself after grace.
-        try await Task.sleep(for: .milliseconds(150))
+        await waitFor { await manager.liveInfo()["d"] == nil }
         #expect(await manager.liveInfo()["d"] == nil)
     }
 
@@ -295,7 +311,7 @@ private func makeManager(gracePeriod: Duration = .seconds(60)) throws -> Session
         _ = await manager.submit(docId: "D", opId: "user",
                                  payload: OpPayload(type: "fullDoc", data: Data("v2-user".utf8)))
         await manager.unsubscribe(docId: "D", token: sub.token)
-        try await Task.sleep(for: .milliseconds(200))
+        await waitFor { await manager.liveInfo()["D"] == nil }
         #expect(await manager.liveInfo()["D"] == nil)  // session really is gone: the reopen branch runs below
 
         let outcome = await manager.submitOpeningSession(
