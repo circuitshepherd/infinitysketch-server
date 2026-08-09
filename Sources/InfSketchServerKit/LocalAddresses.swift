@@ -3,6 +3,8 @@ import Foundation
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif canImport(WinSDK)
+import WinSDK
 #endif
 
 /// One IPv4 address this machine can be reached at.
@@ -25,7 +27,13 @@ public struct LocalAddress: Sendable, Equatable {
 public enum LocalAddresses {
     /// Interface name prefixes that are real hardware on the platforms this runs on.
     /// `wl` covers `wlan` as well, so listing both would be one dead entry.
-    private static let hardwarePrefixes = ["en", "eth", "wl"]
+    ///
+    /// Matched case-INSENSITIVELY, and the last two entries are Windows': there an interface is
+    /// named for a person to read (`Ethernet`, `Wi-Fi`) rather than `en0`/`wlan0`. Without them
+    /// every Windows adapter fell into the same class and a Hyper-V or WSL bridge could be offered
+    /// ahead of the Wi-Fi the phone is actually on — the exact miss this ranking exists to avoid.
+    /// `vEthernet (WSL)` and `VMware Network Adapter …` do not match any prefix, which is right.
+    private static let hardwarePrefixes = ["en", "eth", "wl", "wi-fi", "wireless"]
 
     /// Pure, so the ordering can be tested without a network.
     ///
@@ -48,7 +56,8 @@ public enum LocalAddresses {
     /// address at all, so it sits on real hardware and would otherwise be offered first while being
     /// the one address least likely to work.
     private static func rank(_ address: LocalAddress) -> Int {
-        let hardware = hardwarePrefixes.contains { address.interface.hasPrefix($0) }
+        let name = address.interface.lowercased()
+        let hardware = hardwarePrefixes.contains { name.hasPrefix($0) }
         let linkLocal = address.ip.hasPrefix("169.254.")
         switch (hardware, linkLocal) {
         case (true, false): return 0
@@ -59,13 +68,9 @@ public enum LocalAddresses {
     }
 
     /// This machine's usable IPv4 addresses.
-    ///
-    /// **Windows returns an empty list in v1**: `getifaddrs` does not exist there and
-    /// `GetAdaptersAddresses` is a separate piece of work against an API this project has never
-    /// touched. The server runs normally; it just prints no code.
     public static func candidates() -> [LocalAddress] {
         #if os(Windows)
-        return []
+        return ranked(windowsAdapters())
         #else
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0 else { return [] }
@@ -92,4 +97,85 @@ public enum LocalAddresses {
         return ranked(found)
         #endif
     }
+
+    #if os(Windows)
+    /// This machine's IPv4 addresses, from the Windows IP Helper API.
+    ///
+    /// `getifaddrs` does not exist on Windows; `GetAdaptersAddresses` is the supported equivalent.
+    /// It also carries something POSIX does not: `Ipv4Metric`, the cost Windows itself assigns to
+    /// routing over that interface. The list is pre-sorted by it, ASCENDING, so the interface
+    /// Windows would actually route over is offered first — and because `ranked` sorts by class
+    /// with a stable tie-break, that order survives as the ordering WITHIN each class.
+    ///
+    /// Filtering mirrors the POSIX branch rather than inventing its own: up-only (`IfOperStatusUp`,
+    /// the counterpart of `IFF_UP`) and no loopback (by interface TYPE here, which is exact, where
+    /// POSIX has to match the `127.` prefix in `ranked`).
+    private static func windowsAdapters() -> [LocalAddress] {
+        // The SDK spells these as C `#define`s, which do not reliably survive the importer. Four
+        // documented numbers cost less than a build that breaks on a missing constant.
+        let errorSuccess: UInt32 = 0
+        let errorBufferOverflow: UInt32 = 111
+        let ifTypeSoftwareLoopback: UInt32 = 24
+        // GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER — none of
+        // which this function reads, and each of which costs time and buffer to collect.
+        let flags: UInt32 = 0x0002 | 0x0004 | 0x0008
+
+        // MSDN's own recommended starting size. A short buffer is not a failure: the call reports
+        // the size it needs, so the retry is the documented protocol rather than a guess. Bounded
+        // because the answer can legitimately change between calls (an adapter appearing), and a
+        // `while true` here would spin forever on a machine whose adapters keep churning.
+        var size: UInt32 = 15 * 1024
+        for _ in 0..<4 {
+            let buffer = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(size),
+                alignment: MemoryLayout<IP_ADAPTER_ADDRESSES_LH>.alignment)
+            defer { buffer.deallocate() }
+            let list = buffer.assumingMemoryBound(to: IP_ADAPTER_ADDRESSES_LH.self)
+
+            let result = GetAdaptersAddresses(UInt32(AF_INET), flags, nil, list, &size)
+            if result == errorBufferOverflow { continue }   // `size` now holds what it needs
+            guard result == errorSuccess else { return [] }
+
+            var found: [(metric: UInt32, address: LocalAddress)] = []
+            for adapter in sequence(first: list, next: { $0.pointee.Next }) {
+                let entry = adapter.pointee
+                guard entry.OperStatus == IfOperStatusUp,
+                      entry.IfType != ifTypeSoftwareLoopback,
+                      let nameBuffer = entry.FriendlyName
+                else { continue }
+                // A person-readable name — `Ethernet`, `Wi-Fi`, `vEthernet (WSL)` — which is what
+                // `hardwarePrefixes` matches on and what the terminal prints beside the address.
+                let name = String(decodingCString: nameBuffer, as: UTF16.self)
+
+                guard let firstAddress = entry.FirstUnicastAddress else { continue }
+                for unicast in sequence(first: firstAddress, next: { $0.pointee.Next }) {
+                    guard let socketAddress = unicast.pointee.Address.lpSockaddr,
+                          socketAddress.pointee.sa_family == UInt16(AF_INET)
+                    else { continue }
+                    let ip = socketAddress.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                        var octets = $0.pointee.sin_addr
+                        // Read the four bytes rather than the `UInt32`: the field is in NETWORK
+                        // order, so interpreting it as an integer would need a byte swap that is
+                        // correct only on a little-endian host. The bytes are the address.
+                        return withUnsafeBytes(of: &octets) {
+                            $0.prefix(4).map(String.init).joined(separator: ".")
+                        }
+                    }
+                    found.append((entry.Ipv4Metric, LocalAddress(interface: name, ip: ip)))
+                }
+            }
+            // Sorted with the original position as the tie-break, because Swift's `sort` is NOT
+            // stable — two adapters sharing a metric would otherwise be offered in an order that
+            // could change between runs, and the terminal's `1`–`9` keys name positions.
+            return found.enumerated()
+                .sorted { a, b in
+                    a.element.metric == b.element.metric
+                        ? a.offset < b.offset
+                        : a.element.metric < b.element.metric
+                }
+                .map(\.element.address)
+        }
+        return []
+    }
+    #endif
 }

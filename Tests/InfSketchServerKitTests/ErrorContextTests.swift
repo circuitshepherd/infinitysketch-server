@@ -1,6 +1,7 @@
-// macOS-only for the same reason as MCPAdapterTests: the SDK's HTTPClientTransport has no SSE on
-// Linux, so its Client cannot complete `initialize` there.
-#if !os(Linux)
+// Apple-platforms-only for the same reason as MCPAdapterTests: the SDK's HTTPClientTransport has
+// no SSE without `EventSource`, so its Client cannot complete `initialize` there. Flag defined in
+// Package.swift.
+#if MCP_SSE_CLIENT
 
 import Foundation
 import Testing

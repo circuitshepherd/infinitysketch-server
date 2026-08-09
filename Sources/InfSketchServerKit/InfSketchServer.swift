@@ -247,8 +247,9 @@ public final class InfSketchServer: Sendable {
         }
 
         await http.appendRoute("GET,HEAD /") { request in
-            // Per request, not per launch: `candidates()` is a `getifaddrs` walk, so a network that
-            // changed since startup shows up on a reload. The port comes from the LISTENING socket
+            // Per request, not per launch: `candidates()` walks the machine's interfaces, so a
+            // network that changed since startup shows up on a reload. The port comes from the
+            // LISTENING socket
             // — a server constructed with port 0 (every test, and any caller letting the OS pick)
             // would otherwise print `:0` into every url on the page.
             let port = await self.listeningPort ?? self.requestedPort

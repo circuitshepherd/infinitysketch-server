@@ -1,5 +1,6 @@
-// macOS-only for the same reason as MCPAdapterTests: no SSE in the SDK's client on Linux.
-#if !os(Linux)
+// Apple-platforms-only for the same reason as MCPAdapterTests: no SSE in the SDK's client without
+// `EventSource`. Flag defined in Package.swift.
+#if MCP_SSE_CLIENT
 
 import Foundation
 import Testing
