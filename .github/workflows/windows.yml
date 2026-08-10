@@ -1,11 +1,21 @@
-# Windows build + test. Runs on the GitHub mirror; inert on GitLab, where `.gitlab-ci.yml` runs
-# the Linux gate.
+# Windows build + test, and the Windows release package. Runs on the GitHub mirror; inert on
+# GitLab, where `.gitlab-ci.yml` runs the Linux gate.
 #
 # `swift test` is a REAL gate here, no longer advisory: the suite passes natively on Windows
 # (verified 2026-08-09, 420 tests). Leaving it advisory now would mean the job stays green through
 # exactly the kind of platform regression it exists to catch.
 name: windows
+
 on: [push, pull_request, workflow_dispatch]
+
+# The toolchain version lives HERE, once, and both jobs read it. The release package bundles the
+# Swift runtime DLLs from whichever toolchain built the executable, so a release built on a
+# different toolchain than the one the suite ran against would ship untested pairings -- and the
+# mismatch would be invisible, because the package works fine on the machine that made it.
+env:
+  SWIFT_BRANCH: swift-6.1-release
+  SWIFT_TAG: 6.1-RELEASE
+
 jobs:
   build:
     runs-on: windows-latest
@@ -13,10 +23,58 @@ jobs:
       - uses: actions/checkout@v4
       - uses: compnerd/gha-setup-swift@v3
         with:
-          branch: swift-6.1-release
-          tag: 6.1-RELEASE
+          branch: ${{ env.SWIFT_BRANCH }}
+          tag: ${{ env.SWIFT_TAG }}
       # The MSVC environment is what supplies `link.exe`; without it the toolchain reports itself
       # invalid before compiling anything.
       - uses: ilammy/msvc-dev-cmd@v1
       - run: swift build
       - run: swift test
+
+  # Builds the self-contained "unzip and run" package: the release executable plus the Swift
+  # redistributable runtime, so a user needs no Swift, no Visual Studio and no Developer Mode.
+  #
+  # Runs on EVERY push, not only on tags, and uploads the result as a build artifact. That is
+  # deliberate: packaging is the step most likely to break silently (a toolchain layout change
+  # moves the runtime DLLs, and the failure only shows on a machine without Swift), so it must be
+  # exercised continuously rather than first attempted on release day.
+  package:
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # scripts/package-windows.ps1 derives the version from git describe
+      - uses: compnerd/gha-setup-swift@v3
+        with:
+          branch: ${{ env.SWIFT_BRANCH }}
+          tag: ${{ env.SWIFT_TAG }}
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build the Windows package
+        shell: pwsh
+        run: .\scripts\package-windows.ps1
+
+      - name: Upload as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infsketch-server-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # Attaches the package to the GitHub Release for a `v*` tag.
+  release:
+    runs-on: windows-latest
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: infsketch-server-windows-x86_64
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          fail_on_unmatched_files: true
