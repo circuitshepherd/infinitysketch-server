@@ -56,6 +56,9 @@ Two things to expect the first time. SmartScreen warns about an unsigned executa
 and the server turns on virtual-terminal processing itself so the classic console works too (if
 you see escape sequences as literal text, the code on screen will not scan).
 
+If it cannot start — port 8080 already taken is the usual reason — the window **stays open** and
+says so, rather than flashing and closing with the error unread.
+
 #### Building from source on Windows
 
 Only needed if you are developing the server. Install

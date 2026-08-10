@@ -91,32 +91,50 @@ $env:GIT_CONFIG_COUNT   = "1"
 $env:GIT_CONFIG_KEY_0   = "core.symlinks"
 $env:GIT_CONFIG_VALUE_0 = "false"
 
-# A build RE-RESOLVES, and on Windows a re-resolve REWRITES Package.resolved destructively: it
-# drops every pin that exists only as an Apple-platform transitive dependency of `eventsource`
-# (all of swift-nio, async-http-client, swift-certificates, ... -- measured 25 pins down to 11).
-# Committing that silently unpins those packages for macOS and Linux, which is the opposite of
-# what a lockfile is for. On Windows a re-resolve is therefore ALWAYS wrong, so the file is
-# snapshotted and put back. A genuine dependency change has to be resolved on macOS regardless.
-$resolvedPath = Join-Path $repoRoot "Package.resolved"
-$resolvedBefore = $null
-if (Test-Path $resolvedPath) { $resolvedBefore = Get-Content $resolvedPath -Raw }
-
 if (-not $SkipBuild) {
     Write-Step "Building release"
     swift build -c release --product infsketch-server
-    $buildExit = $LASTEXITCODE
-
-    if ($null -ne $resolvedBefore) {
-        $resolvedAfter = Get-Content $resolvedPath -Raw
-        if ($resolvedAfter -ne $resolvedBefore) {
-            [System.IO.File]::WriteAllText($resolvedPath, $resolvedBefore)
-            Write-Host "  NOTE: the build rewrote Package.resolved; restored it (a Windows resolve drops Apple-only transitive pins)" -ForegroundColor Yellow
-        }
-    }
-
-    if ($buildExit -ne 0) { Fail "swift build failed" }
+    if ($LASTEXITCODE -ne 0) { Fail "swift build failed" }
 } else {
     Write-Step "Skipping build (-SkipBuild)"
+}
+
+# A resolve on Windows REWRITES Package.resolved destructively: it drops every pin that exists only
+# as an Apple-platform transitive dependency of `eventsource` (all of swift-nio, async-http-client,
+# swift-certificates, ... -- measured 25 pins down to 11). Committing that silently unpins them for
+# macOS and Linux, which is the opposite of what a lockfile is for.
+#
+# Restored from GIT, not from a snapshot taken when this script started, and that distinction is
+# the whole point: ANY SwiftPM command re-resolves, so by the time packaging runs the file may
+# ALREADY have been clobbered by an earlier `swift build` or `swift test` in the same session. A
+# snapshot-and-restore guard was written first and preserved exactly that damage -- it faithfully
+# put back the broken 11-pin file it had been handed. `git` holds the only copy known to be right.
+#
+# Safe to do unconditionally on Windows because a re-resolve here is ALWAYS wrong: a genuine
+# dependency change has to be resolved on macOS, where the Apple-only branch of the graph is
+# visible. Outside a git checkout there is nothing to compare against and the check is skipped.
+Write-Step "Checking Package.resolved"
+
+$resolvedPath = Join-Path $repoRoot "Package.resolved"
+git -C $repoRoot rev-parse --is-inside-work-tree *> $null
+if ($LASTEXITCODE -eq 0) {
+    $dirty = git -C $repoRoot status --porcelain -- Package.resolved
+    if ($dirty) {
+        git -C $repoRoot checkout -- Package.resolved
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  RESTORED from git - a resolve had rewritten it (a Windows resolve drops Apple-only transitive pins)" -ForegroundColor Yellow
+        } else {
+            Fail "Package.resolved was rewritten by a resolve and could not be restored from git. Do NOT commit it: run ``git checkout -- Package.resolved``."
+        }
+    } else {
+        Write-Host "  unmodified"
+    }
+} else {
+    Write-Host "  not a git checkout - skipped (verify Package.resolved by hand before committing)" -ForegroundColor Yellow
+}
+if (Test-Path $resolvedPath) {
+    $pins = (Get-Content $resolvedPath -Raw | ConvertFrom-Json).pins.Count
+    Write-Host "  $pins pins"
 }
 
 # `swift build --show-bin-path` rather than a literal `.build\release`: without Developer Mode
@@ -217,6 +235,13 @@ OPTIONS
   --port N        listening port (default 8080)
   --docs DIR      where documents are stored (default: a "docs" folder beside this executable)
   --no-open       do not open a browser at startup
+
+IF IT DOESN'T START
+-------------------
+The window stays open and tells you why. The usual cause is that another program is already using
+port 8080 -- start it on a different one:
+
+    infsketch-server.exe --port 8081
 
 SECURITY -- PLEASE READ
 -----------------------
