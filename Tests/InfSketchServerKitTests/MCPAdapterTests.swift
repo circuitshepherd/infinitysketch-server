@@ -4600,28 +4600,48 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    // MARK: - add_image (Task 2)
+    // MARK: - add_image (Task 2; `path` since 2026-08-11-agent-add-image-path-design)
     //
     // Places an image into a document, authored by a connected device
     // (`ImageAuthoring`, app repo, Task 1). Relays a `{"op":"addImage",
-    // "imageBytes": <base64>, "x", "y", "width"?, "height"?, "opacity"?}`
-    // envelope through `broker.requestStrokeOp`, gated on the "authorImage"
-    // capability (not "authorStrokes"/"authorText" — a device that only
-    // authors strokes/text must not be picked for this), and surfaces the
-    // new image's id from the reply's `meta` — same shape as
+    // "imageBytes": <base64>, "canvasX", "canvasY", "canvasWidth"?,
+    // "canvasHeight"?, "opacity"?}` envelope through `broker.requestStrokeOp`,
+    // gated on the "authorImage" capability (not "authorStrokes"/"authorText"
+    // — a device that only authors strokes/text must not be picked for this),
+    // and surfaces the new image's id from the reply's `meta` — same shape as
     // `styledAddTextRelaysTheStyleEnvelopeThroughTheDevice` above.
+    //
+    // The tool takes a `path` the SERVER reads; the base64 `bytes` argument it
+    // used to take is gone. The envelope is deliberately unchanged by that —
+    // the device, the wire and the protocol version know nothing about it, so
+    // the change needed no version bump.
+
+    /// Writes a real PNG to a temp file for the duration of the body. `add_image` no longer
+    /// accepts inline bytes, so every one of these tests needs a file on disk.
+    private func withPNGFile<T>(_ name: String = "logo.png",
+                                data: Data? = nil,
+                                _ body: (String) async throws -> T) async rethrows -> T {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("addimage-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent(name)
+        let bytes = data ?? Data(base64Encoded: ImageContainerTests.pngBase64)!
+        try? bytes.write(to: url)
+        return try await body(url.path)
+    }
 
     /// The exact relayed envelope key set, string-literally (mirroring the
-    /// styled add_text contract test): present-only optional keys, `bytes`
-    /// relayed verbatim as the base64 string under `imageBytes`, and the
-    /// new image's id (from `meta`) surfaced in the result text.
-    @Test func addImageRelaysEnvelopeAndSurfacesId() async throws {
+    /// styled add_text contract test): present-only optional keys, the FILE'S
+    /// bytes relayed as the base64 string under `imageBytes`, and the new
+    /// image's id (from `meta`) surfaced in the result text.
+    @Test func addImageReadsTheFileAndRelaysItsBytes() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
 
-        let imageBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let png = try #require(Data(base64Encoded: ImageContainerTests.pngBase64))
         let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
         let metaBytes = Data(#"{"id":"IMG-1"}"#.utf8)
         let device = try await FakeStrokeOpDevice(
@@ -4629,27 +4649,144 @@ private actor FakeStrokeOpDevice {
             capabilities: ["authorImage"])
         defer { Task { await device.close() } }
 
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: [
+                    "docId": "d", "path": .string(path),
+                    "canvasX": 10, "canvasY": 20, "canvasWidth": 50,
+                ])
+            #expect(isError != true)
+            #expect(toolResultText(content).contains("IMG-1"), "add_image must surface the new image's id")
+
+            let received = try #require(await device.receivedRequests.first)
+            #expect(received.docId == "d")
+            #expect(received.docBytes == Fixtures.docBytes)
+            let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+            #expect(spec["op"] as? String == "addImage")
+            // Exact envelope: present-only optionals — no height/opacity when omitted. UNCHANGED
+            // by the path work: the device still receives base64 under `imageBytes`.
+            #expect(Set(spec.keys) == ["op", "imageBytes", "canvasX", "canvasY", "canvasWidth"])
+            let relayedImageBytesB64 = try #require(spec["imageBytes"] as? String)
+            #expect(Data(base64Encoded: relayedImageBytesB64) == png,
+                    "the file's bytes must reach the device unaltered")
+            #expect(spec["canvasX"] as? Double == 10)
+            #expect(spec["canvasY"] as? Double == 20)
+            #expect(spec["canvasWidth"] as? Double == 50)
+        }
+
+        await server.stop()
+    }
+
+    /// The reported bug, end to end at the tool: a truncated PNG is refused BY NAME and the device
+    /// is never woken — instead of being placed as an image that reports plausible bounds and
+    /// renders nothing. No decoder can make this call, which is why the server checks the
+    /// container (see `ImageContainer`).
+    @Test func addImageRefusesACorruptFileWithoutWakingTheDevice() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let whole = try #require(Data(base64Encoded: ImageContainerTests.pngBase64))
+        try await withPNGFile("cut.png", data: whole.prefix(whole.count / 2)) { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError == true)
+            let text = toolResultText(content)
+            #expect(text.hasPrefix("imageCorrupt: "), "\(text)")
+            #expect(text.contains("cut.png"), "the error must name the file: \(text)")
+            #expect(await device.receivedRequests.isEmpty,
+                    "a corrupt file must be refused before any device round trip")
+        }
+
+        await server.stop()
+    }
+
+    /// A path that names nothing is refused before the device is contacted, like `unknownDoc`.
+    @Test func addImageMissingFileErrorsWithoutWakingTheDevice() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
         let (content, isError) = try await client.callTool(
             name: "add_image",
-            arguments: [
-                "docId": "d", "bytes": .string(imageBytes.base64EncodedString()),
-                "canvasX": 10, "canvasY": 20, "canvasWidth": 50,
-            ])
-        #expect(isError != true)
-        #expect(toolResultText(content).contains("IMG-1"), "add_image must surface the new image's id")
+            arguments: ["docId": "d", "path": "/nowhere/at/all/logo.png", "canvasX": 0, "canvasY": 0])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("imageFileNotFound: "))
+        #expect(await device.receivedRequests.isEmpty)
 
-        let received = try #require(await device.receivedRequests.first)
-        #expect(received.docId == "d")
-        #expect(received.docBytes == Fixtures.docBytes)
-        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(spec["op"] as? String == "addImage")
-        // Exact envelope: present-only optionals — no height/opacity when omitted.
-        #expect(Set(spec.keys) == ["op", "imageBytes", "canvasX", "canvasY", "canvasWidth"])
-        let relayedImageBytesB64 = try #require(spec["imageBytes"] as? String)
-        #expect(Data(base64Encoded: relayedImageBytesB64) == imageBytes)
-        #expect(spec["canvasX"] as? Double == 10)
-        #expect(spec["canvasY"] as? Double == 20)
-        #expect(spec["canvasWidth"] as? Double == 50)
+        await server.stop()
+    }
+
+    /// The device reports what it actually placed, and the tool surfaces it. `pixelWidth`/
+    /// `pixelHeight` are the SOURCE image's own dimensions, which no other tool exposes —
+    /// `list_images` reports canvasBounds and never the pixels behind it — so without these an
+    /// agent cannot learn the aspect ratio and must render, look and guess.
+    @Test func addImageReportsThePlacedBoundsAndTheSourcePixelSize() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
+        let metaBytes = Data(
+            #"{"id":"IMG-1","canvasBounds":"10, 20, 50, 47.9","pixelWidth":"167","pixelHeight":"160"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes),
+            capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 10, "canvasY": 20])
+            #expect(isError != true)
+            let text = toolResultText(content)
+            #expect(text.contains("id: IMG-1"), "\(text)")
+            #expect(text.contains("canvasBounds: [10, 20, 50, 47.9]"), "\(text)")
+            #expect(text.contains("pixelWidth: 167"), "\(text)")
+            #expect(text.contains("pixelHeight: 160"), "\(text)")
+        }
+
+        await server.stop()
+    }
+
+    /// An older device that does not report the new fields still works — the lines are simply
+    /// absent. That is what keeps `meta` a `[String: String]` and the two repos independently
+    /// deployable.
+    @Test func addImageStillWorksAgainstADeviceThatReportsOnlyAnId() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: Data(#"{"id":"IMG-1"}"#.utf8)),
+            capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError != true)
+            let text = toolResultText(content)
+            #expect(text.contains("id: IMG-1"), "\(text)")
+            #expect(!text.contains("canvasBounds"), "absent fields must not be invented: \(text)")
+        }
 
         await server.stop()
     }
@@ -4666,14 +4803,16 @@ private actor FakeStrokeOpDevice {
             port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
         defer { Task { await device.close() } }
 
-        let (content, isError) = try await client.callTool(
-            name: "add_image",
-            arguments: ["docId": "ghost", "bytes": .string(Data([0x01, 0x02]).base64EncodedString()), "canvasX": 0, "canvasY": 0])
-        #expect(isError == true)
-        #expect(toolResultText(content).hasPrefix("unknownDoc"))
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "ghost", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError == true)
+            #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
-        // Fast-fail: the device must never be contacted for an unknown doc.
-        #expect(await device.receivedRequests.isEmpty)
+            // Fast-fail: the device must never be contacted for an unknown doc.
+            #expect(await device.receivedRequests.isEmpty)
+        }
 
         await server.stop()
     }

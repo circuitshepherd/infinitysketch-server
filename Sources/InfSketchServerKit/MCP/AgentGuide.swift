@@ -104,6 +104,16 @@ enum AgentGuide {
     limits: the document still carries them all, and a fill does not follow its outline if you \
     reshape the boundary afterwards.
 
+    ## Images
+
+    **`add_image` takes a `path`, not the image data.** The path is a file on the machine THIS \
+    SERVER runs on, and the server reads it — so no image bytes pass through your context. Write \
+    a generated image to a file and pass its path; there is deliberately no way to inline it, \
+    because that is what a base64 argument used to invite and it corrupted images in transcription. \
+    Omitting `canvasWidth`/`canvasHeight` places at the image's NATURAL PIXEL SIZE, which for a \
+    photo is thousands of points across; the reply names the bounds it actually occupied and the \
+    source's pixel size, so size it from that rather than from a render.
+
     ## Working alongside a person
 
     - **Tag what you may need again.** `tag_elements`, or `tags` at creation. Tags live in the \
