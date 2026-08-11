@@ -642,8 +642,8 @@ public actor MCPAdapter {
             name: "add_text",
             description: """
                 Appends a placed-text entry to a document: a new id, the document's current \
-                colour scheme, and an identity transform/opacity. (x, y) is the text box's \
-                top-left corner, in canvas coordinates. Give color/fontSize/bold/italic/family \
+                colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text \
+                box's top-left corner. Give color/fontSize/bold/italic/family \
                 to style the WHOLE label, or a `spans` array to style parts of it independently \
                 (e.g. a subscript). A whole-field style is the base each span overrides. Styling \
                 needs a connected device; plain text does not. Returns the new text's id so you \
@@ -694,8 +694,9 @@ public actor MCPAdapter {
                 can synthesize, so a new plain text run always replaces the old ones wholesale. \
                 A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles \
                 the EXISTING characters (or replaces them with `text`/`spans` if given) and \
-                needs a connected device — plain edits do not. Position-only edits (x and/or y \
-                with no text/style) do not touch formatting. Colours: #RRGGBB(AA). Font \
+                needs a connected device — plain edits do not. Position-only edits (canvasX \
+                and/or canvasY with no text/style) do not touch formatting. Colours: \
+                #RRGGBB(AA). Font \
                 families come from list_fonts. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -1142,18 +1143,36 @@ public actor MCPAdapter {
         Tool(
             name: "add_image",
             description: """
-                Place an image into a document. `bytes` is a base64-encoded PNG/JPEG/GIF; `x`,`y` are the \
-                TOP-LEFT corner of the placement in canvas coordinates. Optional `width`/`height` (canvas \
-                points) resize it — omit both for natural pixel size, give one to preserve aspect ratio, both \
-                for exact. Optional `opacity` (0..1, default 1). Requires a connected device (the image is \
-                decoded there) — noDeviceAvailable otherwise. Returns the new image's id. unknownDoc if the \
-                document doesn't exist; invalidSpec if the bytes aren't a decodable image.
+                Place an image into a document. `path` names an image FILE ON THE MACHINE THIS \
+                SERVER RUNS ON — it must be absolute (a leading ~ is expanded), and the server \
+                reads it itself, so no image data passes through your context. Write a generated \
+                image to a file and pass its path; do not try to inline it. \
+                (canvasX, canvasY) is the placement's TOP-LEFT corner. Optional \
+                canvasWidth/canvasHeight (canvas points) resize it — OMIT BOTH FOR THE IMAGE'S \
+                NATURAL PIXEL SIZE, which for a photo is thousands of points across; give one to \
+                preserve aspect ratio, both for exact. Optional `opacity` (0..1, default 1). \
+                Requires a connected device (the image is decoded there) — noDeviceAvailable \
+                otherwise. The reply names the new image's id, the canvasBounds it actually \
+                occupies, and the source's pixel size, so you can size it correctly in one \
+                follow-up rather than by rendering and guessing. Errors name the file: \
+                imagePathNotAbsolute, imageFileNotFound, imageFileUnreadable, imageFileEmpty, \
+                imageTooLarge, imageCorrupt (a truncated or damaged PNG/JPEG/GIF — this is \
+                checked because no image DECODER catches it: a truncated PNG decodes to the \
+                right size and renders blank). unknownDoc if the document doesn't exist.
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
-                    "bytes": .object(["type": "string", "description": "Base64-encoded PNG/JPEG/GIF image data."]),
+                    "path": .object([
+                        "type": "string",
+                        "description": """
+                            Absolute path to a PNG/JPEG/GIF (or anything else the device can \
+                            decode) on the server's own filesystem. A leading ~ is expanded; a \
+                            relative path is refused rather than resolved against a working \
+                            directory you cannot see.
+                            """,
+                    ]),
                     "canvasX": .object(["type": "number", "description": "Canvas-space x of the placement's top-left corner."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y of the placement's top-left corner."]),
                     "canvasWidth": .object([
@@ -1170,7 +1189,7 @@ public actor MCPAdapter {
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
                 ]),
-                "required": .array(["docId", "bytes", "canvasX", "canvasY"].map(Value.string)),
+                "required": .array(["docId", "path", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1623,7 +1642,8 @@ public actor MCPAdapter {
             description: """
                 Sets a grid's pivot to an EXACT canvas coordinate — the programmatic \
                 equivalent of the app's tap-to-pick-origin gesture — so the lattice passes \
-                through (x, y): the offset is recomputed so the grid stays anchored there. \
+                through (canvasX, canvasY): the offset is recomputed so the grid stays \
+                anchored there. \
                 No snap — use snap_points first if you want a lattice point. Authored by a \
                 connected InfinitySketch device. gridNotFound if no grid has that id; \
                 unknownDoc if the document doesn't exist. \(writeToolCaveats)
@@ -1822,7 +1842,8 @@ public actor MCPAdapter {
                 Where could these points snap to? Returns CANDIDATES — it never moves \
                 anything, and it never decides for you. Each candidate is either a LINE \
                 (one grid family: it constrains ONE direction, so a horizontal wire can \
-                snap its y and keep its x) or an INTERSECTION of two non-parallel \
+                snap its y-coordinate and keep its x-coordinate) or an INTERSECTION of two \
+                non-parallel \
                 families, which MAY come from two DIFFERENT grids — the 20pt grid's \
                 vertical crossing the 5pt grid's horizontal is a real point. Every \
                 candidate names its parent grid(s): gridId, familyId, label, \
@@ -1887,9 +1908,9 @@ public actor MCPAdapter {
             description: """
                 Moves, scales and/or rotates strokes in place. The strokes keep their \
                 identity (ids), their points and their z-order — only their placement \
-                changes. translate and anchor are CANVAS coordinates: the same space \
-                get_strokes' points, list_strokes' bbox and render_sketch are quoted \
-                in. Scale and rotate act about anchor, which defaults to the \
+                changes. canvasTranslate and canvasAnchor are CANVAS coordinates: the same \
+                space get_strokes' points, list_strokes' bbox and render_sketch are quoted \
+                in. Scale and rotate act about canvasAnchor, which defaults to the \
                 centre of the ids' union bounding box. TO SNAP, pass snapToGrid: true, \
                 or snapTo, or both — EITHER ONE alone means "snap" (naming a target IS \
                 asking to snap), and the whole SET is then shifted rigidly (never \
@@ -1902,7 +1923,8 @@ public actor MCPAdapter {
                 the lines a human can see. Use snap_points first to see what's actually \
                 near your anchor, then pass snapTo to name the grid (and optionally which \
                 of its line families — one family constrains a single direction, e.g. a \
-                wire's y while its x stays put) you actually mean; with no enabled grid \
+                wire's y-coordinate while its x-coordinate stays put) you actually mean; \
+                with no enabled grid \
                 (and no snapTo), snapToGrid is a no-op. A snap alone, with no translate/ \
                 scale/rotate, is a legal request. \(writeToolCaveats)
                 """,
@@ -2610,8 +2632,14 @@ public actor MCPAdapter {
             ])),
     ]
 
+    /// The tool list exactly as `tools/list` serves it, strict schemas applied. Internal so schema
+    /// invariants can be asserted WITHOUT standing up a client — which is what keeps those checks
+    /// running on Linux and Windows, where the SDK has no SSE client transport and so
+    /// `MCPAdapterTests` is compiled out wholesale (`MCP_SSE_CLIENT`).
+    static var toolDefinitions: [Tool] { tools.map(strict) }
+
     private func handleListTools() async throws -> ListTools.Result {
-        ListTools.Result(tools: Self.tools.map(Self.strict))
+        ListTools.Result(tools: Self.toolDefinitions)
     }
 
     /// Declare `additionalProperties: false` on a tool's input schema.
@@ -2912,8 +2940,70 @@ public actor MCPAdapter {
         }
     }
 
+    /// Reads the file `add_image`'s `path` names and returns its bytes, or the tool error that
+    /// says why it could not (spec `2026-08-11-agent-add-image-path-design.md`).
+    ///
+    /// `path` REPLACED a base64 `bytes` argument. The bytes made a round trip through the calling
+    /// agent's context — an agent reported that a 19 KB PNG became 25 000 characters it had to
+    /// transcribe by hand, and that its transcription is what corrupted the image. The server sits
+    /// next to the file; it can just read it.
+    ///
+    /// A RELATIVE path is refused rather than resolved against the server's working directory: the
+    /// caller cannot see that directory, so resolving would give a wrong answer that looks right.
+    enum ImageFileRead: Equatable {
+        case bytes(Data)
+        /// A tool-error reason, ready for `errorResult`.
+        case refusal(String)
+    }
+
+    static func readImageFile(at rawPath: String) -> ImageFileRead {
+        let path = NSString(string: rawPath).expandingTildeInPath
+        guard isAbsolutePath(path) else { return .refusal("imagePathNotAbsolute: \(rawPath)") }
+        let url = URL(fileURLWithPath: path)
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return .refusal("imageFileNotFound: \(path)")
+        }
+        guard !isDirectory.boolValue else { return .refusal("imageFileUnreadable: \(path) is a directory") }
+
+        // Check the size BEFORE reading, so a mistyped path at something enormous refuses instead
+        // of being loaded into memory to find out.
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int,
+           size > maxImageFileBytes {
+            return .refusal(
+                "imageTooLarge: \(path) is \(size / 1_000_000) MB, limit \(maxImageFileBytes / 1_000_000) MB")
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            return .refusal("imageFileUnreadable: \(path)")
+        }
+        guard !data.isEmpty else { return .refusal("imageFileEmpty: \(path)") }
+        guard data.count <= maxImageFileBytes else {
+            return .refusal(
+                "imageTooLarge: \(path) is \(data.count / 1_000_000) MB, limit \(maxImageFileBytes / 1_000_000) MB")
+        }
+
+        // Structural check, no decoding — see ImageContainer for why a decoder cannot do this.
+        if case .broken(let why) = ImageContainer.inspect(data) {
+            return .refusal("imageCorrupt: \(path) (\(why))")
+        }
+        return .bytes(data)
+    }
+
+    static let maxImageFileBytes = 64 * 1_000_000
+
+    /// This server runs on macOS, Linux AND Windows, so "absolute" is not just a leading slash:
+    /// a Windows path is `C:\…` or a `\\server\share` UNC.
+    static func isAbsolutePath(_ path: String) -> Bool {
+        if path.hasPrefix("/") || path.hasPrefix("\\") { return true }
+        let chars = Array(path)
+        return chars.count >= 3 && chars[0].isLetter && chars[1] == ":"
+            && (chars[2] == "\\" || chars[2] == "/")
+    }
+
     /// `add_image` (Task 2): relays an `addImage` device op — `{op, imageBytes
-    /// (base64, relayed verbatim), x, y, width?, height?, opacity?}`, present-only
+    /// (base64), canvasX, canvasY, canvasWidth?, canvasHeight?, opacity?}`, present-only
     /// optionals — through `broker.requestStrokeOp`, gated on the "authorImage"
     /// capability (a device that only authors strokes/text must not be picked
     /// for this — same reasoning as `callAddTextStyled`'s "authorText" gate).
@@ -2926,7 +3016,12 @@ public actor MCPAdapter {
     private func callAddImage(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
-            let bytesB64 = try Self.stringArg(arguments, "bytes")  // relay verbatim as base64
+            let path = try Self.stringArg(arguments, "path")
+            let bytesB64: String
+            switch Self.readImageFile(at: path) {
+            case .bytes(let data): bytesB64 = data.base64EncodedString()
+            case .refusal(let reason): return Self.errorResult(reason)
+            }
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
             let width = try Self.optionalDoubleArg(arguments, "canvasWidth")
@@ -2967,10 +3062,21 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 var summary = "added image to \(docId) at seq \(seq)"
+                // The device reports what it actually placed. `pixelWidth`/`pixelHeight` are the
+                // SOURCE image's own dimensions, which no other tool can give: list_images
+                // reports canvasBounds and never the pixels behind it, so without this an agent
+                // has no way to learn the aspect ratio and must render, look, and guess.
+                //
+                // Every value is a STRING, keeping `meta` a [String: String] on both sides of the
+                // wire — a new device against an old server still decodes, and a new server
+                // against an old device simply omits these lines. A typed struct would make a
+                // reply-only improvement force the two repos to deploy together.
                 if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
-                   let id = decoded["id"] {
-                    summary += "\nid: \(id)"
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta) {
+                    if let id = decoded["id"] { summary += "\nid: \(id)" }
+                    if let bounds = decoded["canvasBounds"] { summary += "\ncanvasBounds: [\(bounds)]" }
+                    if let w = decoded["pixelWidth"] { summary += "\npixelWidth: \(w)" }
+                    if let h = decoded["pixelHeight"] { summary += "\npixelHeight: \(h)" }
                 }
                 return summary
             }
