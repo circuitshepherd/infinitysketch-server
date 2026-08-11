@@ -13,19 +13,30 @@ public enum WebUI {
     /// `viewportJS` is one: the suite drives the REAL source in a JSContext rather
     /// than a Swift re-derivation of it. Pure: no DOM, no globals.
     public static let tableSortJS = #"""
+    // What the page opens at: the documents someone is actually looking at first,
+    // then alphabetical. It is deliberately NOT persisted anywhere — a reload is
+    // the way back to it, so nothing here may reach localStorage or a cookie.
+    const DEFAULT_SORT = [{ column: "subscribers", dir: -1 }, { column: "name", dir: 1 }];
+
     // Sort state for the document table: an ORDERED list of keys, most significant
     // first, so "subscribers, then name" is expressible. One rule covers both
     // buttons — a click CYCLES a column asc -> desc -> off — and `additive`
     // (shift) is the only difference: without it the other columns are dropped
     // first, so a plain click always means "sort by just this one".
-    function makeTableSort() {
+    //
+    // `initial` omitted means DEFAULT_SORT; pass [] for an unsorted table.
+    function makeTableSort(initial) {
       const COLUMNS = {
         name: (d) => d.name,
         sizeBytes: (d) => d.sizeBytes,
         seq: (d) => d.seq,
         subscribers: (d) => d.subscriberCount,
       };
-      let keys = [];   // [{ column, dir }], dir: 1 ascending, -1 descending
+      // COPIED, never aliased: `toggle` mutates these objects in place, so a shared
+      // DEFAULT_SORT entry would carry one page's click into the next sorter built.
+      let keys = (initial === undefined ? DEFAULT_SORT : initial)   // [{ column, dir }],
+        .filter((k) => k && k.column in COLUMNS)                    // dir: 1 asc, -1 desc
+        .map((k) => ({ column: k.column, dir: k.dir === -1 ? -1 : 1 }));
 
       function toggle(column, additive) {
         if (!(column in COLUMNS)) return;
@@ -119,7 +130,20 @@ public enum WebUI {
          hover, and the mark takes the same dim colour as the header text. */
       th[data-sort] { cursor: pointer; user-select: none; -webkit-user-select: none; }
       th[data-sort]:hover { background: var(--bg); }
-      .sortmark { font-size: 0.8em; color: var(--fg-dim); margin-left: 0.35rem; }
+      /* A FIXED slot, because the mark's content changes with the sort ("" -> ▲ -> ▼2)
+         and the table is auto-layout: a header that grows or shrinks under a click
+         re-measures its whole column, so every column shifts as you sort. The width
+         holds the widest mark (arrow + rank) — measured at 14.7px against this 15.7px
+         slot — so the reserve is identical on a sorted and an unsorted header, and a
+         font that draws the arrow wider spills into the cell padding rather than
+         moving anything. */
+      .sortmark { display: inline-block; width: 1.75em; margin-left: 0.35rem;
+                  font-size: 0.8em; color: var(--fg-dim);
+                  text-align: left; white-space: nowrap; }
+      /* On a right-aligned column the mark goes on the INNER side (it is first in the
+         markup there): the label then ends flush with the digits below it whatever the
+         sort is doing, and the reserved slot sits in the cell's empty middle. */
+      th.num .sortmark { margin-left: 0; margin-right: 0.35rem; text-align: right; }
     </style>
     </head>
     <body>
@@ -133,9 +157,9 @@ public enum WebUI {
         <thead><tr>
           <th></th>
           <th data-sort="name" tabindex="0" title="Click to sort. Shift-click to add a column, so the sort can be e.g. subscribers then name. A third click clears the column.">Document<span class="sortmark"></span></th>
-          <th class="num" data-sort="sizeBytes" tabindex="0" title="Click to sort. Shift-click to add a column.">Size<span class="sortmark"></span></th>
-          <th class="num" data-sort="seq" tabindex="0" title="Click to sort. Shift-click to add a column.">Seq<span class="sortmark"></span></th>
-          <th class="num" data-sort="subscribers" tabindex="0" title="Click to sort. Shift-click to add a column.">Subscribers<span class="sortmark"></span></th>
+          <th class="num" data-sort="sizeBytes" tabindex="0" title="Click to sort. Shift-click to add a column."><span class="sortmark"></span>Size</th>
+          <th class="num" data-sort="seq" tabindex="0" title="Click to sort. Shift-click to add a column."><span class="sortmark"></span>Seq</th>
+          <th class="num" data-sort="subscribers" tabindex="0" title="Click to sort. Shift-click to add a column."><span class="sortmark"></span>Subscribers</th>
         </tr></thead>
         <tbody id="docs"></tbody>
       </table>
@@ -147,6 +171,8 @@ public enum WebUI {
     const statusEl = document.getElementById("status");
     const docsEl = document.getElementById("docs");
     let refreshTimer = null;
+    // No argument = DEFAULT_SORT (subscribers descending, then name). The sort is held
+    // in this variable and nowhere else, so a reload always comes back to the default.
     const sorter = makeTableSort();
     // The last payload, kept so a header click re-sorts what is on screen without
     // re-fetching — and so a status-event refresh cannot drop the user's sort.
