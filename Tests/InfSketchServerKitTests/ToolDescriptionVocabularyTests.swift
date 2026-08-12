@@ -68,6 +68,21 @@ struct ToolDescriptionVocabularyTests {
             """)
     }
 
+    /// A colour argument whose description does not name its space re-opens the trap the
+    /// 2026-08-12 colour-space spec closed.
+    @Test func everyColourTakingToolNamesTheColourSpace() throws {
+        let colourTools = MCPAdapter.toolDefinitions.filter {
+            MCPAdapter.declaredArguments(of: $0).contains("colorAppearance")
+        }
+        #expect(!colourTools.isEmpty)
+        for tool in colourTools {
+            let description = tool.description ?? ""
+            #expect(description.localizedCaseInsensitiveContains("light-canonical")
+                 || description.localizedCaseInsensitiveContains("colorAppearance"),
+                    "\(tool.name) takes colours but its description never names their space")
+        }
+    }
+
     /// The detector itself, in both directions — a gate that cannot fire is worse than no gate.
     @Test func theBareTokenDetectorDistinguishesPoseFromParameters() {
         #expect(Self.containsBareToken("x", in: "(x, y) is the top-left corner"))

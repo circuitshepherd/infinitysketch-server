@@ -480,11 +480,20 @@ public actor MCPAdapter {
         }
     }
 
+    /// Every colour hex on this surface is LIGHT-CANONICAL (the light-appearance value —
+    /// what PencilKit stores; a dark canvas renders its conversion). This call-level
+    /// declaration is the one door for dark-authored colours.
+    private static let colorAppearanceProperty: Value = .object([
+        "type": "string",
+        "enum": .array(["light", "dark"].map(Value.string)),
+        "description": "The appearance this call's colour hexes were authored in. Default \"light\" — the canonical space every colour on this surface speaks. Pass \"dark\" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form and the reply reports what was stored.",
+    ])
+
     /// Shared style properties for add_text/edit_text (whole-field). Colours
     /// are #RRGGBB(AA). A whole-field style is the base a `spans` entry
     /// overrides.
     private static let textStyleProperties: [String: Value] = [
-        "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour."]),
+        "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
         "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
         "bold": .object(["type": "boolean"]),
         "italic": .object(["type": "boolean"]),
@@ -590,7 +599,7 @@ public actor MCPAdapter {
             ]),
             "color": .object([
                 "type": "string",
-                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. OMIT IT to inherit the colour of the tool the user currently has selected in the picker (see get_tool); falls back to a paper-contrasting default when no inking tool is selected.",
+                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. OMIT IT to inherit the colour of the tool the user currently has selected in the picker (see get_tool); falls back to a paper-contrasting default when no inking tool is selected. Light-canonical (the light-appearance value); see colorAppearance.",
             ]),
             "inkType": .object([
                 "type": "string",
@@ -647,7 +656,8 @@ public actor MCPAdapter {
                 to style the WHOLE label, or a `spans` array to style parts of it independently \
                 (e.g. a subscript). A whole-field style is the base each span overrides. Styling \
                 needs a connected device; plain text does not. Returns the new text's id so you \
-                can edit it. Colours: #RRGGBB(AA). Font families come from list_fonts — call it \
+                can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
+                author for the dark canvas). Font families come from list_fonts — call it \
                 before setting a `family`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -658,6 +668,7 @@ public actor MCPAdapter {
                         "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
                         "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "colorAppearance": colorAppearanceProperty,
                         "tags": .object([
                             "type": "array", "items": .object(["type": "string"]),
                             "description": "Durable tags for this text, so find_elements can reach it later.",
@@ -696,7 +707,8 @@ public actor MCPAdapter {
                 the EXISTING characters (or replaces them with `text`/`spans` if given) and \
                 needs a connected device — plain edits do not. Position-only edits (canvasX \
                 and/or canvasY with no text/style) do not touch formatting. Colours: \
-                #RRGGBB(AA). Font \
+                #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark \
+                canvas). Font \
                 families come from list_fonts. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -716,6 +728,7 @@ public actor MCPAdapter {
                         ]),
                         "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "colorAppearance": colorAppearanceProperty,
                         "spans": .object([
                             "type": "array",
                             "description": """
@@ -925,12 +938,14 @@ public actor MCPAdapter {
 
                 Do NOT fake a dot with a short wide stroke: round caps at each end of a segment \
                 make a STADIUM (length + width) × width, which is visibly oval at the sizes a \
-                dot is used at. \(writeToolCaveats)
+                dot is used at. Each dot's `color` is light-canonical; pass \
+                colorAppearance: "dark" if you picked it for the dark canvas. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "dots": .object([
                         "type": "array",
                         "description": "The dots to draw.",
@@ -945,7 +960,7 @@ public actor MCPAdapter {
                                 ]),
                                 "color": .object([
                                     "type": "string",
-                                    "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                                    "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance.",
                                 ]),
                                 "inkType": .object([
                                     "type": "string",
@@ -1006,12 +1021,14 @@ public actor MCPAdapter {
                 all take the fill and its border together, because they are one stroke, but \
                 changing the boundary to a different SHAPE does not re-fill it. You hold the \
                 outline, so give the fill a `name` and reshape it by deleting it and filling the \
-                new outline under that same name. \(writeToolCaveats)
+                new outline under that same name. `color` is light-canonical; pass \
+                colorAppearance: "dark" if you picked it for the dark canvas. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "canvasPoints": .object([
                         "type": "array",
                         "description": "The boundary, in canvas coordinates; at least 3 points.",
@@ -1032,7 +1049,7 @@ public actor MCPAdapter {
                     ]),
                     "color": .object([
                         "type": "string",
-                        "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                        "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
                     "stampWidth": .object([
                         "type": "number",
@@ -1261,7 +1278,9 @@ public actor MCPAdapter {
                 automatic light<->dark derivation). Server-side, no device needed; applies \
                 live to an open document with no banner. unknownDoc if the document doesn't \
                 exist; invalidSpec on a bad hex colour; invalidArguments if no field is given. \
-                \(writeToolCaveats)
+                Unlike the colorAppearance door elsewhere on this surface, `light` and `dark` \
+                here are each the LITERAL value for that appearance — nothing is converted \
+                between them. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1323,7 +1342,11 @@ public actor MCPAdapter {
                 Other defaults for any stroke that omits them: inkType "pen", width 4, and a \
                 colour that FOLLOWS THE PAPER — white on a dark document, black on a light \
                 one (never a hardcoded #000000, which renders invisible on dark paper). An \
-                explicit color is always honoured exactly as given. The result names the seq \
+                explicit color is always honoured exactly as given, and is LIGHT-CANONICAL — \
+                pass colorAppearance: "dark" when you picked colours for how they look on the \
+                dark canvas; the device converts them before storing, and the reply's \
+                storedColors array (one entry per created stroke, present only when the dark \
+                door was used) reports what was actually stored. The result names the seq \
                 the write was assigned, and the id of each stroke it created, in \
                 the order supplied — use those, not a bounding-box guess, to revise exactly \
                 what you just drew with \
@@ -1338,6 +1361,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "strokes": .object([
                         "type": "array",
                         "description": """
@@ -1418,7 +1442,9 @@ public actor MCPAdapter {
                 REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, \
                 stampWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
                 antialias included) and `canvasPathBounds` is the control points' box — use the \
-                latter to verify placement, the former for true on-screen size.
+                latter to verify placement, the former for true on-screen size. `color` is the \
+                stored LIGHT-CANONICAL hex; on a dark document what you SEE is its conversion, \
+                not this value.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1530,7 +1556,7 @@ public actor MCPAdapter {
                         "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap. Defaults to 1.",
                     ]),
                     "rotation": .object(["type": "number", "description": "Rotation in degrees. Defaults to 0."]),
-                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Defaults to a translucent blue."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Defaults to a translucent blue. Literal: drawn identically in light and dark (grid colours never convert)."]),
                     "thickness": .object(["type": "number", "description": "Line thickness. Defaults to 1."]),
                     "visible": .object(["type": "boolean", "description": "Whether the grid is drawn. Defaults to true."]),
                     "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid. Defaults to true."]),
@@ -1577,7 +1603,7 @@ public actor MCPAdapter {
                         "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap.",
                     ]),
                     "rotation": .object(["type": "number", "description": "Rotation in degrees."]),
-                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Literal: drawn identically in light and dark (grid colours never convert)."]),
                     "thickness": .object(["type": "number", "description": "Line thickness."]),
                     "visible": .object(["type": "boolean", "description": "Whether the grid is drawn."]),
                     "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid."]),
@@ -1666,12 +1692,18 @@ public actor MCPAdapter {
                 candidate strokes that are not written to the document — use it to \
                 preview a stroke before committing it with draw_strokes, optionally \
                 composited over the document's real content to judge fit and alignment. \
-                Authored by a connected InfinitySketch device. Returns a PNG plus \
-                metadata: the covered rect, the scale actually used, the current \
-                appearance, the canvas contentSize, and — per grid — its id, thickness, \
+                Authored by a connected InfinitySketch device. Pass `appearance: "light"|"dark"` \
+                to render as though the device were showing that appearance, regardless of what \
+                it is actually showing — the default is the document's own (the last opener's \
+                device); two connected devices can be viewing in different modes, so render both \
+                to check your work in each. Returns a PNG plus \
+                metadata: the covered rect, the scale actually used, the appearance actually \
+                rendered, the canvas contentSize, and — per grid — its id, thickness, \
                 and each drawn/snap line family's id, lineAngleDeg and label. These grid \
                 and family ids are what snap_points' gridIds and transform_strokes' \
-                snapTo refer to. READ lineAngleDeg for a family's line direction, never \
+                snapTo refer to. Ephemeral `strokes`' `color` hexes are light-canonical like \
+                everywhere else on this surface — pass colorAppearance: "dark" if you picked \
+                them for the dark canvas. READ lineAngleDeg for a family's line direction, never \
                 infer it from `normal` — normal is PERPENDICULAR to the lines it \
                 describes ([1, 0] means VERTICAL lines, not horizontal). Only visible \
                 grids appear in the rendered image, but visible and enabled are \
@@ -1778,6 +1810,12 @@ public actor MCPAdapter {
                             metadata reports the scale actually used.
                             """,
                     ]),
+                    "appearance": .object([
+                        "type": "string",
+                        "enum": .array(["light", "dark"].map(Value.string)),
+                        "description": "Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each.",
+                    ]),
+                    "colorAppearance": colorAppearanceProperty,
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1813,7 +1851,8 @@ public actor MCPAdapter {
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasPathBounds, localToCanvasTransform, \
                 color, inkType, stampWidth, pointCount}`. NOTE there is no `canvasInkBounds` here \
-                — only list_strokes reports it.
+                — only list_strokes reports it. `color` is the stored LIGHT-CANONICAL hex; on a \
+                dark document what you SEE is its conversion, not this value.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2018,7 +2057,10 @@ public actor MCPAdapter {
                 value the user drew with is not recorded anywhere and cannot be \
                 recovered from the stroke (a colour-only restyle, and any stroke the \
                 user HAS width-edited, are unaffected). Note: `monoline` reads back as `pen` \
-                — PencilKit's archive format does not preserve it. \(writeToolCaveats)
+                — PencilKit's archive format does not preserve it. `color` is LIGHT-CANONICAL — \
+                pass colorAppearance: "dark" if you picked it for the dark canvas; the device \
+                converts it before storing, and the reply's storedColor reports what was \
+                actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2029,9 +2071,10 @@ public actor MCPAdapter {
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "colorAppearance": colorAppearanceProperty,
                     "color": .object([
                         "type": "string",
-                        "description": "#RRGGBB or #RRGGBBAA.",
+                        "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
                     "stampWidth": .object([
                         "type": "number",
@@ -2224,7 +2267,9 @@ public actor MCPAdapter {
                 never applied implicitly: you hold them, so a preview and its commit are the same \
                 numbers even if the user switches tools in between. `isInkingTool` is false for \
                 the eraser, lasso, or Bring to Front — nothing sensible to inherit, so use your \
-                own values.
+                own values. `color` is reported LIGHT-CANONICAL, whatever appearance the device \
+                is currently showing — copy it into draw_strokes/restyle_strokes verbatim, no \
+                colorAppearance needed.
 
                 TWO WIDTHS, and they are DIFFERENT NUMBERS. `stampWidth` is what the pen \
                 actually lays down — the same quantity list_strokes / get_strokes report and \
@@ -2252,6 +2297,8 @@ public actor MCPAdapter {
                 select_elements does the same thing but leaves a window where the stroke exists \
                 unselected; this is atomic. By default the user's selection rectangle is KEPT (you \
                 are drawing INTO it) — pass `keepRect: false` to shrink it to the new strokes. \
+                Stroke colours are light-canonical, same as draw_strokes — pass \
+                colorAppearance: "dark" if you picked them for the dark canvas. \
                 Requires an ACTIVE selection: noSelectionActive otherwise, userBusy mid-gesture. \
                 REQUIRES a connected `controlSelection` device.
                 """,
@@ -2264,6 +2311,7 @@ public actor MCPAdapter {
                         "description": "Strokes to draw; same item shape as draw_strokes.",
                         "items": .object(["type": "object"]),
                     ]),
+                    "colorAppearance": colorAppearanceProperty,
                     "keepRect": .object([
                         "type": "boolean",
                         "description": "Keep the user's selection rectangle. Defaults to true.",
@@ -2280,7 +2328,9 @@ public actor MCPAdapter {
                 (pen/pencil/marker/monoline). At least one is required; an omitted field is left \
                 alone. Unlike restyle_strokes (which edits document bytes and cannot refresh the \
                 canvas while a selection is open) this drives the app's own reink path, so the \
-                change appears immediately and lands as one undo step. noSelectionActive if \
+                change appears immediately and lands as one undo step. `color` is light-canonical \
+                — pass colorAppearance: "dark" if you picked it for the dark canvas. \
+                noSelectionActive if \
                 nothing is selected; userBusy mid-gesture. REQUIRES a connected \
                 `controlSelection` device.
                 """,
@@ -2288,7 +2338,8 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id."]),
-                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA."]),
+                    "colorAppearance": colorAppearanceProperty,
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance."]),
                     "stampWidth": .object(["type": "number", "description": "Target peak STAMP width — the stroke's own ink size."]),
                     "inkType": .object([
                         "type": "string",
@@ -2899,7 +2950,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3141,7 +3192,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3478,10 +3529,12 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            var envelope: [String: Value] = ["op": .string("draw"), "strokes": .array(strokes)]
+            if let value = arguments?["colorAppearance"], !value.isNull { envelope["colorAppearance"] = value }
+
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(
-                    Value.object(["op": .string("draw"), "strokes": .array(strokes)]))
+                spec = try JSONEncoder().encode(Value.object(envelope))
             } catch {
                 return Self.errorResult("invalidArguments")
             }
@@ -3529,6 +3582,11 @@ public actor MCPAdapter {
                     /// nothing. Absent entirely when no supplied name took over.
                     let displacedNames: [String]?
                     let clampedWidths: [Double]?
+                    /// What was actually STORED (light-canonical), one entry per created stroke,
+                    /// in order — present only when this call went through the dark door
+                    /// (colorAppearance: "dark"). Absent (not merely empty) for an ordinary
+                    /// light-space call, so an unrelated draw's reply stays unchanged.
+                    let storedColors: [String]?
                 }
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode(DrawMeta.self, from: meta) {
@@ -3562,6 +3620,11 @@ public actor MCPAdapter {
                         for taken in displaced where !taken.isEmpty {
                             summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
                         }
+                    }
+                    // Only present when colorAppearance: "dark" converted at least one colour —
+                    // what actually landed on disk, light-canonical, one entry per created stroke.
+                    if let stored = decoded.storedColors, !stored.isEmpty {
+                        summary += "\nstoredColors: \(stored.joined(separator: ", "))"
                     }
                 }
                 return summary
@@ -4273,7 +4336,7 @@ public actor MCPAdapter {
     /// one of them optional; see `callRenderSketch`.
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
-        "scale",
+        "scale", "appearance", "colorAppearance",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -4466,7 +4529,7 @@ public actor MCPAdapter {
                 "op": .string("restyle"),
                 "ids": .array(ids.map(Value.string)),
             ]
-            for name in ["color", "stampWidth", "inkType"] {
+            for name in ["color", "stampWidth", "inkType", "colorAppearance"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -4508,10 +4571,15 @@ public actor MCPAdapter {
                 /// estimate — a separate cause that can hold at the same time as the first.
                 let sourcePeakExpressible: Double
             }
-            struct RestyleMeta: Decodable { let widthNotes: [WidthNote]? }
-            let notes = out.meta
-                .flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }?
-                .widthNotes ?? []
+            struct RestyleMeta: Decodable {
+                let widthNotes: [WidthNote]?
+                /// What was actually STORED (light-canonical) — present only when this call went
+                /// through the dark door (colorAppearance: "dark") on an explicit `color`.
+                let storedColor: String?
+            }
+            let restyleMeta = out.meta.flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }
+            let notes = restyleMeta?.widthNotes ?? []
+            let storedColor = restyleMeta?.storedColor
 
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
@@ -4545,6 +4613,9 @@ public actor MCPAdapter {
                             + "\(alsoRange), so the re-ink scales from a saturated estimate."
                     }
                     summary += " list_strokes reports what each stroke actually got."
+                }
+                if let storedColor {
+                    summary += "\nstoredColor: \(storedColor)"
                 }
                 return summary
             }
@@ -4785,6 +4856,7 @@ public actor MCPAdapter {
             }
             var envelope: [String: Value] = ["op": .string("drawSelection"), "strokes": .array(items)]
             if let keep = arguments?["keepRect"] { envelope["keepRect"] = keep }
+            if let ca = arguments?["colorAppearance"] { envelope["colorAppearance"] = ca }
             return await callSelectionOp(docId: docId, envelope: envelope)
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4800,6 +4872,9 @@ public actor MCPAdapter {
             if let c = arguments?["color"], case .string(let hex) = c { envelope["color"] = .string(hex) }
             if let w = arguments?["stampWidth"] { envelope["stampWidth"] = w }
             if let i = arguments?["inkType"], case .string(let ink) = i { envelope["inkType"] = .string(ink) }
+            if let ca = arguments?["colorAppearance"], case .string(let appearance) = ca {
+                envelope["colorAppearance"] = .string(appearance)
+            }
             return await callSelectionOp(docId: docId, envelope: envelope)
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -5551,11 +5626,11 @@ public actor MCPAdapter {
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
+            var envelope: [String: Value] = ["op": .string("drawDots"), "dots": .array(dots)]
+            if let value = arguments?["colorAppearance"], !value.isNull { envelope["colorAppearance"] = value }
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("drawDots"), "dots": .array(dots),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(envelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
@@ -5606,7 +5681,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags"] {
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
