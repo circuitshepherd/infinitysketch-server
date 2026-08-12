@@ -22,7 +22,8 @@ import InfSketchWire
     /// This test earning its keep is not hypothetical: the delete work added both messages and
     /// left the version at 2, and this is what caught it.
     @Test func theVersionIsBumpedForEveryWireAddition() {
-        #expect(WireProtocol.version == 9)
+        /// v10 (2026-08-12): op-spec envelopes gained colorAppearance and the render spec gained appearance — a stale peer would silently drop them and draw wrong-coloured content.
+        #expect(WireProtocol.version == 10)
     }
 
     @Test func clientMessagesRoundTrip() throws {
