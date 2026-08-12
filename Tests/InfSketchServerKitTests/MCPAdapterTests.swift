@@ -5551,6 +5551,8 @@ private actor FakeStrokeOpDevice {
             "list_open_docs": ["openDocs", "docId", "capabilities"],
             "draw_strokes": ["storedColors"],
             "restyle_strokes": ["storedColor"],
+            "fill_region": ["storedColors"],
+            "draw_dots": ["storedColors"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5634,6 +5636,57 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `draw_dots` reuses `draw`'s meta through `DotAuthoring.annotated`, so `storedColors`
+    /// (what the dark door actually stored, light-canonical) must survive that merge and reach
+    /// the reply text — exactly the `draw_strokes` contract, just for dots.
+    @Test func drawDotsReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                meta: Data(##"{"keys":["a-1"],"storedColors":["#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0),
+                                     "color": .string("#808080")])]),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line — an
+    /// absent key, not an empty one, so an unrelated draw_dots reply stays exactly as before.
+    @Test func drawDotsOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
+    }
+
     @Test func drawDotsUnknownDocErrors() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5688,6 +5741,58 @@ private actor FakeStrokeOpDevice {
         #expect((spec["canvasPoints"] as? [Any])?.count == 3)
         #expect(spec["spacingRatio"] as? Double == 0.5)
         #expect(spec["angleDeg"] as? Double == 45)
+    }
+
+    /// `fill_region` returns `StrokeAuthoring.perform`'s meta wholesale, so `storedColors` (what
+    /// the dark door actually stored, light-canonical) reaches the reply text unmodified —
+    /// exactly the `draw_strokes` contract.
+    @Test func fillRegionReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                meta: Data(##"{"keys":["a-1","b-2"],"storedColors":["#808080FF","#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+            "color": .string("#808080"),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF, #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line.
+    @Test func fillRegionOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
     }
 
     @Test func fillRegionUnknownDocErrors() async throws {

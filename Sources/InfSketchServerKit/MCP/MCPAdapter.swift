@@ -486,7 +486,7 @@ public actor MCPAdapter {
     private static let colorAppearanceProperty: Value = .object([
         "type": "string",
         "enum": .array(["light", "dark"].map(Value.string)),
-        "description": "The appearance this call's colour hexes were authored in. Default \"light\" — the canonical space every colour on this surface speaks. Pass \"dark\" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form and the reply reports what was stored.",
+        "description": "The appearance this call's colour hexes were authored in. Default \"light\" — the canonical space every colour on this surface speaks. Pass \"dark\" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form.",
     ])
 
     /// Shared style properties for add_text/edit_text (whole-field). Colours
@@ -939,7 +939,9 @@ public actor MCPAdapter {
                 Do NOT fake a dot with a short wide stroke: round caps at each end of a segment \
                 make a STADIUM (length + width) × width, which is visibly oval at the sizes a \
                 dot is used at. Each dot's `color` is light-canonical; pass \
-                colorAppearance: "dark" if you picked it for the dark canvas. \(writeToolCaveats)
+                colorAppearance: "dark" if you picked it for the dark canvas — the reply's \
+                storedColors array (one entry per created dot, present only when the dark door \
+                was used) reports what was actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1022,7 +1024,9 @@ public actor MCPAdapter {
                 changing the boundary to a different SHAPE does not re-fill it. You hold the \
                 outline, so give the fill a `name` and reshape it by deleting it and filling the \
                 new outline under that same name. `color` is light-canonical; pass \
-                colorAppearance: "dark" if you picked it for the dark canvas. \(writeToolCaveats)
+                colorAppearance: "dark" if you picked it for the dark canvas — the reply's \
+                storedColors array (one entry per pass/border stroke, present only when the \
+                dark door was used) reports what was actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -5647,6 +5651,12 @@ public actor MCPAdapter {
             struct DotMeta: Decodable {
                 let keys: [String]?
                 let clampedDiameters: [Double]?
+                /// What was actually STORED (light-canonical), one entry per created dot, in
+                /// order — present only when this call went through the dark door
+                /// (colorAppearance: "dark"). Reused verbatim from the underlying `draw` op's
+                /// meta, which `DotAuthoring.annotated` merges `clampedDiameters` onto without
+                /// disturbing.
+                let storedColors: [String]?
             }
             let meta = out.meta.flatMap { try? JSONDecoder().decode(DotMeta.self, from: $0) }
             return await submitAndRespond(
@@ -5658,6 +5668,9 @@ public actor MCPAdapter {
                         + clamped.map { String(format: "%g", $0) }.joined(separator: ", ")
                 }
                 if let keys = meta?.keys { reply += "\nids: " + keys.joined(separator: ", ") }
+                if let stored = meta?.storedColors, !stored.isEmpty {
+                    reply += "\nstoredColors: " + stored.joined(separator: ", ")
+                }
                 return reply
             }
         } catch let error as ArgumentError {
@@ -5698,14 +5711,26 @@ public actor MCPAdapter {
             }
             // The device answers with `draw`'s meta, so the count comes from the keys it made —
             // and the caller should see it, since those strokes are the cost it just took on.
-            struct FillMeta: Decodable { let keys: [String]? }
-            let created = out.meta
-                .flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }?.keys?.count
+            struct FillMeta: Decodable {
+                let keys: [String]?
+                /// What was actually STORED (light-canonical), one entry per pass/border stroke,
+                /// in order — present only when this call went through the dark door
+                /// (colorAppearance: "dark"). `RegionFill.fillRegion` returns
+                /// `StrokeAuthoring.perform`'s meta wholesale, so this is the same field
+                /// `draw_strokes` reports, unmodified.
+                let storedColors: [String]?
+            }
+            let fillMeta = out.meta.flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }
+            let created = fillMeta?.keys?.count
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                guard let created else { return "filled the region in \(docId) at seq \(seq)" }
-                return "filled the region in \(docId) with \(created) stroke(s) at seq \(seq)"
+                var reply = created.map { "filled the region in \(docId) with \($0) stroke(s) at seq \(seq)" }
+                    ?? "filled the region in \(docId) at seq \(seq)"
+                if let stored = fillMeta?.storedColors, !stored.isEmpty {
+                    reply += "\nstoredColors: " + stored.joined(separator: ", ")
+                }
+                return reply
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
