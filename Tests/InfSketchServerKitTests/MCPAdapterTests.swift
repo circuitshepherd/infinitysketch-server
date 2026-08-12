@@ -6046,7 +6046,8 @@ private actor FakeStrokeOpDevice {
         // pins the emphasis rather than the content would fight every future edit.
         let lowered = text.lowercased()
         for essential in ["40 000", "viewport", "canvas space", "width", "polyline",
-                          "translucent", "undo_last_edit", "snap_points"] {
+                          "translucent", "undo_last_edit", "snap_points", "light-canonical",
+                          "colorappearance"] {
             #expect(lowered.contains(essential.lowercased()),
                     "the guide no longer mentions \(essential)")
         }
