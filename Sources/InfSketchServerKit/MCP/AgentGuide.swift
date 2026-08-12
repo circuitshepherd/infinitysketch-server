@@ -110,7 +110,9 @@ enum AgentGuide {
     which is what PencilKit stores. A dark canvas renders its CONVERSION: black and white \
     swap, greys flip, saturated hues barely move. So on a dark document, what you pass is \
     not what you see — pass `colorAppearance: "dark"` instead of reverse-engineering \
-    inverted hexes; the device converts for you and the reply reports what was stored.
+    inverted hexes; the device converts for you. The stroke tools report what was stored \
+    (`storedColors` / `storedColor`); the text and selection tools convert silently, so \
+    `list_strokes` or a render is how you confirm.
 
     Three regimes, all named: strokes and text colours adapt (light-canonical wire); \
     **grid colours are literal** (one value, both modes); **paper is an explicit pair** \
