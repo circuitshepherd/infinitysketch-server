@@ -3589,6 +3589,70 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - colorAppearance / appearance (2026-08-12 agent-color-space spec)
+
+    /// Every tool on this surface that takes a colour hex must declare the call-level
+    /// `colorAppearance` door (Task 11) — the one place a dark-authored colour can enter.
+    /// Modeled on everyStrokeAcceptingToolAdvertisesSmoothInItsSchema (3573).
+    @Test func everyColourTakingToolAdvertisesColorAppearance() throws {
+        let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
+                                     "draw_dots", "restyle_strokes", "restyle_selection",
+                                     "add_text", "edit_text", "render_sketch"]
+        let declaring = Set(MCPAdapter.toolDefinitions
+            .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
+            .map(\.name))
+        #expect(declaring == expected)
+    }
+
+    /// `appearance` and `colorAppearance` both reach the device through render_sketch's
+    /// allow-list (renderSpecParameterNames). Modeled on renderSketchRelaysScale (5419).
+    @Test func renderSketchRelaysAppearanceAndColorAppearance() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([0x89, 0x50]),
+                                                  meta: Data(#"{"appearance":"dark"}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        _ = try await client.callTool(name: "render_sketch", arguments: [
+            "docId": "d", "appearance": .string("dark"), "colorAppearance": .string("dark"),
+        ])
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["appearance"] as? String == "dark")
+        #expect(spec["colorAppearance"] as? String == "dark")
+
+        await server.stop()
+    }
+
+    /// `draw_strokes` relays `colorAppearance` only when supplied — the exact envelope key set
+    /// the device decodes, string-literally, no extras.
+    @Test func drawStrokesRelaysColorAppearance() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object(["canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)])])])
+        ])
+        let (_, isError) = try await client.callTool(name: "draw_strokes", arguments: [
+            "docId": "d", "strokes": strokesArg, "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "strokes", "colorAppearance"])
+        #expect(envelope["colorAppearance"] as? String == "dark")
+
+        await server.stop()
+    }
+
     // MARK: - get_selection / transform_selection (agent-selection-control spec)
     //
     // Same shape as render_sketch's tests above: a `FakeStrokeOpDevice`
@@ -5342,7 +5406,7 @@ private actor FakeStrokeOpDevice {
         let (tools, _) = try await client.listTools()
         let tool = try #require(tools.first { $0.name == "restyle_strokes" })
         let declared = MCPAdapter.declaredArguments(of: tool)
-        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType"],
+        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType", "colorAppearance"],
                 "restyle_strokes declares \(declared.sorted()) — every one must reach the device")
 
         await server.stop()
@@ -5485,6 +5549,10 @@ private actor FakeStrokeOpDevice {
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "stampWidth"],
             "list_open_docs": ["openDocs", "docId", "capabilities"],
+            "draw_strokes": ["storedColors"],
+            "restyle_strokes": ["storedColor"],
+            "fill_region": ["storedColors"],
+            "draw_dots": ["storedColors"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5568,6 +5636,57 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `draw_dots` reuses `draw`'s meta through `DotAuthoring.annotated`, so `storedColors`
+    /// (what the dark door actually stored, light-canonical) must survive that merge and reach
+    /// the reply text — exactly the `draw_strokes` contract, just for dots.
+    @Test func drawDotsReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                meta: Data(##"{"keys":["a-1"],"storedColors":["#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0),
+                                     "color": .string("#808080")])]),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line — an
+    /// absent key, not an empty one, so an unrelated draw_dots reply stays exactly as before.
+    @Test func drawDotsOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
+    }
+
     @Test func drawDotsUnknownDocErrors() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5622,6 +5741,58 @@ private actor FakeStrokeOpDevice {
         #expect((spec["canvasPoints"] as? [Any])?.count == 3)
         #expect(spec["spacingRatio"] as? Double == 0.5)
         #expect(spec["angleDeg"] as? Double == 45)
+    }
+
+    /// `fill_region` returns `StrokeAuthoring.perform`'s meta wholesale, so `storedColors` (what
+    /// the dark door actually stored, light-canonical) reaches the reply text unmodified —
+    /// exactly the `draw_strokes` contract.
+    @Test func fillRegionReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                meta: Data(##"{"keys":["a-1","b-2"],"storedColors":["#808080FF","#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+            "color": .string("#808080"),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF, #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line.
+    @Test func fillRegionOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
     }
 
     @Test func fillRegionUnknownDocErrors() async throws {
@@ -5875,7 +6046,8 @@ private actor FakeStrokeOpDevice {
         // pins the emphasis rather than the content would fight every future edit.
         let lowered = text.lowercased()
         for essential in ["40 000", "viewport", "canvas space", "width", "polyline",
-                          "translucent", "undo_last_edit", "snap_points"] {
+                          "translucent", "undo_last_edit", "snap_points", "light-canonical",
+                          "colorappearance"] {
             #expect(lowered.contains(essential.lowercased()),
                     "the guide no longer mentions \(essential)")
         }

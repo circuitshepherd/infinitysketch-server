@@ -104,6 +104,24 @@ enum AgentGuide {
     limits: the document still carries them all, and a fill does not follow its outline if you \
     reshape the boundary afterwards.
 
+    ## Colour, and dark mode
+
+    Every colour hex on this surface is **light-canonical** — the LIGHT-appearance value, \
+    which is what PencilKit stores. A dark canvas renders its CONVERSION: black and white \
+    swap, greys flip, saturated hues barely move. So on a dark document, what you pass is \
+    not what you see — pass `colorAppearance: "dark"` instead of reverse-engineering \
+    inverted hexes; the device converts for you. The stroke tools report what was stored \
+    (`storedColors` / `storedColor`); the text and selection tools convert silently, so \
+    `list_strokes` or a render is how you confirm.
+
+    Three regimes, all named: strokes and text colours adapt (light-canonical wire); \
+    **grid colours are literal** (one value, both modes); **paper is an explicit pair** \
+    (`set_paper` light/dark). The document's `darkColorScheme` is only the LAST OPENER's \
+    device appearance — two connected devices can be viewing the same document in \
+    different modes at once. `render_sketch` takes `appearance: "light"|"dark"`: check \
+    your work in both, and verify colour behaviour with GREYS, where conversion actually \
+    moves.
+
     ## Images
 
     **`add_image` takes a `path`, not the image data.** The path is a file on the machine THIS \
