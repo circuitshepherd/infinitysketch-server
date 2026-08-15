@@ -303,7 +303,7 @@ public actor DeviceCommandBroker {
     public func handleReply(requestId: UInt32, bytes: Data?, meta: Data? = nil,
                             failureReason: String?, payloadKind: String? = nil) {
         guard let entry = completePending(requestId) else {
-            print("[DeviceCommandBroker] dropping reply for unknown/expired requestId \(requestId)")
+            ServerLog.verbose("[DeviceCommandBroker] dropping reply for unknown/expired requestId \(requestId)")
             return
         }
         if let failureReason {

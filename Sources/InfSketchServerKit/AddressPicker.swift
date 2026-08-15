@@ -45,6 +45,22 @@ public struct AddressPicker: Sendable {
         "http://\(ip):\(port)/mcp"
     }
 
+    /// The registration command a CLAUDE CODE user copies, built beside the url it embeds so the
+    /// terminal and the connect panel render the same string and cannot drift apart.
+    ///
+    /// `--scope user` is deliberate (Josef, 2026-08-14): registered once, available in every
+    /// project — matching the user-scope registration `scripts/worktree-server` performs for Grok.
+    /// `--transport http` is Claude Code's name for a Streamable HTTP endpoint; `infsketch`
+    /// matches the Grok registration name.
+    public static func claudeRegisterCommand(mcpURL: String) -> String {
+        "claude mcp add --scope user --transport http infsketch \(mcpURL)"
+    }
+
+    /// The caveat both surfaces print beside the command, verbatim: the command is an EXAMPLE for
+    /// one agent, because every agent has its own registration mechanism.
+    public static let claudeExampleNote =
+        "Claude Code example (other AI agents have their own commands)"
+
     /// The overview page on this address — what the terminal's `o` key opens.
     ///
     /// Deliberately the address's OWN url rather than `localhost`: the page reads the `Host` header

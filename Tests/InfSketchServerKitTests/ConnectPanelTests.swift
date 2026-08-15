@@ -130,4 +130,49 @@ import Testing
         #expect(!html.contains("class=\"chips\""))
         #expect(html.contains("http://127.0.0.1:8080/mcp"))
     }
+
+    // MARK: - the Claude Code registration command
+
+    /// The page shows the COMMAND, not only the url — one per agent url, each embedding ITS url,
+    /// rendered from the same `AddressPicker` source the terminal prints.
+    @Test func theClaudeCommandIsShownForEveryAgentUrl() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains(
+            AddressPicker.claudeRegisterCommand(mcpURL: "http://192.168.1.42:8080/mcp")))
+        #expect(html.contains(
+            AddressPicker.claudeRegisterCommand(mcpURL: "http://10.8.0.3:8080/mcp")))
+        #expect(html.contains(
+            AddressPicker.claudeRegisterCommand(mcpURL: "http://127.0.0.1:8080/mcp")))
+    }
+
+    /// The caveat appears ONCE, under the loopback block — not repeated per address.
+    @Test func theClaudeNoteAppearsExactlyOnce() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.components(separatedBy: AddressPicker.claudeExampleNote).count - 1 == 1)
+    }
+
+    /// A ~90-character command must WRAP rather than widen the panel on a narrow window. A test
+    /// cannot render CSS; it can insist the rule is there (the `.address[hidden]` precedent).
+    @Test func theCommandCodeWraps() {
+        let html = ConnectPanel.html(candidates: [wifi], port: 8080, host: nil)
+        #expect(html.contains("overflow-wrap: anywhere"))
+    }
+
+    /// The no-address fallback mirrors the terminal's: loopback url AND the command. (No copy
+    /// button there — that body ships without the behaviour script, and a dead button is worse
+    /// than none.)
+    @Test func theNoAddressFallbackCarriesTheCommandToo() {
+        let html = ConnectPanel.html(candidates: [], port: 8080, host: nil)
+        #expect(html.contains(
+            AddressPicker.claudeRegisterCommand(mcpURL: "http://127.0.0.1:8080/mcp")))
+    }
+
+    /// Every copy button must point at an id that exists, or it silently copies nothing.
+    @Test func everyCopyButtonTargetsAnExistingId() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        for target in ["mcp-0", "mcp-1", "mcp-local", "cmd-0", "cmd-1", "cmd-local"] {
+            #expect(html.contains("id=\"\(target)\""), "missing element \(target)")
+            #expect(html.contains("data-target=\"\(target)\""), "missing button for \(target)")
+        }
+    }
 }
