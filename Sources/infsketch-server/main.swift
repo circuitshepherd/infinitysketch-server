@@ -29,8 +29,14 @@ while let argument = arguments.next() {
         // For anything that starts a server without a person watching — `scripts/worktree-server`
         // above all, one per worktree and usually started by an agent.
         openBrowser = false
+    case "--verbose":
+        // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
+        // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
+        // regardless. `scripts/worktree-server` passes this — the dev server's log is what the
+        // e2e gates grep.
+        ServerLog.isVerbose = true
     default:
-        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open]")
+        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]")
         exit(argument == "--help" ? 0 : 1)
     }
 }
