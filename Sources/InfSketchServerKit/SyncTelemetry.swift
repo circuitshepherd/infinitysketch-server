@@ -54,12 +54,19 @@ public enum SyncTelemetry {
         public var outcome: String
         public var subscribers: Int
         public var broadcastBytes: Int?
+        /// WHICH writer this was — the device's own `deviceId` from hello, or `agent` for an MCP
+        /// write. Absent when the caller cannot say.
+        ///
+        /// It identifies without naming: hello carries an id and no device NAME, so two rows can be
+        /// told apart and neither can be called "the iPad". Naming them would be a wire change.
+        /// Absent-means-unknown, like every other optional here.
+        public var writer: String?
 
         public init(docId: String, opId: String, payloadKind: String, payloadBytes: Int,
                     documentBytes: Int, waitMs: Double? = nil, rebuildMs: Double? = nil,
                     casMs: Double? = nil, saveMs: Double? = nil, stripMs: Double? = nil,
                     totalMs: Double, outcome: String, subscribers: Int,
-                    broadcastBytes: Int? = nil) {
+                    broadcastBytes: Int? = nil, writer: String? = nil) {
             self.docId = docId
             self.opId = opId
             self.payloadKind = payloadKind
@@ -74,6 +81,7 @@ public enum SyncTelemetry {
             self.outcome = outcome
             self.subscribers = subscribers
             self.broadcastBytes = broadcastBytes
+            self.writer = writer
         }
     }
 
@@ -122,6 +130,7 @@ extension SyncTelemetry.WriteRow {
         fields.append("\"outcome\":\(quoted(outcome))")
         fields.append("\"subs\":\(subscribers)")
         if let broadcastBytes { fields.append("\"outB\":\(broadcastBytes)") }
+        if let writer { fields.append("\"by\":\(quoted(writer))") }
         return "{" + fields.joined(separator: ",") + "}"
     }
 

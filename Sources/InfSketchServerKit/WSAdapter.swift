@@ -244,7 +244,11 @@ actor Connection {
             // forwarding here.
             if let reject = await manager.submit(
                 docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none,
-                submitter: docSubscriptions[docId]?.token, receivedAt: receivedAt
+                submitter: docSubscriptions[docId]?.token, receivedAt: receivedAt,
+                // WHO pushed. `deviceId` from hello when there is one; the connection's own id
+                // otherwise, so two anonymous peers are still tellable apart in the file — which
+                // is the entire point of recording this.
+                writer: deviceId ?? connectionId.uuidString
             ).rejectMessage {
                 emit(reject)
             }

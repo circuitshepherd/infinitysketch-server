@@ -132,6 +132,51 @@ extension SyncTelemetryTests {
         }
     }
 
+    /// WHICH device pushed. Inferring it from timestamps is what the first real reading of these
+    /// rows had to do — two devices, five collisions, and "A pushed then B pushed 0.3 s later" was
+    /// a guess from the clock. A row that cannot name its writer cannot answer the question this
+    /// feature exists for.
+    @Test func aRowNamesTheWriterWhenTheCallerKnowsIt() async throws {
+        try await withCapture(enabled: true) { captured in
+            let store = try makeStore()
+            let doc = "telemetry-writer"
+            try store.save(docId: doc, bytes: Data("{}".utf8))
+            let session = try DocumentSession(docId: doc, store: store, bufferLimit: 16)
+
+            _ = await session.submit(opId: "OP-1",
+                                     payload: OpPayload(type: "fullDoc", data: Data("{\"a\":1}".utf8)),
+                                     writer: "iPad-A1B2")
+            let named = try #require(captured.rows(doc: doc).first)
+            #expect(named["by"] as? String == "iPad-A1B2")
+
+            _ = await session.submit(opId: "OP-2",
+                                     payload: OpPayload(type: "fullDoc", data: Data("{\"a\":2}".utf8)))
+            let anonymous = try #require(captured.rows(doc: doc).last)
+            #expect(anonymous["op"] as? String == "OP-2")
+            #expect(anonymous["by"] == nil, "unknown is ABSENT, not an empty string")
+        }
+    }
+
+    /// Two writers on one document must be TELLABLE APART in the file — that is the whole point.
+    @Test func twoWritersAreDistinguishableInTheRows() async throws {
+        try await withCapture(enabled: true) { captured in
+            let store = try makeStore()
+            let doc = "telemetry-two-writers"
+            try store.save(docId: doc, bytes: Data("{}".utf8))
+            let session = try DocumentSession(docId: doc, store: store, bufferLimit: 16)
+
+            _ = await session.submit(opId: "A", payload: OpPayload(type: "fullDoc", data: Data("{\"a\":1}".utf8)),
+                                     writer: "device-A")
+            _ = await session.submit(opId: "B", payload: OpPayload(type: "fullDoc", data: Data("{\"a\":2}".utf8)),
+                                     writer: "device-B")
+            _ = await session.submit(opId: "C", payload: OpPayload(type: "fullDoc", data: Data("{\"a\":3}".utf8)),
+                                     writer: "device-A")
+
+            let writers = captured.rows(doc: doc).map { $0["by"] as? String }
+            #expect(writers == ["device-A", "device-B", "device-A"])
+        }
+    }
+
     /// Off, the write path must not so much as format a row.
     @Test func aServerWithoutTheFlagEmitsNothing() async throws {
         let originalFlag = SyncTelemetry.isEnabled
