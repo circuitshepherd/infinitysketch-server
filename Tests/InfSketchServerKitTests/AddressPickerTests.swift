@@ -200,4 +200,21 @@ import Testing
         #expect(p.currentMCPURL == "http://10.0.0.5:18551/mcp")
         #expect(p.loopbackMCPURL == "http://127.0.0.1:18551/mcp")
     }
+
+    // MARK: - the Claude Code registration command
+
+    /// The command a Claude Code user copies is built beside the url it embeds — one source for
+    /// both surfaces, so the terminal and the connect panel cannot drift apart.
+    @Test func theClaudeCommandEmbedsTheUrlItIsShownBeside() {
+        let command = AddressPicker.claudeRegisterCommand(mcpURL: "http://127.0.0.1:9999/mcp")
+        #expect(command
+            == "claude mcp add --scope user --transport http infsketch http://127.0.0.1:9999/mcp")
+    }
+
+    /// The caveat is ONE string used verbatim by both surfaces; it must say this is an EXAMPLE,
+    /// because other agents register differently.
+    @Test func theNoteNamesClaudeCodeAsAnExample() {
+        #expect(AddressPicker.claudeExampleNote
+            == "Claude Code example (other AI agents have their own commands)")
+    }
 }
