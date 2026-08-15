@@ -116,7 +116,7 @@ actor Connection {
         } catch let error as TransferWireError {
             // Transfer state is positional — once violated the stream can't
             // be trusted. Connection-fatal per the chunked-transfer spec.
-            FileHandle.standardError.write(Data("transfer violation on connection: \(error)\n".utf8))
+            ServerLog.error("transfer violation on connection: \(error)")
             emit(.error(reason: "transferViolation"))
             await close()
             return

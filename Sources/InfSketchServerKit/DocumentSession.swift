@@ -318,19 +318,16 @@ actor DocumentSession {
     /// broadcast echo remains the subscriber-facing ack; the returned seq is
     /// the submitter-facing one — see `SubmitOutcome`), or `.rejected` with
     /// a .reject to deliver to the submitter only.
-    /// One line about a stripped push, FLUSHED.
-    ///
-    /// `print` is block-buffered whenever stdout is not a terminal, which is exactly how the dev
-    /// server runs — `scripts/worktree-server` redirects it to a log. Without the flush these lines
-    /// sit in the buffer, and their absence reads as "the code never ran": it cost an hour of
-    /// hunting a working feature, after the same trap had already been recorded for the QR printer
-    /// in this same repository.
+    /// One line about a stripped push, through the `--verbose` gate (the flush now lives in
+    /// `ServerLog`, along with the block-buffering trap it exists for). The `[blob-omission]`
+    /// prefix is a greppable contract — `scripts/e2e-blob-omission` and friends read these lines
+    /// from the dev server's log, which is why `scripts/worktree-server` always passes
+    /// `--verbose`.
     ///
     /// It reports at all because a correct rebuild and a whole-document push store byte-identical
     /// content, so nothing downstream can tell you whether any of this engaged.
     static func report(_ message: String) {
-        print("[blob-omission] \(message)")
-        fflush(nil)
+        ServerLog.verbose("[blob-omission] \(message)")
     }
 
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
@@ -435,7 +432,7 @@ actor DocumentSession {
         do {
             try store.save(docId: docId, bytes: newBytes)
         } catch {
-            FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
+            ServerLog.error("store.save failed for '\(docId)': \(error)")
             return .rejected(.reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq))
         }
         let previousBytes = bytes

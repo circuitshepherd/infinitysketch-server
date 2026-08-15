@@ -62,7 +62,9 @@ public enum ConnectPanel {
                 <p>Scan with the camera on your iPhone or iPad. The app asks before it joins.</p>
                 <p class="agent">AI agent (MCP)<br>
                   <code id="mcp-\(index)">\(HTML.escape(mcpURL))</code>
-                  <button class="copy" data-target="mcp-\(index)">copy</button></p>
+                  <button class="copy" data-target="mcp-\(index)">copy</button><br>
+                  <code class="cmd" id="cmd-\(index)">\(HTML.escape(AddressPicker.claudeRegisterCommand(mcpURL: mcpURL)))</code>
+                  <button class="copy" data-target="cmd-\(index)">copy</button></p>
               </div>
             </div>
 
@@ -76,11 +78,17 @@ public enum ConnectPanel {
 
         // OUTSIDE the per-address blocks, which the chips hide and show: loopback is the same url
         // whichever network address is selected, and an agent on this machine should be given it
-        // rather than a LAN address that changes with the network. Matches what the terminal prints.
+        // rather than a LAN address that changes with the network. Matches what the terminal
+        // prints — including the registration command, and the example note ONCE, here rather
+        // than per address.
+        let loopback = AddressPicker(candidates: candidates, port: port).loopbackMCPURL
         let local = """
         <p class="agent">AI agent (MCP) on THIS machine<br>
-          <code id="mcp-local">\(HTML.escape(AddressPicker(candidates: candidates, port: port).loopbackMCPURL))</code>
-          <button class="copy" data-target="mcp-local">copy</button></p>
+          <code id="mcp-local">\(HTML.escape(loopback))</code>
+          <button class="copy" data-target="mcp-local">copy</button><br>
+          <code class="cmd" id="cmd-local">\(HTML.escape(AddressPicker.claudeRegisterCommand(mcpURL: loopback)))</code>
+          <button class="copy" data-target="cmd-local">copy</button></p>
+        <p class="hint">\(HTML.escape(AddressPicker.claudeExampleNote))</p>
 
         """
 
@@ -95,11 +103,16 @@ public enum ConnectPanel {
 
     private static func noAddressBody(port: UInt16) -> String {
         // The terminal's own fallback wording, and the one url that still works here: an agent on
-        // THIS machine needs no network address.
-        """
+        // THIS machine needs no network address. The command too, matching the terminal — but no
+        // copy button: this body ships without the behaviour script, and a dead button is worse
+        // than none.
+        let loopback = AddressPicker.mcpURL(ip: "127.0.0.1", port: port)
+        return """
         <p>No reachable network address found — scan to join is unavailable on this machine.</p>
         <p class="agent">AI agent (MCP), on this machine<br>
-          <code>\(HTML.escape(AddressPicker.mcpURL(ip: "127.0.0.1", port: port)))</code></p>
+          <code>\(HTML.escape(loopback))</code><br>
+          <code class="cmd">\(HTML.escape(AddressPicker.claudeRegisterCommand(mcpURL: loopback)))</code></p>
+        <p class="hint">\(HTML.escape(AddressPicker.claudeExampleNote))</p>
         """
     }
 
@@ -136,6 +149,9 @@ public enum ConnectPanel {
           #connect .agent { font-size: 0.85rem; color: var(--fg-dim, gray); margin: 0.75rem 0 0; }
           #connect code { font-family: var(--font-mono, ui-monospace, Menlo, monospace);
                           font-size: 0.9rem; }
+          /* The registration command is ~90 characters; without this it widens the panel on a
+             narrow window instead of wrapping. */
+          #connect .cmd { overflow-wrap: anywhere; }
           #connect .hint { font-size: 0.85rem; color: var(--fg-dim, gray); margin: 1rem 0 0.35rem; }
           #connect .chips { display: flex; gap: 0.5rem; flex-wrap: wrap; }
           #connect .chip { font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem;
