@@ -137,6 +137,31 @@ public struct StrippedDocument: Sendable, Equatable {
     }
 }
 
+/// The escaped blob runs of ONE encoded document — the expensive half of blob omission, computed
+/// once and reusable.
+///
+/// **Why this is a type rather than a call.** Finding the runs means a whole-document
+/// `JSONSerialization` parse plus an escape pass over every blob's base64: measured at ~62 ms on a
+/// 6.7 MB document, and one server `submit` used to compute it TWICE over the identical bytes —
+/// once inside `restore(using: bytes)` and again inside the broadcast's `strip(…, against:
+/// previous)`, where `previous` IS those same bytes. A caller that holds a document (the server's
+/// `DocumentSession`, the broker's per-connection ledger) keeps one of these beside it instead.
+///
+/// **It is only ever valid for the bytes it was taken from**, which is why there is no
+/// `Data`-plus-index overload anywhere: the index is the whole parameter, so a caller cannot hand
+/// over a mismatched pair. A stale one — a cache whose owner forgot to invalidate — is missing the
+/// run and `restore` throws `missingBlob`, which every call site already treats as "ask for the
+/// whole document". A bug here costs a resend, never a wrong document.
+public struct BlobRunIndex: Sendable, Equatable {
+    public let runs: [UUID: [BlobField: Data]]
+
+    public init(of document: Data) {
+        runs = DocumentBlobs.escapedRuns(in: document)
+    }
+
+    public var isEmpty: Bool { runs.isEmpty }
+}
+
 /// Finding a pasted image's bytes inside an encoded document, without decoding the document.
 ///
 /// **A blob's base64 does not appear in the file, and that is the trap this type exists to step
@@ -163,7 +188,7 @@ public enum DocumentBlobs {
             var fields: [BlobField: Data] = [:]
             for field in [BlobField.data, BlobField.thumbnailData] {
                 guard let base64 = blob[field.rawValue] as? String, !base64.isEmpty else { continue }
-                fields[field] = Data(escaped(base64).utf8)
+                fields[field] = escapedBytes(base64)
             }
             if !fields.isEmpty { found[id] = fields }
         }
@@ -171,8 +196,56 @@ public enum DocumentBlobs {
     }
 
     /// The one substitution `JSONEncoder` applies to a base64 string.
+    ///
+    /// Kept as the DEFINITION of the rule — readable, and what the byte form below is checked
+    /// against — but no longer on the hot path.
     static func escaped(_ base64: String) -> String {
         base64.replacingOccurrences(of: "/", with: "\\/")
+    }
+
+    /// The same substitution, as the bytes it produces.
+    ///
+    /// Base64 is ASCII, so a byte pass over the UTF-8 is exactly equivalent to the String form
+    /// above — and much cheaper, because the base64 of a photograph is several megabytes and
+    /// `replacingOccurrences` re-forms all of it as an intermediate String whose only consumer is
+    /// `Data(_.utf8)`. `BlobEscapeTests` pins the two against each other.
+    ///
+    /// **Every part of the shape here was measured, and the obvious spellings LOST** (5.5 MB of
+    /// base64, release, `BlobOmissionCostMeasurement`):
+    ///
+    ///   - `replacingOccurrences` + `Data(_.utf8)`      37.0 ms   ← what this replaced
+    ///   - `String.withUTF8` + a byte loop              91.8 ms   ← the obvious rewrite, 2.5× WORSE
+    ///   - `Data(_.utf8)` + `for b in data`             38.4 ms   ← no better than the original
+    ///   - `Data(_.utf8)` + `withUnsafeBytes`            6.9 ms   ← this
+    ///
+    /// The bridge itself is free (`Data(base64.utf8)` is 0.3 ms). What costs is per-element
+    /// iteration: `String.withUTF8` converts a CoreFoundation-bridged String into native storage,
+    /// and `Data`'s own `Iterator` is slow enough to eat the entire saving. Only a raw-pointer pass
+    /// avoids both — so do not "simplify" this into a `for byte in` loop.
+    ///
+    /// Counted first and filled into one exactly-sized buffer: appending would grow and copy a
+    /// multi-megabyte array several times.
+    static func escapedBytes(_ base64: String) -> Data {
+        let raw = Data(base64.utf8)
+        return raw.withUnsafeBytes { source -> Data in
+            let slash = UInt8(ascii: "/")
+            var slashes = 0
+            for i in 0..<source.count where source[i] == slash { slashes += 1 }
+            guard slashes > 0 else { return raw }
+            return Data([UInt8](unsafeUninitializedCapacity: source.count + slashes) { out, count in
+                var i = 0
+                for j in 0..<source.count {
+                    let byte = source[j]
+                    if byte == slash {
+                        out[i] = UInt8(ascii: "\\")
+                        i += 1
+                    }
+                    out[i] = byte
+                    i += 1
+                }
+                count = i
+            })
+        }
     }
 }
 
@@ -183,11 +256,24 @@ extension StrippedDocument {
     /// Pure, and it computes no digests — both are supplied, because this module may not depend on
     /// a hash implementation. `minimumRunBytes` keeps a thumbnail of a few hundred bytes from
     /// earning two part boundaries and a UUID to save less than it costs.
+    ///
+    /// `base` is used for NOTHING but its blob runs; a caller that already holds a `BlobRunIndex`
+    /// for it should pass that instead and skip the parse.
     public static func strip(document: Data, against base: Data,
                              basedOn: Data, originalSHA256: Data,
                              minimumRunBytes: Int = 4096) -> StrippedDocument {
+        strip(document: document, againstRuns: BlobRunIndex(of: base),
+              basedOn: basedOn, originalSHA256: originalSHA256, minimumRunBytes: minimumRunBytes)
+    }
+
+    /// As above, against blob runs the caller has already taken. See `BlobRunIndex` for why that
+    /// is worth a second entry point, and for why a stale index costs a resend rather than a wrong
+    /// document.
+    public static func strip(document: Data, againstRuns baseRuns: BlobRunIndex,
+                             basedOn: Data, originalSHA256: Data,
+                             minimumRunBytes: Int = 4096) -> StrippedDocument {
         var candidates: [(run: Data, id: UUID, field: BlobField)] = []
-        for (id, fields) in DocumentBlobs.escapedRuns(in: base) {
+        for (id, fields) in baseRuns.runs {
             for (field, run) in fields where run.count >= minimumRunBytes {
                 candidates.append((run, id, field))
             }
@@ -224,8 +310,16 @@ extension StrippedDocument {
     /// The CALLER must then check the result against `originalSHA256`; this cannot, without a hash
     /// function it is not allowed to have. That check is what makes a bug here cost a resend
     /// instead of a wrong document.
+    ///
+    /// `holder` is used for NOTHING but its blob runs; a caller that already holds a
+    /// `BlobRunIndex` for it should pass that instead and skip the parse.
     public func restore(using holder: Data) throws -> Data {
-        let available = DocumentBlobs.escapedRuns(in: holder)
+        try restore(usingRuns: BlobRunIndex(of: holder))
+    }
+
+    /// As above, from blob runs the caller has already taken.
+    public func restore(usingRuns holder: BlobRunIndex) throws -> Data {
+        let available = holder.runs
         var out = Data()
         for part in parts {
             switch part {

@@ -340,9 +340,32 @@ actor DocumentSession {
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
         }
 
+        // This session's content as it stands, captured once. `submit` has no `await` in it, so
+        // nothing can move `bytes` underneath the body below — and naming it makes the two readers
+        // that must agree (the rebuild's splice source, and the broadcast's strip base) provably
+        // the same document.
+        let sessionBytes = bytes
+
         // Hashed once and shared with the compare-and-swap below, which asks the same question of
         // the same bytes — on a 5.8 MB document that is 10 ms not worth paying twice.
-        lazy var currentHash: Data = Data(SHA256.hash(data: bytes))
+        lazy var currentHash: Data = Data(SHA256.hash(data: sessionBytes))
+
+        // The blob runs of `sessionBytes`, taken AT MOST ONCE per submit — the single biggest cost
+        // in this whole path (~62 ms on a 6.7 MB document; see `BlobRunIndex`). Two callers below
+        // want the runs of exactly this document: the rebuild of a stripped push splices them IN,
+        // and the broadcast's strip cuts them OUT. It used to be computed separately for each, so
+        // an ordinary two-device push paid for the identical answer twice.
+        //
+        // Lazily, for the same reason `currentHash` is: a whole-document push with no
+        // stripped-capable audience needs neither, and forcing it there would ADD cost to the
+        // single-device case this change exists to speed up.
+        var takenRuns: BlobRunIndex?
+        func sessionBlobRuns() -> BlobRunIndex {
+            if let takenRuns { return takenRuns }
+            let index = BlobRunIndex(of: sessionBytes)
+            takenRuns = index
+            return index
+        }
 
         // A whole document, or one rebuilt from the blobs THIS SESSION already holds. The rebuild
         // happens here, before anything else in `submit` — so the compare-and-swap below, the
@@ -354,6 +377,9 @@ actor DocumentSession {
         // cost of a whole-document resend — these bytes become the stored document, the sync
         // lineage and the merge base, so a wrong rebuild must be unable to reach them.
         let newBytes: Data
+        /// The rebuild already hashes the result to verify it; `broadcastDocument` needs the same
+        /// digest and used to compute it a second time over the same megabytes.
+        var rebuiltHash: Data?
         switch payload.type {
         case "fullDoc":
             newBytes = inline
@@ -368,13 +394,15 @@ actor DocumentSession {
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
             }
-            guard let rebuilt = try? stripped.restore(using: bytes),
+            guard let rebuilt = try? stripped.restore(usingRuns: sessionBlobRuns()),
                   Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
             else {
                 Self.report("\(docId): the rebuild did not match the sender's hash")
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
             }
+            // Verified equal to the sender's digest a line above, so it IS the rebuild's hash.
+            rebuiltHash = stripped.originalSHA256
             // Reported because it is otherwise invisible: a correct rebuild and a whole-document
             // push produce exactly the same stored bytes, so nothing downstream can tell you
             // whether any of this engaged. `scripts/e2e-blob-omission` reads this line.
@@ -438,7 +466,6 @@ actor DocumentSession {
             FileHandle.standardError.write(Data("store.save failed for '\(docId)': \(error)\n".utf8))
             return .rejected(.reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq))
         }
-        let previousBytes = bytes
         bytes = newBytes
         seq += 1
         // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
@@ -448,7 +475,10 @@ actor DocumentSession {
         //
         // Stripping this direction too is milestone 3, and it needs the `blobOmission` hello
         // capability first — `infsketch-demo` subscribes to document events as well.
-        broadcastDocument(newBytes, previous: previousBytes, opId: opId, submitter: submitter)
+        broadcastDocument(newBytes, previous: sessionBytes, previousRuns: sessionBlobRuns,
+                          previousHash: { currentHash },
+                          newBytesHash: { rebuiltHash ?? Data(SHA256.hash(data: newBytes)) },
+                          opId: opId, submitter: submitter)
         return .accepted(seq: seq)
     }
 
@@ -471,8 +501,18 @@ actor DocumentSession {
     /// this session keeps only current `bytes` and `seq`, with no history replay, so a subscriber is
     /// either caught up or was given a full snapshot when it subscribed. One that cannot rebuild
     /// says so and re-subscribes, which is an existing path.
-    private func broadcastDocument(_ newBytes: Data, previous: Data, opId: String,
-                                   submitter: UUID?) {
+    /// `previousRuns`, `previousHash` and `newBytesHash` are closures rather than values because
+    /// this function returns without needing any of them whenever there is nobody to strip for —
+    /// the ordinary single-device case — and `submit` has already computed each of them for its own
+    /// reasons. Forcing them at the call site would put a whole-document parse and two
+    /// multi-megabyte digests back on the path this exists to keep clear; passing already-computed
+    /// values through is what stops them being computed a SECOND time (measured: 6 ms of duplicated
+    /// SHA-256 per write, plus the parse).
+    private func broadcastDocument(_ newBytes: Data, previous: Data,
+                                   previousRuns: () -> BlobRunIndex,
+                                   previousHash: () -> Data,
+                                   newBytesHash: () -> Data,
+                                   opId: String, submitter: UUID?) {
         func event(_ payload: OpPayload) -> ServerMessage {
             .event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload)
         }
@@ -487,9 +527,9 @@ actor DocumentSession {
             broadcast(whole)
             return
         }
-        let candidate = StrippedDocument.strip(document: newBytes, against: previous,
-                                               basedOn: Data(SHA256.hash(data: previous)),
-                                               originalSHA256: Data(SHA256.hash(data: newBytes)))
+        let candidate = StrippedDocument.strip(document: newBytes, againstRuns: previousRuns(),
+                                               basedOn: previousHash(),
+                                               originalSHA256: newBytesHash())
         let omittedSomething = candidate.parts.contains {
             if case .blob = $0 { return true } else { return false }
         }
