@@ -232,6 +232,10 @@ actor Connection {
             }
 
         case .op(let docId, let opId, let payload, let expectation):
+            // Stamped HERE, the moment the op is a whole message and before anything can queue: the
+            // gap between this and the session actor picking it up is the QUEUE, and it is only
+            // knowable from outside the actor. Free when telemetry is off — a clock read.
+            let receivedAt = ContinuousClock.now
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
@@ -240,7 +244,7 @@ actor Connection {
             // forwarding here.
             if let reject = await manager.submit(
                 docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none,
-                submitter: docSubscriptions[docId]?.token
+                submitter: docSubscriptions[docId]?.token, receivedAt: receivedAt
             ).rejectMessage {
                 emit(reject)
             }

@@ -256,15 +256,19 @@ public actor SessionManager {
     /// `submitter` is the writer's own subscription token, when it has one. It is used for a single
     /// decision — whether a stripped broadcast is worth building — because a writer ignores the echo
     /// of its own op.
+    /// `receivedAt` is when the write arrived at the server, from whoever took it off the socket.
+    /// It travels down untouched so the session can report how long it WAITED — see
+    /// `DocumentSession.submit`, which is already past the wait by the time it runs.
     public func submit(
         docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
-        submitter: UUID? = nil
+        submitter: UUID? = nil, receivedAt: ContinuousClock.Instant? = nil
     ) async -> SubmitOutcome {
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
         let outcome = await session.submit(opId: opId, payload: payload,
-                                           expectation: expectation, submitter: submitter)
+                                           expectation: expectation, submitter: submitter,
+                                           receivedAt: receivedAt)
         // The status event uses the seq the write itself returned — a
         // separate `await session.seq` read here could observe a LATER
         // racing write's seq (see SubmitOutcome).
