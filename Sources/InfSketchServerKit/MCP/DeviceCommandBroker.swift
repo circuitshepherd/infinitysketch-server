@@ -214,14 +214,15 @@ public actor DeviceCommandBroker {
     private func sendStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String, allowStripping: Bool
     ) async throws -> StrokeOpReply {
-        try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
-                                 sentBytes: docBytes) { broker, connection, requestId in
+        return try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
+                                        sentBytes: docBytes) { broker, connection, requestId in
             // The strip decision needs the CHOSEN connection, so it lives here — the closure
             // runs isolated on the broker, which is what lets it read and update the ledger
             // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
             // the device's stripped REPLY is spliced back from (M2), and the device replies
             // against the whole content it reconstructs, never against what rode the wire.
             let payload = broker.requestPayload(for: connection, requestId: requestId,
+                                                docId: docId, docBytes: docBytes,
                                                 allowStripping: allowStripping)
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
                                              payload: .inline(payload.bytes), spec: spec,
@@ -233,15 +234,19 @@ public actor DeviceCommandBroker {
     /// Nonisolated-unsafe free of suspension: called synchronously on the actor from inside
     /// `performRequest`'s send closure.
     private func requestPayload(for connection: Connection, requestId: UInt32,
+                                docId: String, docBytes: Data,
                                 allowStripping: Bool) -> (bytes: Data, kind: String?) {
-        // The document this request carries, as the pending entry already holds it — so the strip
-        // below, the reply's rebuild and the next request's base are all the SAME object and take
-        // its digest and blob runs once between them.
-        guard let sent = pending[requestId]?.sentDoc else { return (Data(), nil) }
         // Empty docBytes (provideContent) is never stripped and never ledgered — an empty entry
         // would poison the next strip. The capability gate mirrors the broadcast direction:
         // a peer that has not said `blobOmission` gets whole documents forever.
-        guard !sent.bytes.isEmpty else { return (sent.bytes, nil) }
+        guard !docBytes.isEmpty else { return (docBytes, nil) }
+        // The memo the pending entry already holds for exactly these bytes, so the strip here, the
+        // reply's rebuild and the NEXT request's base share one take of the digest and the blob
+        // runs. That entry is created in this same actor turn, immediately above the send that
+        // calls this, so the lookup always hits — and the fallback keeps a miss a matter of SPEED
+        // rather than of correctness, because the BYTES come from the caller either way. Deriving
+        // the document from the lookup instead would make a miss send the device an EMPTY one.
+        let sent = pending[requestId]?.sentDoc ?? SentDocument(docId: docId, bytes: docBytes)
         defer { rememberSentDoc(connectionId: connection.id, document: sent) }
         guard allowStripping,
               connection.capabilities.contains("blobOmission"),
