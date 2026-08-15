@@ -11,6 +11,7 @@ import WinSDK          // the console API and the C runtime (`fflush`, `atexit`,
 var port: UInt16 = 8080
 var docsPath = "./docs"
 var openBrowser = true
+var telemetryPath: String?
 
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
@@ -29,6 +30,14 @@ while let argument = arguments.next() {
         // For anything that starts a server without a person watching — `scripts/worktree-server`
         // above all, one per worktree and usually started by an agent.
         openBrowser = false
+    case "--telemetry":
+        // Sync performance telemetry, to a file — never the console, which the join block owns.
+        // A path is REQUIRED rather than defaulted: this writes megabytes over a long session, and
+        // where that landed must not be something the operator has to go looking for.
+        guard let value = arguments.next() else {
+            print("--telemetry requires a path"); exit(1)
+        }
+        telemetryPath = value
     case "--verbose":
         // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
         // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
@@ -36,7 +45,8 @@ while let argument = arguments.next() {
         // e2e gates grep.
         ServerLog.isVerbose = true
     default:
-        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]")
+        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
+              + " [--telemetry FILE]")
         exit(argument == "--help" ? 0 : 1)
     }
 }
@@ -47,6 +57,17 @@ do {
 } catch {
     print("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
     exit(1)
+}
+
+if let telemetryPath {
+    let url = URL(fileURLWithPath: telemetryPath)
+    if SyncTelemetry.enableFileLogging(at: url) {
+        print("sync telemetry -> \(url.path)")
+    } else {
+        // A path that cannot be opened is a misconfiguration the operator must see. It is not
+        // fatal: a server without telemetry is the ordinary server.
+        ServerLog.error("could not open the telemetry file at \(url.path); continuing without it")
+    }
 }
 
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory)

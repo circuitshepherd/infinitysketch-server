@@ -330,10 +330,51 @@ actor DocumentSession {
         ServerLog.verbose("[blob-omission] \(message)")
     }
 
+    /// `receivedAt` is when this write ARRIVED at the server, from the caller that took it off the
+    /// socket. It is the only way the QUEUE is knowable: everything inside this method is already
+    /// past the wait, so the instant has to come from outside. Absent means "not measured" — an
+    /// agent write that opens its own session has no socket receipt — and the row then omits the
+    /// wait rather than reporting a zero, which would read as "served instantly".
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
-                submitter: UUID? = nil) -> SubmitOutcome {
+                submitter: UUID? = nil,
+                receivedAt: ContinuousClock.Instant? = nil) -> SubmitOutcome {
+        // Telemetry, off by default and only assembled when the flag is on (`SyncTelemetry`). The
+        // clock reads stay unconditional: `ContinuousClock.now` is nanoseconds against a write that
+        // costs tens of milliseconds, and a branch per phase would be more code than it saves.
+        // MONOTONIC on purpose — a wall-clock adjustment mid-write must not produce a negative
+        // phase, which is why `Date` appears only in the row's own timestamp.
+        let began = ContinuousClock.now
+        var rebuildEnded: ContinuousClock.Instant?
+        var casEnded: ContinuousClock.Instant?
+        var saveEnded: ContinuousClock.Instant?
+        var broadcastBytes: Int?
+        func millis(_ from: ContinuousClock.Instant, _ to: ContinuousClock.Instant) -> Double {
+            Double((to - from).components.attoseconds) / 1e15
+                + Double((to - from).components.seconds) * 1000
+        }
+        /// One row, whatever way this method leaves. `payloadBytes`/`documentBytes` are passed
+        /// rather than read from `bytes`, because a rejected write never becomes the document.
+        func recordTelemetry(kind: String, payloadBytes: Int, documentBytes: Int, outcome: String) {
+            guard SyncTelemetry.isEnabled else { return }
+            let ended = ContinuousClock.now
+            let stripBegan = saveEnded ?? casEnded ?? rebuildEnded
+            SyncTelemetry.record(SyncTelemetry.WriteRow(
+                docId: docId, opId: opId, payloadKind: kind,
+                payloadBytes: payloadBytes, documentBytes: documentBytes,
+                waitMs: receivedAt.map { millis($0, began) },
+                rebuildMs: rebuildEnded.map { millis(began, $0) },
+                casMs: casEnded.map { millis(rebuildEnded ?? began, $0) },
+                saveMs: saveEnded.map { millis(casEnded ?? began, $0) },
+                stripMs: outcome == "accepted" ? stripBegan.map { millis($0, ended) } : nil,
+                totalMs: millis(began, ended),
+                outcome: outcome, subscribers: subscribers.count,
+                broadcastBytes: broadcastBytes))
+        }
+
         // The adapter reassembles transfers before ops reach the session.
         guard case .inline(let inline) = payload.bulk else {
+            recordTelemetry(kind: payload.type, payloadBytes: 0, documentBytes: bytes.count,
+                            outcome: "unresolvedTransfer")
             return .rejected(.reject(docId: docId, opId: opId, reason: "unresolvedTransfer", seq: seq))
         }
 
@@ -381,23 +422,25 @@ actor DocumentSession {
         case "fullDoc":
             newBytes = inline
         case "strippedDoc":
-            guard let stripped = try? StrippedDocument(encoded: inline) else {
-                Self.report("\(docId): payload did not decode")
+            func refuseRebuild(_ why: String) -> SubmitOutcome {
+                Self.report("\(docId): \(why)")
+                recordTelemetry(kind: payload.type, payloadBytes: inline.count,
+                                documentBytes: bytes.count, outcome: "cannotReconstruct")
                 return .rejected(.reject(docId: docId, opId: opId,
                                          reason: "cannotReconstruct", seq: seq))
             }
+            guard let stripped = try? StrippedDocument(encoded: inline) else {
+                return refuseRebuild("payload did not decode")
+            }
             guard stripped.basedOn == currentHash else {
-                Self.report("\(docId): stripped against a document this session does not hold")
-                return .rejected(.reject(docId: docId, opId: opId,
-                                         reason: "cannotReconstruct", seq: seq))
+                return refuseRebuild("stripped against a document this session does not hold")
             }
             guard let rebuilt = try? stripped.restore(usingRuns: sessionBlobRuns()),
                   Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
             else {
-                Self.report("\(docId): the rebuild did not match the sender's hash")
-                return .rejected(.reject(docId: docId, opId: opId,
-                                         reason: "cannotReconstruct", seq: seq))
+                return refuseRebuild("the rebuild did not match the sender's hash")
             }
+            rebuildEnded = ContinuousClock.now
             // Verified equal to the sender's digest a line above, so it IS the rebuild's hash.
             rebuiltHash = stripped.originalSHA256
             // Reported because it is otherwise invisible: a correct rebuild and a whole-document
@@ -406,7 +449,16 @@ actor DocumentSession {
             Self.report("\(docId): rebuilt \(rebuilt.count) B from a \(inline.count) B payload")
             newBytes = rebuilt
         default:
+            recordTelemetry(kind: payload.type, payloadBytes: inline.count,
+                            documentBytes: bytes.count, outcome: "unsupportedPayloadType")
             return .rejected(.reject(docId: docId, opId: opId, reason: "unsupportedPayloadType", seq: seq))
+        }
+        /// Every remaining exit describes the SAME write, so the two sizes are fixed here rather
+        /// than repeated at each one.
+        func refuse(_ reason: String) -> SubmitOutcome {
+            recordTelemetry(kind: payload.type, payloadBytes: inline.count,
+                            documentBytes: bytes.count, outcome: reason)
+            return .rejected(.reject(docId: docId, opId: opId, reason: reason, seq: seq))
         }
         // Compare-and-swap guard for callers that read-then-compute-then-write
         // (MCP tools spanning a device round-trip): the token MUST be the
@@ -440,29 +492,25 @@ actor DocumentSession {
         case .none:
             break
         case .matchBytes(let expected):
-            if bytes != expected {
-                return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
-            }
+            if bytes != expected { return refuse("docChangedDuringOp") }
         case .matchHash(let expected):
             // The same guarantee as `.matchBytes` — this session's current content is what the
             // writer read — with a digest standing in for the bytes, so the APP can afford to
             // carry it on every settle-push (spec 2026-07-27-app-push-write-expectation-design).
             // Same actor turn, same position above `store.save`, same rejection reason.
-            if currentHash != expected {
-                return .rejected(.reject(docId: docId, opId: opId, reason: "docChangedDuringOp", seq: seq))
-            }
+            if currentHash != expected { return refuse("docChangedDuringOp") }
         case .absent:
             let alreadyExists = (try? store.exists(docId: docId)) ?? false
-            if alreadyExists {
-                return .rejected(.reject(docId: docId, opId: opId, reason: "docExists", seq: seq))
-            }
+            if alreadyExists { return refuse("docExists") }
         }
+        casEnded = ContinuousClock.now
         do {
             try store.save(docId: docId, bytes: newBytes)
         } catch {
             ServerLog.error("store.save failed for '\(docId)': \(error)")
-            return .rejected(.reject(docId: docId, opId: opId, reason: "storeFailure", seq: seq))
+            return refuse("storeFailure")
         }
+        saveEnded = ContinuousClock.now
         bytes = newBytes
         seq += 1
         // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
@@ -472,10 +520,13 @@ actor DocumentSession {
         //
         // Stripping this direction too is milestone 3, and it needs the `blobOmission` hello
         // capability first — `infsketch-demo` subscribes to document events as well.
-        broadcastDocument(newBytes, previous: sessionBytes, previousRuns: sessionBlobRuns,
-                          previousHash: { currentHash },
-                          newBytesHash: { rebuiltHash ?? Data(SHA256.hash(data: newBytes)) },
-                          opId: opId, submitter: submitter)
+        broadcastBytes = broadcastDocument(
+            newBytes, previous: sessionBytes, previousRuns: sessionBlobRuns,
+            previousHash: { currentHash },
+            newBytesHash: { rebuiltHash ?? Data(SHA256.hash(data: newBytes)) },
+            opId: opId, submitter: submitter)
+        recordTelemetry(kind: payload.type, payloadBytes: inline.count,
+                        documentBytes: newBytes.count, outcome: "accepted")
         return .accepted(seq: seq)
     }
 
@@ -505,11 +556,15 @@ actor DocumentSession {
     /// multi-megabyte digests back on the path this exists to keep clear; passing already-computed
     /// values through is what stops them being computed a SECOND time (measured: 6 ms of duplicated
     /// SHA-256 per write, plus the parse).
+    /// Returns the byte count each stripped-capable subscriber was actually SENT — the whole
+    /// document when nothing was omitted. Reported so telemetry can say what the broadcast cost
+    /// without re-deriving it, and nil when nobody was worth stripping for.
+    @discardableResult
     private func broadcastDocument(_ newBytes: Data, previous: Data,
                                    previousRuns: () -> BlobRunIndex,
                                    previousHash: () -> Data,
                                    newBytesHash: () -> Data,
-                                   opId: String, submitter: UUID?) {
+                                   opId: String, submitter: UUID?) -> Int {
         func event(_ payload: OpPayload) -> ServerMessage {
             .event(docId: docId, seq: seq, kind: "op", opId: opId, payload: payload)
         }
@@ -522,7 +577,7 @@ actor DocumentSession {
         let audience = strippedCapableSubscribers.subtracting(submitter.map { [$0] } ?? [])
         guard !audience.isEmpty, !previous.isEmpty else {
             broadcast(whole)
-            return
+            return newBytes.count
         }
         let candidate = StrippedDocument.strip(document: newBytes, againstRuns: previousRuns(),
                                                basedOn: previousHash(),
@@ -532,7 +587,7 @@ actor DocumentSession {
         }
         guard omittedSomething else {
             broadcast(whole)
-            return
+            return newBytes.count
         }
         // Encoded ONCE — it is a multi-megabyte copy, and the second call existed only to count
         // its bytes for the line below.
@@ -543,6 +598,7 @@ actor DocumentSession {
         for (token, continuation) in subscribers {
             deliver(audience.contains(token) ? stripped : whole, to: token, continuation)
         }
+        return encoded.count
     }
 
     private func broadcast(_ message: ServerMessage) {
