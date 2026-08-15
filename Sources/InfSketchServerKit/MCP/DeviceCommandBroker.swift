@@ -68,10 +68,47 @@ public actor DeviceCommandBroker {
         let connectionId: UUID
         let continuation: CheckedContinuation<StrokeOpReply, Error>
         var timeoutTask: Task<Void, Never>?
-        /// The document bytes this request CARRIED. A device may answer with the blobs left out —
-        /// it was just sent them, so it knows we have them — and this is what they are spliced back
-        /// from. Empty for requests that send no document.
-        let sentBytes: Data
+        /// The document this request CARRIED. A device may answer with the blobs left out — it was
+        /// just sent them, so it knows we have them — and this is what they are spliced back from.
+        /// Empty bytes for requests that send no document.
+        let sentDoc: SentDocument
+    }
+
+    /// A document a connection was sent, beside the two derivations of it that BOTH directions of
+    /// an agent op need — its digest, and its blob runs.
+    ///
+    /// A reference type on purpose, so one take is shared by everything that asks: the request that
+    /// strips against these bytes, the reply that splices back into them, and the NEXT request,
+    /// whose base is this same document (agent ops come in bursts against one document, which is
+    /// the whole premise of the ledger). Taking the runs means a whole-document parse — ~62 ms on a
+    /// 6.7 MB document, see `BlobRunIndex` — and it was being taken afresh at each of those points.
+    ///
+    /// Both are lazy: a device that never strips and a document with no images must not pay for
+    /// derivations nothing reads.
+    private final class SentDocument {
+        let docId: String
+        let bytes: Data
+        private var takenHash: Data?
+        private var takenRuns: BlobRunIndex?
+
+        init(docId: String, bytes: Data) {
+            self.docId = docId
+            self.bytes = bytes
+        }
+
+        var hash: Data {
+            if let takenHash { return takenHash }
+            let value = Data(SHA256.hash(data: bytes))
+            takenHash = value
+            return value
+        }
+
+        var runs: BlobRunIndex {
+            if let takenRuns { return takenRuns }
+            let value = BlobRunIndex(of: bytes)
+            takenRuns = value
+            return value
+        }
     }
 
     private let createTimeout: Duration
@@ -87,7 +124,7 @@ public actor DeviceCommandBroker {
     /// delta. Updated at SEND time, optimistically: drift from a failed round trip is caught by
     /// the digest checks and costs one whole resend (`cannotReconstructRequest` below). Ordered
     /// oldest → newest per connection for LRU eviction under `ledgerBudgetPerConnection`.
-    private var lastSentDocs: [UUID: [(docId: String, bytes: Data)]] = [:]
+    private var lastSentDocs: [UUID: [SentDocument]] = [:]
     private let ledgerBudgetPerConnection = 32 * 1024 * 1024   // the retainedBases budget
     private var pending: [UInt32: PendingRequest] = [:]
     /// docIds with a request currently in flight — the "requestInFlight"
@@ -177,15 +214,15 @@ public actor DeviceCommandBroker {
     private func sendStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String, allowStripping: Bool
     ) async throws -> StrokeOpReply {
-        try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
-                                 sentBytes: docBytes) { broker, connection, requestId in
+        return try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
+                                        sentBytes: docBytes) { broker, connection, requestId in
             // The strip decision needs the CHOSEN connection, so it lives here — the closure
             // runs isolated on the broker, which is what lets it read and update the ledger
             // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
             // the device's stripped REPLY is spliced back from (M2), and the device replies
             // against the whole content it reconstructs, never against what rode the wire.
-            let payload = broker.requestPayload(for: connection, docId: docId,
-                                                docBytes: docBytes,
+            let payload = broker.requestPayload(for: connection, requestId: requestId,
+                                                docId: docId, docBytes: docBytes,
                                                 allowStripping: allowStripping)
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
                                              payload: .inline(payload.bytes), spec: spec,
@@ -196,34 +233,42 @@ public actor DeviceCommandBroker {
     /// Decide what a request's payload IS for this connection, and keep the ledger current.
     /// Nonisolated-unsafe free of suspension: called synchronously on the actor from inside
     /// `performRequest`'s send closure.
-    private func requestPayload(for connection: Connection, docId: String, docBytes: Data,
+    private func requestPayload(for connection: Connection, requestId: UInt32,
+                                docId: String, docBytes: Data,
                                 allowStripping: Bool) -> (bytes: Data, kind: String?) {
         // Empty docBytes (provideContent) is never stripped and never ledgered — an empty entry
         // would poison the next strip. The capability gate mirrors the broadcast direction:
         // a peer that has not said `blobOmission` gets whole documents forever.
         guard !docBytes.isEmpty else { return (docBytes, nil) }
-        defer { rememberSentDoc(connectionId: connection.id, docId: docId, bytes: docBytes) }
+        // The memo the pending entry already holds for exactly these bytes, so the strip here, the
+        // reply's rebuild and the NEXT request's base share one take of the digest and the blob
+        // runs. That entry is created in this same actor turn, immediately above the send that
+        // calls this, so the lookup always hits — and the fallback keeps a miss a matter of SPEED
+        // rather than of correctness, because the BYTES come from the caller either way. Deriving
+        // the document from the lookup instead would make a miss send the device an EMPTY one.
+        let sent = pending[requestId]?.sentDoc ?? SentDocument(docId: docId, bytes: docBytes)
+        defer { rememberSentDoc(connectionId: connection.id, document: sent) }
         guard allowStripping,
               connection.capabilities.contains("blobOmission"),
-              let base = lastSentDocs[connection.id]?.first(where: { $0.docId == docId })?.bytes
-        else { return (docBytes, nil) }
+              let base = lastSentDocs[connection.id]?.first(where: { $0.docId == sent.docId })
+        else { return (sent.bytes, nil) }
         let stripped = StrippedDocument.strip(
-            document: docBytes, against: base,
-            basedOn: Data(SHA256.hash(data: base)),
-            originalSHA256: Data(SHA256.hash(data: docBytes)))
+            document: sent.bytes, againstRuns: base.runs,
+            basedOn: base.hash,
+            originalSHA256: sent.hash)
         // Only pay for the alternative payload when something was actually left out — a document
         // with no shared blobs strips to one literal part, the same bytes in a wrapper (M1's rule).
         let omittedSomething = stripped.parts.contains {
             if case .blob = $0 { return true } else { return false }
         }
-        guard omittedSomething else { return (docBytes, nil) }
+        guard omittedSomething else { return (sent.bytes, nil) }
         return (stripped.encoded(), BlobOmissionWire.strippedDocKind)
     }
 
-    private func rememberSentDoc(connectionId: UUID, docId: String, bytes: Data) {
+    private func rememberSentDoc(connectionId: UUID, document: SentDocument) {
         var entries = lastSentDocs[connectionId] ?? []
-        entries.removeAll { $0.docId == docId }
-        entries.append((docId, bytes))
+        entries.removeAll { $0.docId == document.docId }
+        entries.append(document)
         var total = entries.reduce(0) { $0 + $1.bytes.count }
         while total > ledgerBudgetPerConnection, !entries.isEmpty {
             total -= entries.removeFirst().bytes.count
@@ -281,8 +326,8 @@ public actor DeviceCommandBroker {
         var resolved = bytes ?? Data()
         if payloadKind == "strippedDoc" {
             guard let stripped = try? StrippedDocument(encoded: resolved),
-                  stripped.basedOn == Data(SHA256.hash(data: entry.sentBytes)),
-                  let rebuilt = try? stripped.restore(using: entry.sentBytes),
+                  stripped.basedOn == entry.sentDoc.hash,
+                  let rebuilt = try? stripped.restore(usingRuns: entry.sentDoc.runs),
                   Data(SHA256.hash(data: rebuilt)) == stripped.originalSHA256
             else {
                 entry.continuation.resume(
@@ -333,7 +378,7 @@ public actor DeviceCommandBroker {
             // to resume, never race it into existence.
             pending[requestId] = PendingRequest(
                 docId: docId, connectionId: connection.id, continuation: continuation,
-                sentBytes: sentBytes)
+                sentDoc: SentDocument(docId: docId, bytes: sentBytes))
 
             send(self, connection, requestId)
 
