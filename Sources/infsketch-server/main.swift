@@ -148,6 +148,8 @@ func drawJoinCode() {
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
         text += "  \(picker.loopbackMCPURL)\n"
+        text += "  \(AddressPicker.claudeExampleNote):\n"
+        text += "    \(AddressPicker.claudeRegisterCommand(mcpURL: picker.loopbackMCPURL))\n"
         if keyReadingIsPossible() { text += "    \(picker.keyHint)\n" }
         if let openMessage { text += "\n\(openMessage)\n" }
         print(text, terminator: "")
@@ -166,6 +168,10 @@ func drawJoinCode() {
     if let mcp = picker.currentMCPURL {
         text += "  \(mcp)   (from another machine)\n"
     }
+    // Loopback in the example, deliberately: an agent on this machine is the common case, and a
+    // remote operator substitutes the LAN url printed directly above.
+    text += "  \(AddressPicker.claudeExampleNote):\n"
+    text += "    \(AddressPicker.claudeRegisterCommand(mcpURL: picker.loopbackMCPURL))\n"
     if picker.candidates.count > 1 {
         // Blank line first: the list switches which network address BOTH urls above use, and run
         // straight on from the labelled agent urls it reads as a list of agent addresses.
