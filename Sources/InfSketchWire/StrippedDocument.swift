@@ -210,41 +210,49 @@ public enum DocumentBlobs {
     /// `replacingOccurrences` re-forms all of it as an intermediate String whose only consumer is
     /// `Data(_.utf8)`. `BlobEscapeTests` pins the two against each other.
     ///
-    /// **Every part of the shape here was measured, and the obvious spellings LOST** (5.5 MB of
-    /// base64, release, `BlobOmissionCostMeasurement`):
+    /// **Every part of the shape here was measured IN BOTH BUILD CONFIGURATIONS, and the obvious
+    /// spellings lost** (5.5 MB of base64, `BlobOmissionCostMeasurement`, debug / release):
     ///
-    ///   - `replacingOccurrences` + `Data(_.utf8)`      37.0 ms   ← what this replaced
-    ///   - `String.withUTF8` + a byte loop              91.8 ms   ← the obvious rewrite, 2.5× WORSE
-    ///   - `Data(_.utf8)` + `for b in data`             38.4 ms   ← no better than the original
-    ///   - `Data(_.utf8)` + `withUnsafeBytes`            6.9 ms   ← this
+    ///   - `replacingOccurrences` + `Data(_.utf8)`     36.8 / 37.1 ms  ← what this replaced
+    ///   - `String.withUTF8` + a byte loop                –  / 91.8 ms  ← 2.5× worse than the original
+    ///   - `Data(_.utf8)` + `for b in data`               –  / 38.4 ms  ← no better than the original
+    ///   - raw pointer, per-byte loop                1226.5 /  7.2 ms  ← 5× better, 33× WORSE
+    ///   - `memchr` + bulk appends                     14.1 /  5.6 ms  ← this
     ///
-    /// The bridge itself is free (`Data(base64.utf8)` is 0.3 ms). What costs is per-element
-    /// iteration: `String.withUTF8` converts a CoreFoundation-bridged String into native storage,
-    /// and `Data`'s own `Iterator` is slow enough to eat the entire saving. Only a raw-pointer pass
-    /// avoids both — so do not "simplify" this into a `for byte in` loop.
+    /// **Measuring only release would have shipped the fourth one**, and it is the worst of the
+    /// five where it matters: `scripts/worktree-server` builds the dev server with a plain
+    /// `swift build`, and the app links `InfSketchWire` as a LOCAL PACKAGE, so a Debug app build
+    /// compiles this file Debug too. Per-byte Swift over multiple megabytes is bounds-checked and
+    /// uninlined there; the win in release came entirely from optimizations that build does not
+    /// run. Keeping the per-byte work inside `memchr` and the copying inside `Data.append` is what
+    /// makes this fast in both — so do not "simplify" it into a `for byte in` loop.
     ///
-    /// Counted first and filled into one exactly-sized buffer: appending would grow and copy a
-    /// multi-megabyte array several times.
+    /// The bridge itself is free: `Data(base64.utf8)` measured 0.3 ms. What costs is per-element
+    /// iteration — `String.withUTF8` converts a CoreFoundation-bridged String into native storage,
+    /// and `Data`'s own `Iterator` eats the entire saving.
     static func escapedBytes(_ base64: String) -> Data {
         let raw = Data(base64.utf8)
         return raw.withUnsafeBytes { source -> Data in
-            let slash = UInt8(ascii: "/")
-            var slashes = 0
-            for i in 0..<source.count where source[i] == slash { slashes += 1 }
-            guard slashes > 0 else { return raw }
-            return Data([UInt8](unsafeUninitializedCapacity: source.count + slashes) { out, count in
-                var i = 0
-                for j in 0..<source.count {
-                    let byte = source[j]
-                    if byte == slash {
-                        out[i] = UInt8(ascii: "\\")
-                        i += 1
-                    }
-                    out[i] = byte
-                    i += 1
+            guard let base = source.baseAddress else { return raw }
+            var out = Data()
+            // Base64 draws from a 64-character alphabet, so about one byte in 64 is a `/`; the
+            // reserve is generous enough that the result never has to grow.
+            out.reserveCapacity(source.count + source.count / 32)
+            var start = 0
+            while start < source.count {
+                let remaining = source.count - start
+                guard let hit = memchr(base + start, 0x2F /* "/" */, remaining) else {
+                    out.append(UnsafeRawBufferPointer(start: base + start, count: remaining)
+                        .bindMemory(to: UInt8.self))
+                    break
                 }
-                count = i
-            })
+                let index = UnsafeRawPointer(hit) - base
+                out.append(UnsafeRawBufferPointer(start: base + start, count: index - start)
+                    .bindMemory(to: UInt8.self))
+                out.append(contentsOf: [0x5C /* "\" */, 0x2F])
+                start = index + 1
+            }
+            return out
         }
     }
 }

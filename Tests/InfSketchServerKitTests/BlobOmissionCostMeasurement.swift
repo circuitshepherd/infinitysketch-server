@@ -16,14 +16,19 @@ import Crypto
 /// one `BlobRunIndex` serving both the rebuild and the broadcast strip, and the two digests handed
 /// to `broadcastDocument` instead of being taken again. Measured on this Mac, release:
 ///
-///   before  172 ms   two whole-document parses, four SHA-256s, `replacingOccurrences` escapes
-///   after    71 ms   one parse, two SHA-256s, raw-pointer escapes
+///                    debug   release
+///   before           198 ms   172 ms   two whole-document parses, four SHA-256s, String escapes
+///   after             78 ms    70 ms   one parse, two SHA-256s, memchr escapes
 ///
 /// Prints rather than asserts: these are timings of Foundation's JSON and CryptoKit on whatever
-/// machine runs the suite, and a threshold on that is a flake generator. Run it under
-/// `swift test -c release` too — `scripts/worktree-server` builds the dev server with a plain
-/// `swift build`, and the gap between the two turned out NOT to be the story (198 vs 172 before
-/// this work), because the cost is inside Foundation either way.
+/// machine runs the suite, and a threshold on that is a flake generator.
+///
+/// **RUN IT BOTH WAYS.** `scripts/worktree-server` builds the dev server with a plain
+/// `swift build`, and the app links `InfSketchWire` as a local package, so Debug is what actually
+/// runs while anyone is developing. The gap was not the story before this work — 198 vs 172 ms,
+/// because the cost sat inside Foundation either way — but it decided the escape: the candidate
+/// that measured 5× faster in release measured 33× SLOWER in debug (see the comparison at the end,
+/// and `DocumentBlobs.escapedBytes`).
 struct BlobOmissionCostMeasurement {
 
     /// A document shaped like the real thing: one big base64 image blob plus a smaller
@@ -49,6 +54,27 @@ struct BlobOmissionCostMeasurement {
             ]],
         ]
         return try! JSONSerialization.data(withJSONObject: doc, options: [.sortedKeys])
+    }
+
+    /// Candidate B, kept so the comparison below still has the shape that LOST to run against —
+    /// the one a future "simplification" would most naturally reach for.
+    static func escapePerByte(_ base64: String) -> Data {
+        let raw = Data(base64.utf8)
+        return raw.withUnsafeBytes { source -> Data in
+            var slashes = 0
+            for i in 0..<source.count where source[i] == 0x2F { slashes += 1 }
+            guard slashes > 0 else { return raw }
+            return Data([UInt8](unsafeUninitializedCapacity: source.count + slashes) { out, count in
+                var i = 0
+                for j in 0..<source.count {
+                    let byte = source[j]
+                    if byte == 0x2F { out[i] = 0x5C; i += 1 }
+                    out[i] = byte
+                    i += 1
+                }
+                count = i
+            })
+        }
     }
 
     private func time(_ label: String, _ body: () -> Void) -> Double {
@@ -115,6 +141,20 @@ struct BlobOmissionCostMeasurement {
         _ = time("escapedBytes (was replacingOccurrences)") { _ = DocumentBlobs.escapedBytes(base64) }
         let needle = DocumentBlobs.escapedBytes(base64)
         _ = time("Data.range(of: the blob run)") { _ = current.range(of: needle) }
+
+        // Candidates for the escape, timed in WHATEVER configuration this suite is running in.
+        // Run it both ways: `scripts/worktree-server` builds the dev server with a plain
+        // `swift build`, and the app links InfSketchWire as a local package, so a Debug app build
+        // compiles this code Debug too. A shape that wins in release and collapses in debug is
+        // worse than one that is merely fine in both.
+        print("\n  escape candidates (this build configuration):")
+        _ = time("A: replacingOccurrences + Data(_.utf8)") {
+            _ = Data(base64.replacingOccurrences(of: "/", with: "\\/").utf8)
+        }
+        _ = time("B: raw pointer, per-byte loop") { _ = Self.escapePerByte(base64) }
+        _ = time("C: memchr + bulk appends (shipped)") { _ = DocumentBlobs.escapedBytes(base64) }
+        #expect(Self.escapePerByte(base64) == DocumentBlobs.escapedBytes(base64),
+                "the candidates must produce the same bytes, or this compares two different jobs")
         print("=== end ===\n")
     }
 }
