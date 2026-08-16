@@ -104,3 +104,7 @@ SDK](https://github.com/modelcontextprotocol/swift-sdk). Tools flow through the 
 path as device pushes — same CAS guards, same broadcast — so agent edits reach open documents live.
 The `infsketch://guide` resource (listed first) carries the cross-tool knowledge; every tool's
 `description` documents its arguments and reply keys, and unknown arguments are rejected by name.
+
+[`mcp-tools.md`](mcp-tools.md) is the generated per-tool reference — the same definitions
+`tools/list` serves, rendered for a human. It is written by `ToolReferenceTests`, which also fails
+the suite when the checked-in page and the tool definitions disagree.
