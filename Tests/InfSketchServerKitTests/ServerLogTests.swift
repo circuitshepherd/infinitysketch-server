@@ -83,30 +83,46 @@ import Testing
         logging.logDebug("http-test-debug-dropped")
         logging.logInfo("http-test-info-dropped")
         logging.logWarning("http-test-warning-dropped")
+        // logError too: in FlyingFox that level is per-connection and per-request — a disconnect,
+        // a 404 — so it is a diagnostic despite the name. Routing it to stderr put a line on the
+        // console for every 404 and cost enough synchronous writes to fail timing tests on CI.
+        logging.logError("http-test-error-dropped")
         #expect(!captured.lines.contains { $0.contains("http-test-debug-dropped") })
         #expect(!captured.lines.contains { $0.contains("http-test-info-dropped") })
         #expect(!captured.lines.contains { $0.contains("http-test-warning-dropped") })
+        #expect(!captured.lines.contains { $0.contains("http-test-error-dropped") })
 
         ServerLog.isVerbose = true
         logging.logDebug("http-test-debug-kept")
         #expect(captured.lines.contains { $0.contains("http-test-debug-kept") })
     }
 
-    /// A failed bind arrives as `logCritical`, and it is the message a first-time user most needs.
-    /// Genuine failure is never gated — it goes to stderr whatever `--verbose` says.
-    @Test func theHttpLayersFailuresAreNeverSilenced() {
+    /// NOTHING from the HTTP layer reaches stderr, `logCritical` included — it fires on every
+    /// ordinary shutdown, and the startup failure a user must see comes from `main.swift`'s own
+    /// `StartupFailure.describe`, not from this logger.
+    @Test func theHttpLayerNeverWritesToStderr() {
         let originalFlag = ServerLog.isVerbose
         let originalSink = ServerLog.errorSink
-        defer { ServerLog.isVerbose = originalFlag; ServerLog.errorSink = originalSink }
+        let originalVerbose = ServerLog.verboseSink
+        defer {
+            ServerLog.isVerbose = originalFlag
+            ServerLog.errorSink = originalSink
+            ServerLog.verboseSink = originalVerbose
+        }
 
         let captured = Capture()
         ServerLog.errorSink = { captured.append($0) }
+        // Swallowed rather than printed: with the gate up these lines are correctly diagnostics,
+        // and letting them reach the real sink puts `[http]` noise in the suite's own output.
+        ServerLog.verboseSink = { _ in }
         let logging = ServerLogHTTPLogging()
 
-        ServerLog.isVerbose = false
-        logging.logError("http-test-error")
-        logging.logCritical("http-test-critical")
-        #expect(captured.lines.contains { $0.contains("http-test-error") })
-        #expect(captured.lines.contains { $0.contains("http-test-critical") })
+        // Both with the gate down and with it up: stderr is for OUR failures, not the library's.
+        for verbose in [false, true] {
+            ServerLog.isVerbose = verbose
+            logging.logError("http-test-error-not-on-stderr-\(verbose)")
+            logging.logCritical("http-test-critical-not-on-stderr-\(verbose)")
+            #expect(!captured.lines.contains { $0.contains("not-on-stderr-\(verbose)") })
+        }
     }
 }
