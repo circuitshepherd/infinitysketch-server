@@ -129,6 +129,15 @@ keys. Reads (listing, rendering, geometry) work with no device connected; author
 text styling, and rendering need at least one device connected to the server, because only
 PencilKit can produce or rasterize stroke data.
 
+**[`docs/mcp-tools.md`](docs/mcp-tools.md) is the full tool reference** — every argument, its
+type and its description, grouped by what they act on. It is generated from the same definitions
+`tools/list` serves, so it cannot drift from the server; `swift test` fails if it does. Regenerate
+after changing a tool:
+
+```sh
+INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests
+```
+
 ## Development
 
 ```sh
