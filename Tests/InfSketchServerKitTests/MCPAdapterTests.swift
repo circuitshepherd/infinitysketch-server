@@ -793,7 +793,9 @@ private actor FakeStrokeOpDevice {
     // stroke) added one, renaming this from `listToolsContainsAllFiftyOneTools`. list_tags (what
     // tags a document has, so an agent can pick up earlier work) added one, renaming this from
     // `listToolsContainsAllFiftyTwoTools`.
-    @Test func listToolsContainsAllFiftyThreeTools() async throws {
+    /// restore_stroke_widths (the agent door onto the app's "Restore original stroke
+    /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
+    @Test func listToolsContainsAllFiftyFourTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -815,6 +817,7 @@ private actor FakeStrokeOpDevice {
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
+            "restore_stroke_widths",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1763,7 +1766,7 @@ private actor FakeStrokeOpDevice {
         let sentence = "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
         for name in [
             "add_text", "edit_text", "remove_text", "replace_doc", "draw_strokes", "delete_strokes",
-            "transform_strokes", "restyle_strokes", "reshape_strokes",
+            "transform_strokes", "restyle_strokes", "reshape_strokes", "restore_stroke_widths",
         ] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
@@ -3067,6 +3070,90 @@ private actor FakeStrokeOpDevice {
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == transformedBytes)
+
+        await server.stop()
+    }
+
+    @Test func restoreStrokeWidthsSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let restoredBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["unscaled"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: restoredBytes,
+            meta: Data(#"{"restoredIds":["seed123:1.0"],"unchangedIds":[]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("seed123:1.0")]),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "restored 1 of 1 stroke(s) at seq 1")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "restoreStrokeWidths")
+        #expect(specJSON["ids"] as? [String] == ["seed123:1.0"])
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == restoredBytes)
+
+        await server.stop()
+    }
+
+    /// A stroke carrying no scale is left alone — and when NONE of them carried one, the
+    /// device's bytes are discarded rather than written. A pointless write bumps `seq` for
+    /// every subscriber and spends the agent's one `undo_last_edit` on an edit that changed
+    /// nothing. (The app's own answer to this state is a disabled menu item.)
+    @Test func restoreStrokeWidthsWithNothingToRestoreWritesNothing() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"restoredIds":[],"unchangedIds":["a","b"]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("a"), .string("b")]),
+        ])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("no change"), "got \(text)")
+        #expect(!text.contains("seq"), "nothing was written, so there is no seq to quote: \(text)")
+
+        // The document is byte-for-byte what it was: the device's rebuilt bytes were dropped.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+
+        await server.stop()
+    }
+
+    @Test func restoreStrokeWidthsReportsThePartlyRestoredCase() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["mixed"]}"#.utf8),
+            meta: Data(#"{"restoredIds":["a"],"unchangedIds":["b","c"]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("a"), .string("b"), .string("c")]),
+        ])
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("restored 1 of 3 stroke(s) at seq 1"))
+        #expect(text.contains("2 had no scale to factor out"), "got \(text)")
 
         await server.stop()
     }

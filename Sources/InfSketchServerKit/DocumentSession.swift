@@ -337,7 +337,8 @@ actor DocumentSession {
     /// wait rather than reporting a zero, which would read as "served instantly".
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
                 submitter: UUID? = nil,
-                receivedAt: ContinuousClock.Instant? = nil) -> SubmitOutcome {
+                receivedAt: ContinuousClock.Instant? = nil,
+                writer: String? = nil) -> SubmitOutcome {
         // Telemetry, off by default and only assembled when the flag is on (`SyncTelemetry`). The
         // clock reads stay unconditional: `ContinuousClock.now` is nanoseconds against a write that
         // costs tens of milliseconds, and a branch per phase would be more code than it saves.
@@ -368,7 +369,7 @@ actor DocumentSession {
                 stripMs: outcome == "accepted" ? stripBegan.map { millis($0, ended) } : nil,
                 totalMs: millis(began, ended),
                 outcome: outcome, subscribers: subscribers.count,
-                broadcastBytes: broadcastBytes))
+                broadcastBytes: broadcastBytes, writer: writer))
         }
 
         // The adapter reassembles transfers before ops reach the session.

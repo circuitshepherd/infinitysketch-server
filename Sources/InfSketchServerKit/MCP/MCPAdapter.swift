@@ -2042,6 +2042,44 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "restore_stroke_widths",
+            description: """
+                Takes the SCALE back off the ink of strokes that were scaled, leaving \
+                them exactly where they are on the canvas. Scaling a stroke (here or by \
+                the user dragging a selection) scales its INK THICKNESS along with its \
+                geometry, because the scale lives on the stroke's transform and \
+                PencilKit scales stamp size with it — so a shape scaled up by 3 is drawn \
+                with lines 3x fatter. This restores the drawn thickness while every \
+                point stays put; it is the same operation as the app's "Restore original \
+                stroke widths" menu item. Nothing else changes: ids, points, z-order, \
+                colour and ink all survive, and the stroke's width-edit history is left \
+                alone. AFTERWARDS the strokes' localToCanvasTransform (get_strokes) has \
+                changed — its scale is now 1, or it is identity for a stroke that was \
+                scaled unevenly — so re-read rather than reusing a cached one; \
+                canvasPoints and canvasPathBounds are unaffected. A stroke that carries \
+                no scale is LEFT ALONE and counted in the reply, not an error, and when \
+                that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply \
+                says "no change" and quotes no seq). stampWidth is not touched — to \
+                change the drawn thickness itself, use restyle_strokes. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "ids": .object([
+                        "type": "array",
+                        "description": """
+                            Composite stroke ids, as returned by list_strokes or \
+                            draw_strokes. Ids that carry no scale are accepted and \
+                            reported back as unchanged.
+                            """,
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "ids"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "restyle_strokes",
             description: """
                 Changes strokes' colour, width and/or ink in place; identity and \
@@ -2867,6 +2905,7 @@ public actor MCPAdapter {
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
+        case "restore_stroke_widths": return await callRestoreStrokeWidths(arguments)
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
         case "list_fonts": return await callListFonts(arguments)
@@ -4515,6 +4554,83 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 "transformed \(ids.count) stroke(s) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The agent door onto the app's "Restore original stroke widths" menu item: factor
+    /// the scale out of the named strokes' transforms so their ink returns to the width
+    /// it was drawn at, with the canvas geometry unmoved.
+    ///
+    /// **A whole-set no-op writes NOTHING.** The device reports which ids it actually
+    /// changed (`restoredIds`), and when that is empty the returned bytes are discarded:
+    /// a write here would bump `seq` for every subscriber and spend the agent's one
+    /// `undo_last_edit` slot on an edit that changed nothing — and the app's own answer
+    /// to this state is a disabled menu item, not a document write. The counts are also
+    /// what makes the reply honest for a MIXED set, which is the common case when an
+    /// agent restores a whole shape and only some of it was ever scaled.
+    ///
+    /// An ABSENT or undecodable `meta` is treated as "everything was restored" and
+    /// written: the bytes are the device's own product, the write is CAS-guarded, and
+    /// silently dropping a real edit is far worse than a redundant one.
+    private func callRestoreStrokeWidths(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
+
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("restoreStrokeWidths"),
+                    "ids": .array(ids.map(Value.string)),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            struct RestoreMeta: Decodable {
+                let restoredIds: [String]
+                let unchangedIds: [String]
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(RestoreMeta.self, from: $0) }
+            let restoredCount = meta?.restoredIds.count ?? ids.count
+            let unchangedCount = meta?.unchangedIds.count ?? 0
+
+            guard restoredCount > 0 else {
+                let plural = ids.count == 1 ? "" : "s"
+                return CallTool.Result(content: [.text(
+                    text: "no change: all \(ids.count) stroke\(plural) already carry the ink width "
+                        + "they were drawn with (none had a scale to factor out) — nothing was written",
+                    annotations: nil, _meta: nil)])
+            }
+
+            // expectedBytes is docBytes — the exact bytes relayed to the device, never a
+            // fresh re-read here, which would re-open the very window this guard closes.
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "restored \(restoredCount) of \(ids.count) stroke(s) at seq \(seq)"
+                if unchangedCount > 0 {
+                    summary += "; \(unchangedCount) had no scale to factor out"
+                }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
