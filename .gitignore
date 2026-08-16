@@ -2,6 +2,9 @@
 .DS_Store
 /.build
 /Packages
+
+# Release packages built by scripts/package-windows.ps1 (~90 MB staged, ~32 MB zipped).
+/dist
 xcuserdata/
 DerivedData/
 .swiftpm/
