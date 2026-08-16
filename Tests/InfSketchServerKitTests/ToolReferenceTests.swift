@@ -445,7 +445,16 @@ struct ToolReferenceTests {
             return
         }
 
-        let actual = try? String(contentsOf: url, encoding: .utf8)
+        // Compare CONTENT, not line-ending convention. The page is generated with LF, but git's
+        // `core.autocrlf=true` -- the default on Windows, and what GitHub's `windows-latest`
+        // runners carry -- checks it out with CRLF, so a byte comparison reports EVERY tool as
+        // drifted while nothing has changed. Measured on Windows 2026-08-16: 54 of 54 "stale",
+        // which is the signature of this and not of real drift (genuine drift names a few tools).
+        // It is a release blocker rather than a nuisance: `swift test` is a hard gate in
+        // `windows.yml`, so the build job fails, the package job never runs, and no Windows
+        // download is ever produced -- on a platform whose whole reason for CI is that download.
+        let actual = (try? String(contentsOf: url, encoding: .utf8))
+            .map { $0.replacingOccurrences(of: "\r\n", with: "\n") }
         guard let actual else {
             Issue.record("""
                 \(url.lastPathComponent) is missing.

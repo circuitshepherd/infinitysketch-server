@@ -12,9 +12,15 @@ on: [push, pull_request, workflow_dispatch]
 # Swift runtime DLLs from whichever toolchain built the executable, so a release built on a
 # different toolchain than the one the suite ran against would ship untested pairings -- and the
 # mismatch would be invisible, because the package works fine on the machine that made it.
+#
+# It is pinned to 6.3.3 because that is the toolchain every Windows claim in this repository was
+# actually measured on -- the native suite run, the release package, the smoke test with `PATH`
+# stripped. It was 6.1 until 2026-08-16, which was a version nobody had ever built this on: the
+# job had never run, so the pin was picked rather than verified, and the DLLs it would have shipped
+# to users came from a toolchain the suite had never been exercised against.
 env:
-  SWIFT_BRANCH: swift-6.1-release
-  SWIFT_TAG: 6.1-RELEASE
+  SWIFT_BRANCH: swift-6.3.3-release
+  SWIFT_TAG: 6.3.3-RELEASE
 
 jobs:
   build:

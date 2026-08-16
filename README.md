@@ -31,7 +31,7 @@ Swift 6.3.3). Windows users do not need a toolchain at all — there is a
 Requires [Swift 6.0 or newer](https://www.swift.org/install/).
 
 ```sh
-git clone https://gitlab.com/pepi.woess/infinitysketch-server.git
+git clone https://github.com/circuitshepherd/infinitysketch-server.git
 cd infinitysketch-server
 swift run infsketch-server --docs ~/infsketch-docs
 ```
@@ -83,7 +83,7 @@ $env:GIT_CONFIG_VALUE_0 = "false"
 ```
 
 ```pwsh
-git clone https://gitlab.com/pepi.woess/infinitysketch-server.git
+git clone https://github.com/circuitshepherd/infinitysketch-server.git
 cd infinitysketch-server
 swift run infsketch-server --docs $env:USERPROFILE\infsketch-docs
 ```
@@ -100,10 +100,11 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 
 | InfinitySketch (App Store) | infsketch-server tag | wire protocol |
 |---|---|---|
-| 2.0 | v1.0.0 | 7 |
+| 2.1 | v1.0.0 | 11 |
 
 Run the tagged release that matches your app version; `main` may be ahead of what the shipped app
-speaks.
+speaks. Syncing with a server arrived in InfinitySketch 2.1 — earlier versions have no server
+feature at all, so there is nothing for this to pair with.
 
 ## Security model — read this before exposing it
 
@@ -158,9 +159,11 @@ beside the dependency that causes it. It is written as a POSITIVE list of the pl
 the capability, because it used to say `!os(Linux)` — naming the one platform then known to lack it
 — and Windows silently fell on the wrong side of that.
 
-Windows is built by `.github/workflows/windows.yml` on the GitHub mirror (inert on GitLab). That
-workflow also builds the self-contained release package on **every push** (uploaded as a build
-artifact) and attaches it to the GitHub Release for a `v*` tag.
+This repository is developed on a private GitLab repository and published here on GitHub; the two
+CI configurations split along that line, and each is inert on the other host. `.gitlab-ci.yml` runs
+the Linux gate; `.github/workflows/windows.yml` builds and tests on Windows, builds the
+self-contained release package on **every push** (uploaded as a build artifact), and attaches it to
+the GitHub Release for a `v*` tag.
 
 To build the package by hand:
 
