@@ -419,9 +419,19 @@ private actor FakeStrokeOpDevice {
     private func pumpLoop() async {
         while true {
             guard let message = try? await Self.receiveOne(ws) else { return }
-            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, _) = message else { continue }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, let kind) = message else { continue }
+            // The real device does exactly this, in `ServerMirror.resolveAndAnswerStrokeOpRequest`:
+            // an op-spec's bulk fields ride the chunked PAYLOAD and are spliced back into the spec
+            // before any handler sees it. Resolving it here is what lets every assertion below
+            // keep asserting the op CONTRACT rather than the transport's shape.
+            var docBytes = payload.inlineData ?? Data()
+            var resolvedSpec = spec
+            if kind == OpSpecBundleWire.kind, let bundle = try? OpSpecBundle(encoded: docBytes) {
+                docBytes = bundle.primary
+                resolvedSpec = (try? bundle.specRestoringParts(into: spec)) ?? spec
+            }
             receivedRequests.append(ReceivedRequest(
-                requestId: requestId, docId: docId, docBytes: payload.inlineData ?? Data(), spec: spec))
+                requestId: requestId, docId: docId, docBytes: docBytes, spec: resolvedSpec))
             switch autoReply {
             case .bytes(let bytes):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(
@@ -783,7 +793,9 @@ private actor FakeStrokeOpDevice {
     // stroke) added one, renaming this from `listToolsContainsAllFiftyOneTools`. list_tags (what
     // tags a document has, so an agent can pick up earlier work) added one, renaming this from
     // `listToolsContainsAllFiftyTwoTools`.
-    @Test func listToolsContainsAllFiftyThreeTools() async throws {
+    /// restore_stroke_widths (the agent door onto the app's "Restore original stroke
+    /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
+    @Test func listToolsContainsAllFiftyFourTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -805,6 +817,7 @@ private actor FakeStrokeOpDevice {
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
+            "restore_stroke_widths",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -1753,7 +1766,7 @@ private actor FakeStrokeOpDevice {
         let sentence = "Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry."
         for name in [
             "add_text", "edit_text", "remove_text", "replace_doc", "draw_strokes", "delete_strokes",
-            "transform_strokes", "restyle_strokes", "reshape_strokes",
+            "transform_strokes", "restyle_strokes", "reshape_strokes", "restore_stroke_widths",
         ] {
             let tool = try #require(tools.first { $0.name == name })
             #expect(tool.description?.contains(sentence) == true, "\(name) missing the CAS sentence")
@@ -3061,6 +3074,90 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    @Test func restoreStrokeWidthsSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let restoredBytes = Data(#"{"aaa001_thumbnailData":"","strokes":["unscaled"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: restoredBytes,
+            meta: Data(#"{"restoredIds":["seed123:1.0"],"unchangedIds":[]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("seed123:1.0")]),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content) == "restored 1 of 1 stroke(s) at seq 1")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "restoreStrokeWidths")
+        #expect(specJSON["ids"] as? [String] == ["seed123:1.0"])
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == restoredBytes)
+
+        await server.stop()
+    }
+
+    /// A stroke carrying no scale is left alone — and when NONE of them carried one, the
+    /// device's bytes are discarded rather than written. A pointless write bumps `seq` for
+    /// every subscriber and spends the agent's one `undo_last_edit` on an edit that changed
+    /// nothing. (The app's own answer to this state is a disabled menu item.)
+    @Test func restoreStrokeWidthsWithNothingToRestoreWritesNothing() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"restoredIds":[],"unchangedIds":["a","b"]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("a"), .string("b")]),
+        ])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("no change"), "got \(text)")
+        #expect(!text.contains("seq"), "nothing was written, so there is no seq to quote: \(text)")
+
+        // The document is byte-for-byte what it was: the device's rebuilt bytes were dropped.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+
+        await server.stop()
+    }
+
+    @Test func restoreStrokeWidthsReportsThePartlyRestoredCase() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["mixed"]}"#.utf8),
+            meta: Data(#"{"restoredIds":["a"],"unchangedIds":["b","c"]}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "restore_stroke_widths", arguments: [
+            "docId": "d",
+            "ids": .array([.string("a"), .string("b"), .string("c")]),
+        ])
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("restored 1 of 3 stroke(s) at seq 1"))
+        #expect(text.contains("2 had no scale to factor out"), "got \(text)")
+
+        await server.stop()
+    }
+
     /// Task 2 (write CAS) pin for transform_strokes, mirroring
     /// drawStrokesRejectsWhenTheDocumentChangedMidOp: the device is stalled
     /// until AFTER a competing write lands, so its (stale-computed) reply
@@ -3585,6 +3682,70 @@ private actor FakeStrokeOpDevice {
             }
             #expect(value.objectValue?["type"] == .string("boolean"))
         }
+
+        await server.stop()
+    }
+
+    // MARK: - colorAppearance / appearance (2026-08-12 agent-color-space spec)
+
+    /// Every tool on this surface that takes a colour hex must declare the call-level
+    /// `colorAppearance` door (Task 11) — the one place a dark-authored colour can enter.
+    /// Modeled on everyStrokeAcceptingToolAdvertisesSmoothInItsSchema (3573).
+    @Test func everyColourTakingToolAdvertisesColorAppearance() throws {
+        let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
+                                     "draw_dots", "restyle_strokes", "restyle_selection",
+                                     "add_text", "edit_text", "render_sketch"]
+        let declaring = Set(MCPAdapter.toolDefinitions
+            .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
+            .map(\.name))
+        #expect(declaring == expected)
+    }
+
+    /// `appearance` and `colorAppearance` both reach the device through render_sketch's
+    /// allow-list (renderSpecParameterNames). Modeled on renderSketchRelaysScale (5419).
+    @Test func renderSketchRelaysAppearanceAndColorAppearance() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([0x89, 0x50]),
+                                                  meta: Data(#"{"appearance":"dark"}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        _ = try await client.callTool(name: "render_sketch", arguments: [
+            "docId": "d", "appearance": .string("dark"), "colorAppearance": .string("dark"),
+        ])
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["appearance"] as? String == "dark")
+        #expect(spec["colorAppearance"] as? String == "dark")
+
+        await server.stop()
+    }
+
+    /// `draw_strokes` relays `colorAppearance` only when supplied — the exact envelope key set
+    /// the device decodes, string-literally, no extras.
+    @Test func drawStrokesRelaysColorAppearance() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([
+            .object(["canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)])])])
+        ])
+        let (_, isError) = try await client.callTool(name: "draw_strokes", arguments: [
+            "docId": "d", "strokes": strokesArg, "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op", "strokes", "colorAppearance"])
+        #expect(envelope["colorAppearance"] as? String == "dark")
 
         await server.stop()
     }
@@ -4600,28 +4761,48 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    // MARK: - add_image (Task 2)
+    // MARK: - add_image (Task 2; `path` since 2026-08-11-agent-add-image-path-design)
     //
     // Places an image into a document, authored by a connected device
     // (`ImageAuthoring`, app repo, Task 1). Relays a `{"op":"addImage",
-    // "imageBytes": <base64>, "x", "y", "width"?, "height"?, "opacity"?}`
-    // envelope through `broker.requestStrokeOp`, gated on the "authorImage"
-    // capability (not "authorStrokes"/"authorText" — a device that only
-    // authors strokes/text must not be picked for this), and surfaces the
-    // new image's id from the reply's `meta` — same shape as
+    // "imageBytes": <base64>, "canvasX", "canvasY", "canvasWidth"?,
+    // "canvasHeight"?, "opacity"?}` envelope through `broker.requestStrokeOp`,
+    // gated on the "authorImage" capability (not "authorStrokes"/"authorText"
+    // — a device that only authors strokes/text must not be picked for this),
+    // and surfaces the new image's id from the reply's `meta` — same shape as
     // `styledAddTextRelaysTheStyleEnvelopeThroughTheDevice` above.
+    //
+    // The tool takes a `path` the SERVER reads; the base64 `bytes` argument it
+    // used to take is gone. The envelope is deliberately unchanged by that —
+    // the device, the wire and the protocol version know nothing about it, so
+    // the change needed no version bump.
+
+    /// Writes a real PNG to a temp file for the duration of the body. `add_image` no longer
+    /// accepts inline bytes, so every one of these tests needs a file on disk.
+    private func withPNGFile<T>(_ name: String = "logo.png",
+                                data: Data? = nil,
+                                _ body: (String) async throws -> T) async rethrows -> T {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("addimage-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent(name)
+        let bytes = data ?? Data(base64Encoded: ImageContainerTests.pngBase64)!
+        try? bytes.write(to: url)
+        return try await body(url.path)
+    }
 
     /// The exact relayed envelope key set, string-literally (mirroring the
-    /// styled add_text contract test): present-only optional keys, `bytes`
-    /// relayed verbatim as the base64 string under `imageBytes`, and the
-    /// new image's id (from `meta`) surfaced in the result text.
-    @Test func addImageRelaysEnvelopeAndSurfacesId() async throws {
+    /// styled add_text contract test): present-only optional keys, the FILE'S
+    /// bytes relayed as the base64 string under `imageBytes`, and the new
+    /// image's id (from `meta`) surfaced in the result text.
+    @Test func addImageReadsTheFileAndRelaysItsBytes() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
 
-        let imageBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let png = try #require(Data(base64Encoded: ImageContainerTests.pngBase64))
         let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
         let metaBytes = Data(#"{"id":"IMG-1"}"#.utf8)
         let device = try await FakeStrokeOpDevice(
@@ -4629,27 +4810,144 @@ private actor FakeStrokeOpDevice {
             capabilities: ["authorImage"])
         defer { Task { await device.close() } }
 
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: [
+                    "docId": "d", "path": .string(path),
+                    "canvasX": 10, "canvasY": 20, "canvasWidth": 50,
+                ])
+            #expect(isError != true)
+            #expect(toolResultText(content).contains("IMG-1"), "add_image must surface the new image's id")
+
+            let received = try #require(await device.receivedRequests.first)
+            #expect(received.docId == "d")
+            #expect(received.docBytes == Fixtures.docBytes)
+            let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+            #expect(spec["op"] as? String == "addImage")
+            // Exact envelope: present-only optionals — no height/opacity when omitted. UNCHANGED
+            // by the path work: the device still receives base64 under `imageBytes`.
+            #expect(Set(spec.keys) == ["op", "imageBytes", "canvasX", "canvasY", "canvasWidth"])
+            let relayedImageBytesB64 = try #require(spec["imageBytes"] as? String)
+            #expect(Data(base64Encoded: relayedImageBytesB64) == png,
+                    "the file's bytes must reach the device unaltered")
+            #expect(spec["canvasX"] as? Double == 10)
+            #expect(spec["canvasY"] as? Double == 20)
+            #expect(spec["canvasWidth"] as? Double == 50)
+        }
+
+        await server.stop()
+    }
+
+    /// The reported bug, end to end at the tool: a truncated PNG is refused BY NAME and the device
+    /// is never woken — instead of being placed as an image that reports plausible bounds and
+    /// renders nothing. No decoder can make this call, which is why the server checks the
+    /// container (see `ImageContainer`).
+    @Test func addImageRefusesACorruptFileWithoutWakingTheDevice() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        let whole = try #require(Data(base64Encoded: ImageContainerTests.pngBase64))
+        try await withPNGFile("cut.png", data: whole.prefix(whole.count / 2)) { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError == true)
+            let text = toolResultText(content)
+            #expect(text.hasPrefix("imageCorrupt: "), "\(text)")
+            #expect(text.contains("cut.png"), "the error must name the file: \(text)")
+            #expect(await device.receivedRequests.isEmpty,
+                    "a corrupt file must be refused before any device round trip")
+        }
+
+        await server.stop()
+    }
+
+    /// A path that names nothing is refused before the device is contacted, like `unknownDoc`.
+    @Test func addImageMissingFileErrorsWithoutWakingTheDevice() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
         let (content, isError) = try await client.callTool(
             name: "add_image",
-            arguments: [
-                "docId": "d", "bytes": .string(imageBytes.base64EncodedString()),
-                "canvasX": 10, "canvasY": 20, "canvasWidth": 50,
-            ])
-        #expect(isError != true)
-        #expect(toolResultText(content).contains("IMG-1"), "add_image must surface the new image's id")
+            arguments: ["docId": "d", "path": "/nowhere/at/all/logo.png", "canvasX": 0, "canvasY": 0])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("imageFileNotFound: "))
+        #expect(await device.receivedRequests.isEmpty)
 
-        let received = try #require(await device.receivedRequests.first)
-        #expect(received.docId == "d")
-        #expect(received.docBytes == Fixtures.docBytes)
-        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(spec["op"] as? String == "addImage")
-        // Exact envelope: present-only optionals — no height/opacity when omitted.
-        #expect(Set(spec.keys) == ["op", "imageBytes", "canvasX", "canvasY", "canvasWidth"])
-        let relayedImageBytesB64 = try #require(spec["imageBytes"] as? String)
-        #expect(Data(base64Encoded: relayedImageBytesB64) == imageBytes)
-        #expect(spec["canvasX"] as? Double == 10)
-        #expect(spec["canvasY"] as? Double == 20)
-        #expect(spec["canvasWidth"] as? Double == 50)
+        await server.stop()
+    }
+
+    /// The device reports what it actually placed, and the tool surfaces it. `pixelWidth`/
+    /// `pixelHeight` are the SOURCE image's own dimensions, which no other tool exposes —
+    /// `list_images` reports canvasBounds and never the pixels behind it — so without these an
+    /// agent cannot learn the aspect ratio and must render, look and guess.
+    @Test func addImageReportsThePlacedBoundsAndTheSourcePixelSize() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
+        let metaBytes = Data(
+            #"{"id":"IMG-1","canvasBounds":"10, 20, 50, 47.9","pixelWidth":"167","pixelHeight":"160"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: metaBytes),
+            capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 10, "canvasY": 20])
+            #expect(isError != true)
+            let text = toolResultText(content)
+            #expect(text.contains("id: IMG-1"), "\(text)")
+            #expect(text.contains("canvasBounds: [10, 20, 50, 47.9]"), "\(text)")
+            #expect(text.contains("pixelWidth: 167"), "\(text)")
+            #expect(text.contains("pixelHeight: 160"), "\(text)")
+        }
+
+        await server.stop()
+    }
+
+    /// An older device that does not report the new fields still works — the lines are simply
+    /// absent. That is what keeps `meta` a `[String: String]` and the two repos independently
+    /// deployable.
+    @Test func addImageStillWorksAgainstADeviceThatReportsOnlyAnId() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let modifiedBytes = Data(#"{"aaa001_thumbnailData":"","placedImagesData":["new-image"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: modifiedBytes, meta: Data(#"{"id":"IMG-1"}"#.utf8)),
+            capabilities: ["authorImage"])
+        defer { Task { await device.close() } }
+
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError != true)
+            let text = toolResultText(content)
+            #expect(text.contains("id: IMG-1"), "\(text)")
+            #expect(!text.contains("canvasBounds"), "absent fields must not be invented: \(text)")
+        }
 
         await server.stop()
     }
@@ -4666,14 +4964,16 @@ private actor FakeStrokeOpDevice {
             port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorImage"])
         defer { Task { await device.close() } }
 
-        let (content, isError) = try await client.callTool(
-            name: "add_image",
-            arguments: ["docId": "ghost", "bytes": .string(Data([0x01, 0x02]).base64EncodedString()), "canvasX": 0, "canvasY": 0])
-        #expect(isError == true)
-        #expect(toolResultText(content).hasPrefix("unknownDoc"))
+        try await withPNGFile { path in
+            let (content, isError) = try await client.callTool(
+                name: "add_image",
+                arguments: ["docId": "ghost", "path": .string(path), "canvasX": 0, "canvasY": 0])
+            #expect(isError == true)
+            #expect(toolResultText(content).hasPrefix("unknownDoc"))
 
-        // Fast-fail: the device must never be contacted for an unknown doc.
-        #expect(await device.receivedRequests.isEmpty)
+            // Fast-fail: the device must never be contacted for an unknown doc.
+            #expect(await device.receivedRequests.isEmpty)
+        }
 
         await server.stop()
     }
@@ -5203,7 +5503,7 @@ private actor FakeStrokeOpDevice {
         let (tools, _) = try await client.listTools()
         let tool = try #require(tools.first { $0.name == "restyle_strokes" })
         let declared = MCPAdapter.declaredArguments(of: tool)
-        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType"],
+        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType", "colorAppearance"],
                 "restyle_strokes declares \(declared.sorted()) — every one must reach the device")
 
         await server.stop()
@@ -5346,6 +5646,10 @@ private actor FakeStrokeOpDevice {
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "stampWidth"],
             "list_open_docs": ["openDocs", "docId", "capabilities"],
+            "draw_strokes": ["storedColors"],
+            "restyle_strokes": ["storedColor"],
+            "fill_region": ["storedColors"],
+            "draw_dots": ["storedColors"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5429,6 +5733,57 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `draw_dots` reuses `draw`'s meta through `DotAuthoring.annotated`, so `storedColors`
+    /// (what the dark door actually stored, light-canonical) must survive that merge and reach
+    /// the reply text — exactly the `draw_strokes` contract, just for dots.
+    @Test func drawDotsReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                meta: Data(##"{"keys":["a-1"],"storedColors":["#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0),
+                                     "color": .string("#808080")])]),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line — an
+    /// absent key, not an empty one, so an unrelated draw_dots reply stays exactly as before.
+    @Test func drawDotsOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"dotted"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "draw_dots", arguments: [
+            "docId": "d",
+            "dots": .array([.object(["canvasX": .int(0), "canvasY": .int(0)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
+    }
+
     @Test func drawDotsUnknownDocErrors() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5483,6 +5838,58 @@ private actor FakeStrokeOpDevice {
         #expect((spec["canvasPoints"] as? [Any])?.count == 3)
         #expect(spec["spacingRatio"] as? Double == 0.5)
         #expect(spec["angleDeg"] as? Double == 45)
+    }
+
+    /// `fill_region` returns `StrokeAuthoring.perform`'s meta wholesale, so `storedColors` (what
+    /// the dark door actually stored, light-canonical) reaches the reply text unmodified —
+    /// exactly the `draw_strokes` contract.
+    @Test func fillRegionReportsStoredColorsWhenTheDarkDoorConverts() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(
+                bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                meta: Data(##"{"keys":["a-1","b-2"],"storedColors":["#808080FF","#808080FF"]}"##.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+            "color": .string("#808080"),
+            "colorAppearance": .string("dark"),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("storedColors: #808080FF, #808080FF"))
+
+        await server.stop()
+    }
+
+    /// A call that never went through the dark door must NOT grow a `storedColors` line.
+    @Test func fillRegionOmitsStoredColorsWithoutTheDarkDoor() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port,
+            autoReply: .bytesWithMeta(bytes: Data(#"{"aaa001_thumbnailData":"","m":"filled"}"#.utf8),
+                                      meta: Data(#"{"keys":["a-1"]}"#.utf8)),
+            capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+
+        let (content, _) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)]),
+                                    .array([.int(10), .int(10)])]),
+        ])
+        #expect(!toolResultText(content).contains("storedColors"))
+
+        await server.stop()
     }
 
     @Test func fillRegionUnknownDocErrors() async throws {
@@ -5736,7 +6143,8 @@ private actor FakeStrokeOpDevice {
         // pins the emphasis rather than the content would fight every future edit.
         let lowered = text.lowercased()
         for essential in ["40 000", "viewport", "canvas space", "width", "polyline",
-                          "translucent", "undo_last_edit", "snap_points"] {
+                          "translucent", "undo_last_edit", "snap_points", "light-canonical",
+                          "colorappearance"] {
             #expect(lowered.contains(essential.lowercased()),
                     "the guide no longer mentions \(essential)")
         }

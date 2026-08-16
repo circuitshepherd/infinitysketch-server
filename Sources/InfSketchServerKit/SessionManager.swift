@@ -256,15 +256,20 @@ public actor SessionManager {
     /// `submitter` is the writer's own subscription token, when it has one. It is used for a single
     /// decision — whether a stripped broadcast is worth building — because a writer ignores the echo
     /// of its own op.
+    /// `receivedAt` is when the write arrived at the server, from whoever took it off the socket.
+    /// It travels down untouched so the session can report how long it WAITED — see
+    /// `DocumentSession.submit`, which is already past the wait by the time it runs.
     public func submit(
         docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
-        submitter: UUID? = nil
+        submitter: UUID? = nil, receivedAt: ContinuousClock.Instant? = nil,
+        writer: String? = nil
     ) async -> SubmitOutcome {
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
         let outcome = await session.submit(opId: opId, payload: payload,
-                                           expectation: expectation, submitter: submitter)
+                                           expectation: expectation, submitter: submitter,
+                                           receivedAt: receivedAt, writer: writer)
         // The status event uses the seq the write itself returned — a
         // separate `await session.seq` read here could observe a LATER
         // racing write's seq (see SubmitOutcome).
@@ -282,9 +287,13 @@ public actor SessionManager {
     /// teardown is scheduled immediately — otherwise it would leak forever.
     /// A session that was already live (has real subscribers/watchers) is
     /// left completely alone; only the absent-session branch runs.
+    /// `writer` defaults to `agent` because this IS the agent path — the doc comment above says so,
+    /// and every caller is an MCP tool. It carries no arrival instant, deliberately: opening a
+    /// session can load a document from disk, and counting that as queue wait would report an
+    /// inflated one (`docs/BACKLOG.md`).
     public func submitOpeningSession(
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
-        expectation: WriteExpectation = .none
+        expectation: WriteExpectation = .none, writer: String = "agent"
     ) async -> SubmitOutcome {
         if sessions[docId] == nil {
             let session: DocumentSession
@@ -306,7 +315,8 @@ public actor SessionManager {
         // pre-check needed. `.absent` reads the store directly (see
         // `DocumentSession.submit`), so it's equally correct on this
         // just-opened session.
-        return await submit(docId: docId, opId: opId, payload: payload, expectation: expectation)
+        return await submit(docId: docId, opId: opId, payload: payload, expectation: expectation,
+                            writer: writer)
     }
 
     /// Live session bytes when a session is open, else the store's on-disk

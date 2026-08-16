@@ -11,6 +11,7 @@ import WinSDK          // the console API and the C runtime (`fflush`, `atexit`,
 var port: UInt16 = 8080
 var docsPath = "./docs"
 var openBrowser = true
+var telemetryPath: String?
 
 /// True when this process created the console it is printing to — i.e. it was double-clicked from
 /// Explorer rather than started from a terminal that already existed.
@@ -75,8 +76,23 @@ while let argument = arguments.next() {
         // For anything that starts a server without a person watching — `scripts/worktree-server`
         // above all, one per worktree and usually started by an agent.
         openBrowser = false
+    case "--telemetry":
+        // Sync performance telemetry, to a file — never the console, which the join block owns.
+        // A path is REQUIRED rather than defaulted: this writes megabytes over a long session, and
+        // where that landed must not be something the operator has to go looking for.
+        guard let value = arguments.next() else {
+            die("--telemetry requires a path")
+        }
+        telemetryPath = value
+    case "--verbose":
+        // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
+        // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
+        // regardless. `scripts/worktree-server` passes this — the dev server's log is what the
+        // e2e gates grep.
+        ServerLog.isVerbose = true
     default:
-        let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open]"
+        let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
+            + " [--telemetry FILE]"
         // `--help` is a request, not a failure: it exits 0 and never holds the window.
         if argument == "--help" { print(usage); exit(0) }
         die(usage)
@@ -88,6 +104,17 @@ do {
     try FileManager.default.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
 } catch {
     die("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
+}
+
+if let telemetryPath {
+    let url = URL(fileURLWithPath: telemetryPath)
+    if SyncTelemetry.enableFileLogging(at: url) {
+        print("sync telemetry -> \(url.path)")
+    } else {
+        // A path that cannot be opened is a misconfiguration the operator must see. It is not
+        // fatal: a server without telemetry is the ordinary server.
+        ServerLog.error("could not open the telemetry file at \(url.path); continuing without it")
+    }
 }
 
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory)
@@ -195,6 +222,8 @@ func drawJoinCode() {
         var text = "no reachable network address found — scan to join is unavailable here\n"
         text += "Connect an AI agent on THIS machine (MCP):\n"
         text += "  \(picker.loopbackMCPURL)\n"
+        text += "  \(AddressPicker.claudeExampleNote):\n"
+        text += "    \(AddressPicker.claudeRegisterCommand(mcpURL: picker.loopbackMCPURL))\n"
         if keyReadingIsPossible() { text += "    \(picker.keyHint)\n" }
         if let openMessage { text += "\n\(openMessage)\n" }
         print(text, terminator: "")
@@ -213,6 +242,10 @@ func drawJoinCode() {
     if let mcp = picker.currentMCPURL {
         text += "  \(mcp)   (from another machine)\n"
     }
+    // Loopback in the example, deliberately: an agent on this machine is the common case, and a
+    // remote operator substitutes the LAN url printed directly above.
+    text += "  \(AddressPicker.claudeExampleNote):\n"
+    text += "    \(AddressPicker.claudeRegisterCommand(mcpURL: picker.loopbackMCPURL))\n"
     if picker.candidates.count > 1 {
         // Blank line first: the list switches which network address BOTH urls above use, and run
         // straight on from the labelled agent urls it reads as a list of agent addresses.

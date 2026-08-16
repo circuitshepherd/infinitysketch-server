@@ -116,7 +116,7 @@ actor Connection {
         } catch let error as TransferWireError {
             // Transfer state is positional — once violated the stream can't
             // be trusted. Connection-fatal per the chunked-transfer spec.
-            FileHandle.standardError.write(Data("transfer violation on connection: \(error)\n".utf8))
+            ServerLog.error("transfer violation on connection: \(error)")
             emit(.error(reason: "transferViolation"))
             await close()
             return
@@ -232,6 +232,10 @@ actor Connection {
             }
 
         case .op(let docId, let opId, let payload, let expectation):
+            // Stamped HERE, the moment the op is a whole message and before anything can queue: the
+            // gap between this and the session actor picking it up is the QUEUE, and it is only
+            // knowable from outside the actor. Free when telemetry is off — a clock read.
+            let receivedAt = ContinuousClock.now
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
@@ -240,7 +244,11 @@ actor Connection {
             // forwarding here.
             if let reject = await manager.submit(
                 docId: docId, opId: opId, payload: payload, expectation: expectation ?? .none,
-                submitter: docSubscriptions[docId]?.token
+                submitter: docSubscriptions[docId]?.token, receivedAt: receivedAt,
+                // WHO pushed. `deviceId` from hello when there is one; the connection's own id
+                // otherwise, so two anonymous peers are still tellable apart in the file — which
+                // is the entire point of recording this.
+                writer: deviceId ?? connectionId.uuidString
             ).rejectMessage {
                 emit(reject)
             }

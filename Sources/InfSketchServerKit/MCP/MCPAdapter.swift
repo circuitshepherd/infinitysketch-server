@@ -480,11 +480,20 @@ public actor MCPAdapter {
         }
     }
 
+    /// Every colour hex on this surface is LIGHT-CANONICAL (the light-appearance value —
+    /// what PencilKit stores; a dark canvas renders its conversion). This call-level
+    /// declaration is the one door for dark-authored colours.
+    private static let colorAppearanceProperty: Value = .object([
+        "type": "string",
+        "enum": .array(["light", "dark"].map(Value.string)),
+        "description": "The appearance this call's colour hexes were authored in. Default \"light\" — the canonical space every colour on this surface speaks. Pass \"dark\" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form.",
+    ])
+
     /// Shared style properties for add_text/edit_text (whole-field). Colours
     /// are #RRGGBB(AA). A whole-field style is the base a `spans` entry
     /// overrides.
     private static let textStyleProperties: [String: Value] = [
-        "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour."]),
+        "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
         "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
         "bold": .object(["type": "boolean"]),
         "italic": .object(["type": "boolean"]),
@@ -590,7 +599,7 @@ public actor MCPAdapter {
             ]),
             "color": .object([
                 "type": "string",
-                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. OMIT IT to inherit the colour of the tool the user currently has selected in the picker (see get_tool); falls back to a paper-contrasting default when no inking tool is selected.",
+                "description": "Stroke colour as #RRGGBB or #RRGGBBAA hex. OMIT IT to inherit the colour of the tool the user currently has selected in the picker (see get_tool); falls back to a paper-contrasting default when no inking tool is selected. Light-canonical (the light-appearance value); see colorAppearance.",
             ]),
             "inkType": .object([
                 "type": "string",
@@ -642,12 +651,13 @@ public actor MCPAdapter {
             name: "add_text",
             description: """
                 Appends a placed-text entry to a document: a new id, the document's current \
-                colour scheme, and an identity transform/opacity. (x, y) is the text box's \
-                top-left corner, in canvas coordinates. Give color/fontSize/bold/italic/family \
+                colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text \
+                box's top-left corner. Give color/fontSize/bold/italic/family \
                 to style the WHOLE label, or a `spans` array to style parts of it independently \
                 (e.g. a subscript). A whole-field style is the base each span overrides. Styling \
                 needs a connected device; plain text does not. Returns the new text's id so you \
-                can edit it. Colours: #RRGGBB(AA). Font families come from list_fonts — call it \
+                can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
+                author for the dark canvas). Font families come from list_fonts — call it \
                 before setting a `family`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -658,6 +668,7 @@ public actor MCPAdapter {
                         "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
                         "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "colorAppearance": colorAppearanceProperty,
                         "tags": .object([
                             "type": "array", "items": .object(["type": "string"]),
                             "description": "Durable tags for this text, so find_elements can reach it later.",
@@ -694,8 +705,10 @@ public actor MCPAdapter {
                 can synthesize, so a new plain text run always replaces the old ones wholesale. \
                 A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles \
                 the EXISTING characters (or replaces them with `text`/`spans` if given) and \
-                needs a connected device — plain edits do not. Position-only edits (x and/or y \
-                with no text/style) do not touch formatting. Colours: #RRGGBB(AA). Font \
+                needs a connected device — plain edits do not. Position-only edits (canvasX \
+                and/or canvasY with no text/style) do not touch formatting. Colours: \
+                #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark \
+                canvas). Font \
                 families come from list_fonts. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -715,6 +728,7 @@ public actor MCPAdapter {
                         ]),
                         "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "colorAppearance": colorAppearanceProperty,
                         "spans": .object([
                             "type": "array",
                             "description": """
@@ -924,12 +938,16 @@ public actor MCPAdapter {
 
                 Do NOT fake a dot with a short wide stroke: round caps at each end of a segment \
                 make a STADIUM (length + width) × width, which is visibly oval at the sizes a \
-                dot is used at. \(writeToolCaveats)
+                dot is used at. Each dot's `color` is light-canonical; pass \
+                colorAppearance: "dark" if you picked it for the dark canvas — the reply's \
+                storedColors array (one entry per created dot, present only when the dark door \
+                was used) reports what was actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "dots": .object([
                         "type": "array",
                         "description": "The dots to draw.",
@@ -944,7 +962,7 @@ public actor MCPAdapter {
                                 ]),
                                 "color": .object([
                                     "type": "string",
-                                    "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                                    "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance.",
                                 ]),
                                 "inkType": .object([
                                     "type": "string",
@@ -1005,12 +1023,16 @@ public actor MCPAdapter {
                 all take the fill and its border together, because they are one stroke, but \
                 changing the boundary to a different SHAPE does not re-fill it. You hold the \
                 outline, so give the fill a `name` and reshape it by deleting it and filling the \
-                new outline under that same name. \(writeToolCaveats)
+                new outline under that same name. `color` is light-canonical; pass \
+                colorAppearance: "dark" if you picked it for the dark canvas — the reply's \
+                storedColors array (one entry per pass/border stroke, present only when the \
+                dark door was used) reports what was actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "canvasPoints": .object([
                         "type": "array",
                         "description": "The boundary, in canvas coordinates; at least 3 points.",
@@ -1031,7 +1053,7 @@ public actor MCPAdapter {
                     ]),
                     "color": .object([
                         "type": "string",
-                        "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen.",
+                        "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
                     "stampWidth": .object([
                         "type": "number",
@@ -1142,18 +1164,36 @@ public actor MCPAdapter {
         Tool(
             name: "add_image",
             description: """
-                Place an image into a document. `bytes` is a base64-encoded PNG/JPEG/GIF; `x`,`y` are the \
-                TOP-LEFT corner of the placement in canvas coordinates. Optional `width`/`height` (canvas \
-                points) resize it — omit both for natural pixel size, give one to preserve aspect ratio, both \
-                for exact. Optional `opacity` (0..1, default 1). Requires a connected device (the image is \
-                decoded there) — noDeviceAvailable otherwise. Returns the new image's id. unknownDoc if the \
-                document doesn't exist; invalidSpec if the bytes aren't a decodable image.
+                Place an image into a document. `path` names an image FILE ON THE MACHINE THIS \
+                SERVER RUNS ON — it must be absolute (a leading ~ is expanded), and the server \
+                reads it itself, so no image data passes through your context. Write a generated \
+                image to a file and pass its path; do not try to inline it. \
+                (canvasX, canvasY) is the placement's TOP-LEFT corner. Optional \
+                canvasWidth/canvasHeight (canvas points) resize it — OMIT BOTH FOR THE IMAGE'S \
+                NATURAL PIXEL SIZE, which for a photo is thousands of points across; give one to \
+                preserve aspect ratio, both for exact. Optional `opacity` (0..1, default 1). \
+                Requires a connected device (the image is decoded there) — noDeviceAvailable \
+                otherwise. The reply names the new image's id, the canvasBounds it actually \
+                occupies, and the source's pixel size, so you can size it correctly in one \
+                follow-up rather than by rendering and guessing. Errors name the file: \
+                imagePathNotAbsolute, imageFileNotFound, imageFileUnreadable, imageFileEmpty, \
+                imageTooLarge, imageCorrupt (a truncated or damaged PNG/JPEG/GIF — this is \
+                checked because no image DECODER catches it: a truncated PNG decodes to the \
+                right size and renders blank). unknownDoc if the document doesn't exist.
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
-                    "bytes": .object(["type": "string", "description": "Base64-encoded PNG/JPEG/GIF image data."]),
+                    "path": .object([
+                        "type": "string",
+                        "description": """
+                            Absolute path to a PNG/JPEG/GIF (or anything else the device can \
+                            decode) on the server's own filesystem. A leading ~ is expanded; a \
+                            relative path is refused rather than resolved against a working \
+                            directory you cannot see.
+                            """,
+                    ]),
                     "canvasX": .object(["type": "number", "description": "Canvas-space x of the placement's top-left corner."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y of the placement's top-left corner."]),
                     "canvasWidth": .object([
@@ -1170,7 +1210,7 @@ public actor MCPAdapter {
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
                 ]),
-                "required": .array(["docId", "bytes", "canvasX", "canvasY"].map(Value.string)),
+                "required": .array(["docId", "path", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1242,7 +1282,9 @@ public actor MCPAdapter {
                 automatic light<->dark derivation). Server-side, no device needed; applies \
                 live to an open document with no banner. unknownDoc if the document doesn't \
                 exist; invalidSpec on a bad hex colour; invalidArguments if no field is given. \
-                \(writeToolCaveats)
+                Unlike the colorAppearance door elsewhere on this surface, `light` and `dark` \
+                here are each the LITERAL value for that appearance — nothing is converted \
+                between them. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1304,7 +1346,11 @@ public actor MCPAdapter {
                 Other defaults for any stroke that omits them: inkType "pen", width 4, and a \
                 colour that FOLLOWS THE PAPER — white on a dark document, black on a light \
                 one (never a hardcoded #000000, which renders invisible on dark paper). An \
-                explicit color is always honoured exactly as given. The result names the seq \
+                explicit color is always honoured exactly as given, and is LIGHT-CANONICAL — \
+                pass colorAppearance: "dark" when you picked colours for how they look on the \
+                dark canvas; the device converts them before storing, and the reply's \
+                storedColors array (one entry per created stroke, present only when the dark \
+                door was used) reports what was actually stored. The result names the seq \
                 the write was assigned, and the id of each stroke it created, in \
                 the order supplied — use those, not a bounding-box guess, to revise exactly \
                 what you just drew with \
@@ -1319,6 +1365,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "colorAppearance": colorAppearanceProperty,
                     "strokes": .object([
                         "type": "array",
                         "description": """
@@ -1399,7 +1446,9 @@ public actor MCPAdapter {
                 REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, \
                 stampWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
                 antialias included) and `canvasPathBounds` is the control points' box — use the \
-                latter to verify placement, the former for true on-screen size.
+                latter to verify placement, the former for true on-screen size. `color` is the \
+                stored LIGHT-CANONICAL hex; on a dark document what you SEE is its conversion, \
+                not this value.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1511,7 +1560,7 @@ public actor MCPAdapter {
                         "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap. Defaults to 1.",
                     ]),
                     "rotation": .object(["type": "number", "description": "Rotation in degrees. Defaults to 0."]),
-                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Defaults to a translucent blue."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Defaults to a translucent blue. Literal: drawn identically in light and dark (grid colours never convert)."]),
                     "thickness": .object(["type": "number", "description": "Line thickness. Defaults to 1."]),
                     "visible": .object(["type": "boolean", "description": "Whether the grid is drawn. Defaults to true."]),
                     "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid. Defaults to true."]),
@@ -1558,7 +1607,7 @@ public actor MCPAdapter {
                         "description": "A MULTIPLIER of spacing, not a distance — real snap distance is spacing × snap.",
                     ]),
                     "rotation": .object(["type": "number", "description": "Rotation in degrees."]),
-                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex."]),
+                    "color": .object(["type": "string", "description": "\"#RRGGBBAA\" or \"#RRGGBB\" hex. Literal: drawn identically in light and dark (grid colours never convert)."]),
                     "thickness": .object(["type": "number", "description": "Line thickness."]),
                     "visible": .object(["type": "boolean", "description": "Whether the grid is drawn."]),
                     "enabled": .object(["type": "boolean", "description": "Whether strokes snap to the grid."]),
@@ -1623,7 +1672,8 @@ public actor MCPAdapter {
             description: """
                 Sets a grid's pivot to an EXACT canvas coordinate — the programmatic \
                 equivalent of the app's tap-to-pick-origin gesture — so the lattice passes \
-                through (x, y): the offset is recomputed so the grid stays anchored there. \
+                through (canvasX, canvasY): the offset is recomputed so the grid stays \
+                anchored there. \
                 No snap — use snap_points first if you want a lattice point. Authored by a \
                 connected InfinitySketch device. gridNotFound if no grid has that id; \
                 unknownDoc if the document doesn't exist. \(writeToolCaveats)
@@ -1646,12 +1696,18 @@ public actor MCPAdapter {
                 candidate strokes that are not written to the document — use it to \
                 preview a stroke before committing it with draw_strokes, optionally \
                 composited over the document's real content to judge fit and alignment. \
-                Authored by a connected InfinitySketch device. Returns a PNG plus \
-                metadata: the covered rect, the scale actually used, the current \
-                appearance, the canvas contentSize, and — per grid — its id, thickness, \
+                Authored by a connected InfinitySketch device. Pass `appearance: "light"|"dark"` \
+                to render as though the device were showing that appearance, regardless of what \
+                it is actually showing — the default is the document's own (the last opener's \
+                device); two connected devices can be viewing in different modes, so render both \
+                to check your work in each. Returns a PNG plus \
+                metadata: the covered rect, the scale actually used, the appearance actually \
+                rendered, the canvas contentSize, and — per grid — its id, thickness, \
                 and each drawn/snap line family's id, lineAngleDeg and label. These grid \
                 and family ids are what snap_points' gridIds and transform_strokes' \
-                snapTo refer to. READ lineAngleDeg for a family's line direction, never \
+                snapTo refer to. Ephemeral `strokes`' `color` hexes are light-canonical like \
+                everywhere else on this surface — pass colorAppearance: "dark" if you picked \
+                them for the dark canvas. READ lineAngleDeg for a family's line direction, never \
                 infer it from `normal` — normal is PERPENDICULAR to the lines it \
                 describes ([1, 0] means VERTICAL lines, not horizontal). Only visible \
                 grids appear in the rendered image, but visible and enabled are \
@@ -1758,6 +1814,12 @@ public actor MCPAdapter {
                             metadata reports the scale actually used.
                             """,
                     ]),
+                    "appearance": .object([
+                        "type": "string",
+                        "enum": .array(["light", "dark"].map(Value.string)),
+                        "description": "Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each.",
+                    ]),
+                    "colorAppearance": colorAppearanceProperty,
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1793,7 +1855,8 @@ public actor MCPAdapter {
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasPathBounds, localToCanvasTransform, \
                 color, inkType, stampWidth, pointCount}`. NOTE there is no `canvasInkBounds` here \
-                — only list_strokes reports it.
+                — only list_strokes reports it. `color` is the stored LIGHT-CANONICAL hex; on a \
+                dark document what you SEE is its conversion, not this value.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1822,7 +1885,8 @@ public actor MCPAdapter {
                 Where could these points snap to? Returns CANDIDATES — it never moves \
                 anything, and it never decides for you. Each candidate is either a LINE \
                 (one grid family: it constrains ONE direction, so a horizontal wire can \
-                snap its y and keep its x) or an INTERSECTION of two non-parallel \
+                snap its y-coordinate and keep its x-coordinate) or an INTERSECTION of two \
+                non-parallel \
                 families, which MAY come from two DIFFERENT grids — the 20pt grid's \
                 vertical crossing the 5pt grid's horizontal is a real point. Every \
                 candidate names its parent grid(s): gridId, familyId, label, \
@@ -1887,9 +1951,9 @@ public actor MCPAdapter {
             description: """
                 Moves, scales and/or rotates strokes in place. The strokes keep their \
                 identity (ids), their points and their z-order — only their placement \
-                changes. translate and anchor are CANVAS coordinates: the same space \
-                get_strokes' points, list_strokes' bbox and render_sketch are quoted \
-                in. Scale and rotate act about anchor, which defaults to the \
+                changes. canvasTranslate and canvasAnchor are CANVAS coordinates: the same \
+                space get_strokes' points, list_strokes' bbox and render_sketch are quoted \
+                in. Scale and rotate act about canvasAnchor, which defaults to the \
                 centre of the ids' union bounding box. TO SNAP, pass snapToGrid: true, \
                 or snapTo, or both — EITHER ONE alone means "snap" (naming a target IS \
                 asking to snap), and the whole SET is then shifted rigidly (never \
@@ -1902,7 +1966,8 @@ public actor MCPAdapter {
                 the lines a human can see. Use snap_points first to see what's actually \
                 near your anchor, then pass snapTo to name the grid (and optionally which \
                 of its line families — one family constrains a single direction, e.g. a \
-                wire's y while its x stays put) you actually mean; with no enabled grid \
+                wire's y-coordinate while its x-coordinate stays put) you actually mean; \
+                with no enabled grid \
                 (and no snapTo), snapToGrid is a no-op. A snap alone, with no translate/ \
                 scale/rotate, is a legal request. \(writeToolCaveats)
                 """,
@@ -1977,6 +2042,44 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "restore_stroke_widths",
+            description: """
+                Takes the SCALE back off the ink of strokes that were scaled, leaving \
+                them exactly where they are on the canvas. Scaling a stroke (here or by \
+                the user dragging a selection) scales its INK THICKNESS along with its \
+                geometry, because the scale lives on the stroke's transform and \
+                PencilKit scales stamp size with it — so a shape scaled up by 3 is drawn \
+                with lines 3x fatter. This restores the drawn thickness while every \
+                point stays put; it is the same operation as the app's "Restore original \
+                stroke widths" menu item. Nothing else changes: ids, points, z-order, \
+                colour and ink all survive, and the stroke's width-edit history is left \
+                alone. AFTERWARDS the strokes' localToCanvasTransform (get_strokes) has \
+                changed — its scale is now 1, or it is identity for a stroke that was \
+                scaled unevenly — so re-read rather than reusing a cached one; \
+                canvasPoints and canvasPathBounds are unaffected. A stroke that carries \
+                no scale is LEFT ALONE and counted in the reply, not an error, and when \
+                that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply \
+                says "no change" and quotes no seq). stampWidth is not touched — to \
+                change the drawn thickness itself, use restyle_strokes. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "ids": .object([
+                        "type": "array",
+                        "description": """
+                            Composite stroke ids, as returned by list_strokes or \
+                            draw_strokes. Ids that carry no scale are accepted and \
+                            reported back as unchanged.
+                            """,
+                        "items": .object(["type": "string"]),
+                    ]),
+                ]),
+                "required": .array(["docId", "ids"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "restyle_strokes",
             description: """
                 Changes strokes' colour, width and/or ink in place; identity and \
@@ -1996,7 +2099,10 @@ public actor MCPAdapter {
                 value the user drew with is not recorded anywhere and cannot be \
                 recovered from the stroke (a colour-only restyle, and any stroke the \
                 user HAS width-edited, are unaffected). Note: `monoline` reads back as `pen` \
-                — PencilKit's archive format does not preserve it. \(writeToolCaveats)
+                — PencilKit's archive format does not preserve it. `color` is LIGHT-CANONICAL — \
+                pass colorAppearance: "dark" if you picked it for the dark canvas; the device \
+                converts it before storing, and the reply's storedColor reports what was \
+                actually stored. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2007,9 +2113,10 @@ public actor MCPAdapter {
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "colorAppearance": colorAppearanceProperty,
                     "color": .object([
                         "type": "string",
-                        "description": "#RRGGBB or #RRGGBBAA.",
+                        "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
                     "stampWidth": .object([
                         "type": "number",
@@ -2202,7 +2309,9 @@ public actor MCPAdapter {
                 never applied implicitly: you hold them, so a preview and its commit are the same \
                 numbers even if the user switches tools in between. `isInkingTool` is false for \
                 the eraser, lasso, or Bring to Front — nothing sensible to inherit, so use your \
-                own values.
+                own values. `color` is reported LIGHT-CANONICAL, whatever appearance the device \
+                is currently showing — copy it into draw_strokes/restyle_strokes verbatim, no \
+                colorAppearance needed.
 
                 TWO WIDTHS, and they are DIFFERENT NUMBERS. `stampWidth` is what the pen \
                 actually lays down — the same quantity list_strokes / get_strokes report and \
@@ -2230,6 +2339,8 @@ public actor MCPAdapter {
                 select_elements does the same thing but leaves a window where the stroke exists \
                 unselected; this is atomic. By default the user's selection rectangle is KEPT (you \
                 are drawing INTO it) — pass `keepRect: false` to shrink it to the new strokes. \
+                Stroke colours are light-canonical, same as draw_strokes — pass \
+                colorAppearance: "dark" if you picked them for the dark canvas. \
                 Requires an ACTIVE selection: noSelectionActive otherwise, userBusy mid-gesture. \
                 REQUIRES a connected `controlSelection` device.
                 """,
@@ -2242,6 +2353,7 @@ public actor MCPAdapter {
                         "description": "Strokes to draw; same item shape as draw_strokes.",
                         "items": .object(["type": "object"]),
                     ]),
+                    "colorAppearance": colorAppearanceProperty,
                     "keepRect": .object([
                         "type": "boolean",
                         "description": "Keep the user's selection rectangle. Defaults to true.",
@@ -2258,7 +2370,9 @@ public actor MCPAdapter {
                 (pen/pencil/marker/monoline). At least one is required; an omitted field is left \
                 alone. Unlike restyle_strokes (which edits document bytes and cannot refresh the \
                 canvas while a selection is open) this drives the app's own reink path, so the \
-                change appears immediately and lands as one undo step. noSelectionActive if \
+                change appears immediately and lands as one undo step. `color` is light-canonical \
+                — pass colorAppearance: "dark" if you picked it for the dark canvas. \
+                noSelectionActive if \
                 nothing is selected; userBusy mid-gesture. REQUIRES a connected \
                 `controlSelection` device.
                 """,
@@ -2266,7 +2380,8 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document id."]),
-                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA."]),
+                    "colorAppearance": colorAppearanceProperty,
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance."]),
                     "stampWidth": .object(["type": "number", "description": "Target peak STAMP width — the stroke's own ink size."]),
                     "inkType": .object([
                         "type": "string",
@@ -2610,8 +2725,14 @@ public actor MCPAdapter {
             ])),
     ]
 
+    /// The tool list exactly as `tools/list` serves it, strict schemas applied. Internal so schema
+    /// invariants can be asserted WITHOUT standing up a client — which is what keeps those checks
+    /// running on Linux and Windows, where the SDK has no SSE client transport and so
+    /// `MCPAdapterTests` is compiled out wholesale (`MCP_SSE_CLIENT`).
+    static var toolDefinitions: [Tool] { tools.map(strict) }
+
     private func handleListTools() async throws -> ListTools.Result {
-        ListTools.Result(tools: Self.tools.map(Self.strict))
+        ListTools.Result(tools: Self.toolDefinitions)
     }
 
     /// Declare `additionalProperties: false` on a tool's input schema.
@@ -2784,6 +2905,7 @@ public actor MCPAdapter {
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
+        case "restore_stroke_widths": return await callRestoreStrokeWidths(arguments)
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
         case "list_fonts": return await callListFonts(arguments)
@@ -2871,7 +2993,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -2912,8 +3034,70 @@ public actor MCPAdapter {
         }
     }
 
+    /// Reads the file `add_image`'s `path` names and returns its bytes, or the tool error that
+    /// says why it could not (spec `2026-08-11-agent-add-image-path-design.md`).
+    ///
+    /// `path` REPLACED a base64 `bytes` argument. The bytes made a round trip through the calling
+    /// agent's context — an agent reported that a 19 KB PNG became 25 000 characters it had to
+    /// transcribe by hand, and that its transcription is what corrupted the image. The server sits
+    /// next to the file; it can just read it.
+    ///
+    /// A RELATIVE path is refused rather than resolved against the server's working directory: the
+    /// caller cannot see that directory, so resolving would give a wrong answer that looks right.
+    enum ImageFileRead: Equatable {
+        case bytes(Data)
+        /// A tool-error reason, ready for `errorResult`.
+        case refusal(String)
+    }
+
+    static func readImageFile(at rawPath: String) -> ImageFileRead {
+        let path = NSString(string: rawPath).expandingTildeInPath
+        guard isAbsolutePath(path) else { return .refusal("imagePathNotAbsolute: \(rawPath)") }
+        let url = URL(fileURLWithPath: path)
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return .refusal("imageFileNotFound: \(path)")
+        }
+        guard !isDirectory.boolValue else { return .refusal("imageFileUnreadable: \(path) is a directory") }
+
+        // Check the size BEFORE reading, so a mistyped path at something enormous refuses instead
+        // of being loaded into memory to find out.
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int,
+           size > maxImageFileBytes {
+            return .refusal(
+                "imageTooLarge: \(path) is \(size / 1_000_000) MB, limit \(maxImageFileBytes / 1_000_000) MB")
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            return .refusal("imageFileUnreadable: \(path)")
+        }
+        guard !data.isEmpty else { return .refusal("imageFileEmpty: \(path)") }
+        guard data.count <= maxImageFileBytes else {
+            return .refusal(
+                "imageTooLarge: \(path) is \(data.count / 1_000_000) MB, limit \(maxImageFileBytes / 1_000_000) MB")
+        }
+
+        // Structural check, no decoding — see ImageContainer for why a decoder cannot do this.
+        if case .broken(let why) = ImageContainer.inspect(data) {
+            return .refusal("imageCorrupt: \(path) (\(why))")
+        }
+        return .bytes(data)
+    }
+
+    static let maxImageFileBytes = 64 * 1_000_000
+
+    /// This server runs on macOS, Linux AND Windows, so "absolute" is not just a leading slash:
+    /// a Windows path is `C:\…` or a `\\server\share` UNC.
+    static func isAbsolutePath(_ path: String) -> Bool {
+        if path.hasPrefix("/") || path.hasPrefix("\\") { return true }
+        let chars = Array(path)
+        return chars.count >= 3 && chars[0].isLetter && chars[1] == ":"
+            && (chars[2] == "\\" || chars[2] == "/")
+    }
+
     /// `add_image` (Task 2): relays an `addImage` device op — `{op, imageBytes
-    /// (base64, relayed verbatim), x, y, width?, height?, opacity?}`, present-only
+    /// (base64), canvasX, canvasY, canvasWidth?, canvasHeight?, opacity?}`, present-only
     /// optionals — through `broker.requestStrokeOp`, gated on the "authorImage"
     /// capability (a device that only authors strokes/text must not be picked
     /// for this — same reasoning as `callAddTextStyled`'s "authorText" gate).
@@ -2926,7 +3110,12 @@ public actor MCPAdapter {
     private func callAddImage(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
-            let bytesB64 = try Self.stringArg(arguments, "bytes")  // relay verbatim as base64
+            let path = try Self.stringArg(arguments, "path")
+            let imageBytes: Data
+            switch Self.readImageFile(at: path) {
+            case .bytes(let data): imageBytes = data
+            case .refusal(let reason): return Self.errorResult(reason)
+            }
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
             let width = try Self.optionalDoubleArg(arguments, "canvasWidth")
@@ -2937,8 +3126,10 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            // `imageBytes` is a whole FILE and travels as a bundle part — the spec is not chunked,
+            // so a photograph in it made a frame the device refuses (see `OpSpecBundle`).
             var envelope: [String: Value] = [
-                "op": .string("addImage"), "imageBytes": .string(bytesB64),
+                "op": .string("addImage"),
                 "canvasX": .double(x), "canvasY": .double(y),
             ]
             if let width { envelope["canvasWidth"] = .double(width) }
@@ -2956,7 +3147,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage")
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage",
+                    specParts: [.imageBytes: imageBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -2967,10 +3159,21 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 var summary = "added image to \(docId) at seq \(seq)"
+                // The device reports what it actually placed. `pixelWidth`/`pixelHeight` are the
+                // SOURCE image's own dimensions, which no other tool can give: list_images
+                // reports canvasBounds and never the pixels behind it, so without this an agent
+                // has no way to learn the aspect ratio and must render, look, and guess.
+                //
+                // Every value is a STRING, keeping `meta` a [String: String] on both sides of the
+                // wire — a new device against an old server still decodes, and a new server
+                // against an old device simply omits these lines. A typed struct would make a
+                // reply-only improvement force the two repos to deploy together.
                 if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
-                   let id = decoded["id"] {
-                    summary += "\nid: \(id)"
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta) {
+                    if let id = decoded["id"] { summary += "\nid: \(id)" }
+                    if let bounds = decoded["canvasBounds"] { summary += "\ncanvasBounds: [\(bounds)]" }
+                    if let w = decoded["pixelWidth"] { summary += "\npixelWidth: \(w)" }
+                    if let h = decoded["pixelHeight"] { summary += "\npixelHeight: \(h)" }
                 }
                 return summary
             }
@@ -3035,7 +3238,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3372,10 +3575,12 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            var envelope: [String: Value] = ["op": .string("draw"), "strokes": .array(strokes)]
+            if let value = arguments?["colorAppearance"], !value.isNull { envelope["colorAppearance"] = value }
+
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(
-                    Value.object(["op": .string("draw"), "strokes": .array(strokes)]))
+                spec = try JSONEncoder().encode(Value.object(envelope))
             } catch {
                 return Self.errorResult("invalidArguments")
             }
@@ -3423,6 +3628,11 @@ public actor MCPAdapter {
                     /// nothing. Absent entirely when no supplied name took over.
                     let displacedNames: [String]?
                     let clampedWidths: [Double]?
+                    /// What was actually STORED (light-canonical), one entry per created stroke,
+                    /// in order — present only when this call went through the dark door
+                    /// (colorAppearance: "dark"). Absent (not merely empty) for an ordinary
+                    /// light-space call, so an unrelated draw's reply stays unchanged.
+                    let storedColors: [String]?
                 }
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode(DrawMeta.self, from: meta) {
@@ -3456,6 +3666,11 @@ public actor MCPAdapter {
                         for taken in displaced where !taken.isEmpty {
                             summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
                         }
+                    }
+                    // Only present when colorAppearance: "dark" converted at least one colour —
+                    // what actually landed on disk, light-canonical, one entry per created stroke.
+                    if let stored = decoded.storedColors, !stored.isEmpty {
+                        summary += "\nstoredColors: \(stored.joined(separator: ", "))"
                     }
                 }
                 return summary
@@ -4167,7 +4382,7 @@ public actor MCPAdapter {
     /// one of them optional; see `callRenderSketch`.
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
-        "scale",
+        "scale", "appearance", "colorAppearance",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -4347,6 +4562,83 @@ public actor MCPAdapter {
         }
     }
 
+    /// The agent door onto the app's "Restore original stroke widths" menu item: factor
+    /// the scale out of the named strokes' transforms so their ink returns to the width
+    /// it was drawn at, with the canvas geometry unmoved.
+    ///
+    /// **A whole-set no-op writes NOTHING.** The device reports which ids it actually
+    /// changed (`restoredIds`), and when that is empty the returned bytes are discarded:
+    /// a write here would bump `seq` for every subscriber and spend the agent's one
+    /// `undo_last_edit` slot on an edit that changed nothing — and the app's own answer
+    /// to this state is a disabled menu item, not a document write. The counts are also
+    /// what makes the reply honest for a MIXED set, which is the common case when an
+    /// agent restores a whole shape and only some of it was ever scaled.
+    ///
+    /// An ABSENT or undecodable `meta` is treated as "everything was restored" and
+    /// written: the bytes are the device's own product, the write is CAS-guarded, and
+    /// silently dropping a real edit is far worse than a redundant one.
+    private func callRestoreStrokeWidths(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
+
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("restoreStrokeWidths"),
+                    "ids": .array(ids.map(Value.string)),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+
+            struct RestoreMeta: Decodable {
+                let restoredIds: [String]
+                let unchangedIds: [String]
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(RestoreMeta.self, from: $0) }
+            let restoredCount = meta?.restoredIds.count ?? ids.count
+            let unchangedCount = meta?.unchangedIds.count ?? 0
+
+            guard restoredCount > 0 else {
+                let plural = ids.count == 1 ? "" : "s"
+                return CallTool.Result(content: [.text(
+                    text: "no change: all \(ids.count) stroke\(plural) already carry the ink width "
+                        + "they were drawn with (none had a scale to factor out) — nothing was written",
+                    annotations: nil, _meta: nil)])
+            }
+
+            // expectedBytes is docBytes — the exact bytes relayed to the device, never a
+            // fresh re-read here, which would re-open the very window this guard closes.
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "restored \(restoredCount) of \(ids.count) stroke(s) at seq \(seq)"
+                if unchangedCount > 0 {
+                    summary += "; \(unchangedCount) had no scale to factor out"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callRestyleStrokes(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -4360,7 +4652,7 @@ public actor MCPAdapter {
                 "op": .string("restyle"),
                 "ids": .array(ids.map(Value.string)),
             ]
-            for name in ["color", "stampWidth", "inkType"] {
+            for name in ["color", "stampWidth", "inkType", "colorAppearance"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -4402,10 +4694,15 @@ public actor MCPAdapter {
                 /// estimate — a separate cause that can hold at the same time as the first.
                 let sourcePeakExpressible: Double
             }
-            struct RestyleMeta: Decodable { let widthNotes: [WidthNote]? }
-            let notes = out.meta
-                .flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }?
-                .widthNotes ?? []
+            struct RestyleMeta: Decodable {
+                let widthNotes: [WidthNote]?
+                /// What was actually STORED (light-canonical) — present only when this call went
+                /// through the dark door (colorAppearance: "dark") on an explicit `color`.
+                let storedColor: String?
+            }
+            let restyleMeta = out.meta.flatMap { try? JSONDecoder().decode(RestyleMeta.self, from: $0) }
+            let notes = restyleMeta?.widthNotes ?? []
+            let storedColor = restyleMeta?.storedColor
 
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
@@ -4439,6 +4736,9 @@ public actor MCPAdapter {
                             + "\(alsoRange), so the re-ink scales from a saturated estimate."
                     }
                     summary += " list_strokes reports what each stroke actually got."
+                }
+                if let storedColor {
+                    summary += "\nstoredColor: \(storedColor)"
                 }
                 return summary
             }
@@ -4679,6 +4979,7 @@ public actor MCPAdapter {
             }
             var envelope: [String: Value] = ["op": .string("drawSelection"), "strokes": .array(items)]
             if let keep = arguments?["keepRect"] { envelope["keepRect"] = keep }
+            if let ca = arguments?["colorAppearance"] { envelope["colorAppearance"] = ca }
             return await callSelectionOp(docId: docId, envelope: envelope)
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4694,6 +4995,9 @@ public actor MCPAdapter {
             if let c = arguments?["color"], case .string(let hex) = c { envelope["color"] = .string(hex) }
             if let w = arguments?["stampWidth"] { envelope["stampWidth"] = w }
             if let i = arguments?["inkType"], case .string(let ink) = i { envelope["inkType"] = .string(ink) }
+            if let ca = arguments?["colorAppearance"], case .string(let appearance) = ca {
+                envelope["colorAppearance"] = .string(appearance)
+            }
             return await callSelectionOp(docId: docId, envelope: envelope)
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -5039,10 +5343,11 @@ public actor MCPAdapter {
 
             let spec: Data
             do {
+                // `sourceBytes` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
+                // chunked (see `OpSpecBundle`).
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("mergeDocs"),
                     "prefer": .string(prefer),
-                    "sourceBytes": .string(sourceBytes.base64EncodedString()),
                 ]))
             } catch {
                 return Self.errorResult("invalidArguments")
@@ -5051,7 +5356,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "mergeDocs")
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "mergeDocs",
+                    specParts: [.sourceBytes: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5119,9 +5425,10 @@ public actor MCPAdapter {
             let count = strokeIds.count + textIds.count + imageIds.count
             let spec: Data
             do {
+                // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
+                // chunked (see `OpSpecBundle`).
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("copyElements"),
-                    "source": .string(sourceBytes.base64EncodedString()),
                     "strokeIds": .array(strokeIds.map(Value.string)),
                     "textIds": .array(textIds.map(Value.string)),
                     "imageIds": .array(imageIds.map(Value.string)),
@@ -5131,7 +5438,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements")
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements",
+                    specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5359,17 +5667,18 @@ public actor MCPAdapter {
     {
         let spec: Data
         do {
-            spec = try JSONEncoder().encode(Value.object([
-                "op": .string("revertMerge"),
-                "base": .string(base.base64EncodedString()),
-                "theirs": .string(theirs.base64EncodedString()),
-            ]))
+            // `base` and `theirs` are WHOLE DOCUMENTS and travel as bundle parts, not in the spec:
+            // the spec is not chunked, so two documents in it made one WebSocket frame the device
+            // refuses outright (see `OpSpecBundle`). The device splices them back before this op's
+            // handler decodes it, so `MergeDocs.revert` sees exactly the spec it always saw.
+            spec = try JSONEncoder().encode(Value.object(["op": .string("revertMerge")]))
         } catch { return .failed(Self.errorResult("invalidArguments")) }
 
         do {
             // `mine` rides as the request's docBytes, the shape every relayed op already uses.
             let out = try await broker.requestStrokeOp(docId: docId, docBytes: mine, spec: spec,
-                                                       capability: "mergeDocs")
+                                                       capability: "mergeDocs",
+                                                       specParts: [.base: base, .theirs: theirs])
             return .merged(out.bytes)
         } catch let error as DeviceCommandBroker.DeviceCommandError {
             return .failed(Self.strokeOpErrorResult(error))
@@ -5445,11 +5754,11 @@ public actor MCPAdapter {
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
+            var envelope: [String: Value] = ["op": .string("drawDots"), "dots": .array(dots)]
+            if let value = arguments?["colorAppearance"], !value.isNull { envelope["colorAppearance"] = value }
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("drawDots"), "dots": .array(dots),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(envelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
@@ -5466,6 +5775,12 @@ public actor MCPAdapter {
             struct DotMeta: Decodable {
                 let keys: [String]?
                 let clampedDiameters: [Double]?
+                /// What was actually STORED (light-canonical), one entry per created dot, in
+                /// order — present only when this call went through the dark door
+                /// (colorAppearance: "dark"). Reused verbatim from the underlying `draw` op's
+                /// meta, which `DotAuthoring.annotated` merges `clampedDiameters` onto without
+                /// disturbing.
+                let storedColors: [String]?
             }
             let meta = out.meta.flatMap { try? JSONDecoder().decode(DotMeta.self, from: $0) }
             return await submitAndRespond(
@@ -5477,6 +5792,9 @@ public actor MCPAdapter {
                         + clamped.map { String(format: "%g", $0) }.joined(separator: ", ")
                 }
                 if let keys = meta?.keys { reply += "\nids: " + keys.joined(separator: ", ") }
+                if let stored = meta?.storedColors, !stored.isEmpty {
+                    reply += "\nstoredColors: " + stored.joined(separator: ", ")
+                }
                 return reply
             }
         } catch let error as ArgumentError {
@@ -5500,7 +5818,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags"] {
+            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
@@ -5517,14 +5835,26 @@ public actor MCPAdapter {
             }
             // The device answers with `draw`'s meta, so the count comes from the keys it made —
             // and the caller should see it, since those strokes are the cost it just took on.
-            struct FillMeta: Decodable { let keys: [String]? }
-            let created = out.meta
-                .flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }?.keys?.count
+            struct FillMeta: Decodable {
+                let keys: [String]?
+                /// What was actually STORED (light-canonical), one entry per pass/border stroke,
+                /// in order — present only when this call went through the dark door
+                /// (colorAppearance: "dark"). `RegionFill.fillRegion` returns
+                /// `StrokeAuthoring.perform`'s meta wholesale, so this is the same field
+                /// `draw_strokes` reports, unmodified.
+                let storedColors: [String]?
+            }
+            let fillMeta = out.meta.flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }
+            let created = fillMeta?.keys?.count
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                guard let created else { return "filled the region in \(docId) at seq \(seq)" }
-                return "filled the region in \(docId) with \(created) stroke(s) at seq \(seq)"
+                var reply = created.map { "filled the region in \(docId) with \($0) stroke(s) at seq \(seq)" }
+                    ?? "filled the region in \(docId) at seq \(seq)"
+                if let stored = fillMeta?.storedColors, !stored.isEmpty {
+                    reply += "\nstoredColors: " + stored.joined(separator: ", ")
+                }
+                return reply
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

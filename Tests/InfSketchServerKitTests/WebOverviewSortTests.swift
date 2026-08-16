@@ -14,6 +14,12 @@ import Testing
         }
         // The thumbnail column has nothing to sort by and must stay inert.
         #expect(html.contains("<th></th>"))
+        // One mark span per sortable header: `render` writes into every one it finds
+        // by `th.querySelector(".sortmark")`, so a header missing its span throws
+        // there and takes the whole table down. (The span leads on right-aligned
+        // headers and trails on the others — either way there is exactly one.)
+        #expect(html.components(separatedBy: "class=\"sortmark\"").count
+            == html.components(separatedBy: "data-sort=").count)
     }
 
     @Test func theHeadersAreReachableWithoutAMouse() {
@@ -25,6 +31,33 @@ import Testing
         // The script parses whether or not this interpolation survives, so pin
         // the embed itself (same reasoning as the viewer page's viewportJS).
         #expect(html.contains(WebUI.tableSortJS))
+    }
+
+    @Test func thePageOpensAtTheDefaultSort() {
+        // Argument-less: whatever DEFAULT_SORT is, that is what the page starts at.
+        // Passing [] here would open unsorted with every JS test still green.
+        #expect(html.contains("makeTableSort();"))
+    }
+
+    @Test func theSortIsNotPersistedAcrossAReload() {
+        // "A reload restores the default" is a property of storing the sort NOWHERE
+        // but the page's own variable — there is nothing else to assert against.
+        // The dot is what makes these USES rather than the word in a comment; the
+        // viewer page persists its own preferences this way, this one must not.
+        for store in ["localStorage.", "sessionStorage.", "document.cookie", "indexedDB."] {
+            #expect(!html.contains(store), "the sort must not survive a reload via \(store)")
+        }
+    }
+
+    @Test func theSortMarkSitsInAFixedWidthSlot() throws {
+        // The mark grows and shrinks with the sort ("" -> ▲ -> ▼2) and the table is
+        // auto-layout, so without a fixed box a click re-measures the column under it
+        // and the whole table shifts. Pin the two declarations that make it fixed.
+        let start = try #require(html.range(of: ".sortmark {"))
+        let end = try #require(html.range(of: "}", range: start.upperBound..<html.endIndex))
+        let rule = String(html[start.lowerBound..<end.upperBound])
+        #expect(rule.contains("display: inline-block"), "not a box: \(rule)")
+        #expect(rule.contains("width: "), "no reserved width: \(rule)")
     }
 }
 
@@ -63,9 +96,12 @@ extension WebOverviewSortTests {
           { name: "gamma", sizeBytes: 50,  seq: 12,   subscriberCount: 2 },
           { name: "delta", sizeBytes: 50,  seq: 7,    subscriberCount: 1 }
         ];
-        var s = makeTableSort();
+        // [] — the click-cycle tests drive every state from a known unsorted start,
+        // so they keep testing the cycle and not whatever the default happens to be.
+        var s = makeTableSort([]);
         function click(col, shift) { s.toggle(col, !!shift); }
-        function order() { return s.apply(DOCS).map(function (d) { return d.name; }).join(","); }
+        function names(t) { return t.apply(DOCS).map(function (d) { return d.name; }).join(","); }
+        function order() { return names(s); }
         """)
         return ctx
     }
@@ -152,11 +188,30 @@ extension WebOverviewSortTests {
         #expect(order(ctx).contains("gamma,delta"))
     }
 
+    @Test func theDefaultIsSubscribersDescendingThenName() {
+        // The table opens on who is being looked at, then alphabetical: gamma has 2
+        // subscribers, beta and delta tie at 1 and are broken by name, and offline
+        // Alpha has none at all, which sorts last in both directions.
+        let ctx = makeSorter()
+        #expect(eval(ctx, "JSON.stringify(makeTableSort().keys)")
+            == #"[{"column":"subscribers","dir":-1},{"column":"name","dir":1}]"#)
+        #expect(eval(ctx, "names(makeTableSort())") == "gamma,beta,delta,Alpha")
+    }
+
+    @Test func aFreshSorterCannotInheritAnEarlierOnesClicks() {
+        // `toggle` mutates its key objects in place, so a DEFAULT_SORT handed out by
+        // reference would let one page's click rewrite the default for the next.
+        let ctx = makeSorter()
+        ctx.evaluateScript("var a = makeTableSort(); a.toggle('name'); a.toggle('subscribers', true);")
+        #expect(eval(ctx, "JSON.stringify(makeTableSort().keys)")
+            == #"[{"column":"subscribers","dir":-1},{"column":"name","dir":1}]"#)
+    }
+
     @Test func namesSortCaseInsensitivelyAndNumerically() {
         let ctx = makeSorter()
         #expect(eval(ctx, """
         (function () {
-          var t = makeTableSort();
+          var t = makeTableSort([]);
           t.toggle("name", false);
           return t.apply([{ name: "Doc 10" }, { name: "Doc 9" }, { name: "doc 2" }])
                   .map(function (d) { return d.name; }).join(",");

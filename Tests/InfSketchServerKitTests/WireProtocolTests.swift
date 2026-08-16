@@ -22,7 +22,11 @@ import InfSketchWire
     /// This test earning its keep is not hypothetical: the delete work added both messages and
     /// left the version at 2, and this is what caught it.
     @Test func theVersionIsBumpedForEveryWireAddition() {
-        #expect(WireProtocol.version == 9)
+        /// v11 (2026-08-15): an op-spec's bulk fields (whole documents, an image file) moved OUT of
+        /// `spec` and into the chunked payload as an `OpSpecBundle`. The message shape did not
+        /// change, so nothing would reject a stale peer — it would read the bundle as a document
+        /// and hand an op garbage, which is precisely why the version had to move.
+        #expect(WireProtocol.version == 11)
     }
 
     @Test func clientMessagesRoundTrip() throws {
