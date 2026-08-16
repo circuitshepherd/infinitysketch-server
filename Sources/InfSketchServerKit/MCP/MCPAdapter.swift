@@ -3072,9 +3072,9 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let path = try Self.stringArg(arguments, "path")
-            let bytesB64: String
+            let imageBytes: Data
             switch Self.readImageFile(at: path) {
-            case .bytes(let data): bytesB64 = data.base64EncodedString()
+            case .bytes(let data): imageBytes = data
             case .refusal(let reason): return Self.errorResult(reason)
             }
             let x = try Self.doubleArg(arguments, "canvasX")
@@ -3087,8 +3087,10 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            // `imageBytes` is a whole FILE and travels as a bundle part — the spec is not chunked,
+            // so a photograph in it made a frame the device refuses (see `OpSpecBundle`).
             var envelope: [String: Value] = [
-                "op": .string("addImage"), "imageBytes": .string(bytesB64),
+                "op": .string("addImage"),
                 "canvasX": .double(x), "canvasY": .double(y),
             ]
             if let width { envelope["canvasWidth"] = .double(width) }
@@ -3106,7 +3108,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage")
+                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage",
+                    specParts: [.imageBytes: imageBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5224,10 +5227,11 @@ public actor MCPAdapter {
 
             let spec: Data
             do {
+                // `sourceBytes` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
+                // chunked (see `OpSpecBundle`).
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("mergeDocs"),
                     "prefer": .string(prefer),
-                    "sourceBytes": .string(sourceBytes.base64EncodedString()),
                 ]))
             } catch {
                 return Self.errorResult("invalidArguments")
@@ -5236,7 +5240,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "mergeDocs")
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "mergeDocs",
+                    specParts: [.sourceBytes: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5304,9 +5309,10 @@ public actor MCPAdapter {
             let count = strokeIds.count + textIds.count + imageIds.count
             let spec: Data
             do {
+                // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
+                // chunked (see `OpSpecBundle`).
                 spec = try JSONEncoder().encode(Value.object([
                     "op": .string("copyElements"),
-                    "source": .string(sourceBytes.base64EncodedString()),
                     "strokeIds": .array(strokeIds.map(Value.string)),
                     "textIds": .array(textIds.map(Value.string)),
                     "imageIds": .array(imageIds.map(Value.string)),
@@ -5316,7 +5322,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements")
+                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements",
+                    specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5544,17 +5551,18 @@ public actor MCPAdapter {
     {
         let spec: Data
         do {
-            spec = try JSONEncoder().encode(Value.object([
-                "op": .string("revertMerge"),
-                "base": .string(base.base64EncodedString()),
-                "theirs": .string(theirs.base64EncodedString()),
-            ]))
+            // `base` and `theirs` are WHOLE DOCUMENTS and travel as bundle parts, not in the spec:
+            // the spec is not chunked, so two documents in it made one WebSocket frame the device
+            // refuses outright (see `OpSpecBundle`). The device splices them back before this op's
+            // handler decodes it, so `MergeDocs.revert` sees exactly the spec it always saw.
+            spec = try JSONEncoder().encode(Value.object(["op": .string("revertMerge")]))
         } catch { return .failed(Self.errorResult("invalidArguments")) }
 
         do {
             // `mine` rides as the request's docBytes, the shape every relayed op already uses.
             let out = try await broker.requestStrokeOp(docId: docId, docBytes: mine, spec: spec,
-                                                       capability: "mergeDocs")
+                                                       capability: "mergeDocs",
+                                                       specParts: [.base: base, .theirs: theirs])
             return .merged(out.bytes)
         } catch let error as DeviceCommandBroker.DeviceCommandError {
             return .failed(Self.strokeOpErrorResult(error))

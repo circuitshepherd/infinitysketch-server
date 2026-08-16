@@ -193,12 +193,21 @@ public actor DeviceCommandBroker {
     /// request, and vice versa. Both ride the same `strokeOpRequest`/
     /// `strokeOpReply` wire messages and the same per-docId in-flight guard;
     /// only the capability used to pick a connection differs.
+    ///
+    /// `specParts` are op-spec fields too big to sit IN the spec. The spec rides inline in the
+    /// message's JSON text frame — `TransferSender` chunks only `bulkBytes`, which is `payload` —
+    /// so a whole document base64'd into a spec produced a single frame of ~3.56x the document
+    /// size, past the 1 MiB a `URLSessionWebSocketTask` will receive. Handing them here instead
+    /// puts them in the payload, through the chunker, and the device splices them back into the
+    /// spec before any op handler sees it (`OpSpecBundle`).
     public func requestStrokeOp(
-        docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes"
+        docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes",
+        specParts: [OpSpecBundleWire.Field: Data] = [:]
     ) async throws -> StrokeOpReply {
         do {
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
-                                          capability: capability, allowStripping: true)
+                                          capability: capability, specParts: specParts,
+                                          allowStripping: true)
         } catch DeviceCommandError.deviceFailed(let reason)
             where reason.hasPrefix(BlobOmissionWire.cannotReconstructRequestReason) {
             // The device lost its copy (relaunch, eviction) or the ledger drifted past it — a
@@ -207,12 +216,14 @@ public actor DeviceCommandBroker {
             // genuine device failure and surfaces normally.
             forgetSentDoc(docId: docId)
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
-                                          capability: capability, allowStripping: false)
+                                          capability: capability, specParts: specParts,
+                                          allowStripping: false)
         }
     }
 
     private func sendStrokeOp(
-        docId: String, docBytes: Data, spec: Data, capability: String, allowStripping: Bool
+        docId: String, docBytes: Data, spec: Data, capability: String,
+        specParts: [OpSpecBundleWire.Field: Data], allowStripping: Bool
     ) async throws -> StrokeOpReply {
         return try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
                                         sentBytes: docBytes) { broker, connection, requestId in
@@ -221,9 +232,17 @@ public actor DeviceCommandBroker {
             // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
             // the device's stripped REPLY is spliced back from (M2), and the device replies
             // against the whole content it reconstructs, never against what rode the wire.
-            let payload = broker.requestPayload(for: connection, requestId: requestId,
+            var payload = broker.requestPayload(for: connection, requestId: requestId,
                                                 docId: docId, docBytes: docBytes,
                                                 allowStripping: allowStripping)
+            // A strict WRAPPER around whatever the document payload already was, so the blob
+            // omission above is unchanged and simply travels inside — the device unwraps this,
+            // then resolves `primary` by its own kind exactly as before.
+            if !specParts.isEmpty {
+                let bundle = OpSpecBundle(primary: payload.bytes, primaryKind: payload.kind,
+                                          parts: specParts)
+                payload = (bundle.encoded(), OpSpecBundleWire.kind)
+            }
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
                                              payload: .inline(payload.bytes), spec: spec,
                                              payloadKind: payload.kind))
