@@ -7,7 +7,8 @@ an [MCP](https://modelcontextprotocol.io) endpoint.
 
 A cross-platform Swift command-line application: **macOS** and **Linux** are tested on every commit,
 and **Windows** builds and passes the full suite natively (verified 2026-08-09 on Windows 11 with
-Swift 6.3.3 — see [Windows](#windows) below).
+Swift 6.3.3). Windows users do not need a toolchain at all — there is a
+[ready-to-run download](#windows).
 
 ## What it does
 
@@ -45,11 +46,41 @@ days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a br
 
 ### Windows
 
-Install [Swift for Windows](https://www.swift.org/install/windows/) (`winget install Swift.Toolchain`)
-**and** Visual Studio 2022 with the *Desktop development with C++* workload — Swift links through
-MSVC's `link.exe`, and without it `swift build` fails with *"toolchain is invalid: could not find CLI
-tool `link`"*. Build from a **x64 Native Tools Command Prompt for VS 2022** (or run `vcvars64.bat`
-first) so that environment is present.
+**Don't build it — download it.** Grab the `infsketch-server-<version>-windows-x86_64.zip` from
+[Releases](https://github.com/circuitshepherd/infinitysketch-server/releases), unzip, and run
+`infsketch-server.exe`. No Swift, no Visual Studio, no Developer Mode, nothing to install: the
+Swift runtime ships in the folder beside the executable. Keep the `.dll` files next to the `.exe`.
+
+Two things to expect the first time. SmartScreen warns about an unsigned executable — *More info*
+→ *Run anyway*. And the QR code needs a terminal that renders ANSI colour; Windows Terminal does,
+and the server turns on virtual-terminal processing itself so the classic console works too (if
+you see escape sequences as literal text, the code on screen will not scan).
+
+If it cannot start — port 8080 already taken is the usual reason — the window **stays open** and
+says so, rather than flashing and closing with the error unread.
+
+#### Building from source on Windows
+
+Only needed if you are developing the server. Install
+[Swift for Windows](https://www.swift.org/install/windows/) (`winget install Swift.Toolchain`) and
+Visual Studio 2022 with the *Desktop development with C++* workload — Swift links through MSVC's
+`link.exe`. A plain PowerShell is fine: Swift locates the linker itself, and the *x64 Native Tools*
+prompt is **not** required (an earlier version of this file said it was; measured false on 6.3.3,
+where a from-scratch build succeeds with `link.exe` absent from `PATH`).
+
+**Turn on Developer Mode first** (Settings → System → For developers). Without it the dependency
+checkout fails outright with *"unable to create symlink … Permission denied"* — two dependencies
+(swift-nio, swift-async-algorithms) contain symlinks, and Windows refuses to create those
+unprivileged. Note that a machine-wide `core.symlinks = false` does **not** protect you: SwiftPM
+force-writes `core.symlinks = true` into every dependency checkout, overriding it. If you cannot
+enable Developer Mode, override it for the session instead — environment config outranks repo
+config:
+
+```pwsh
+$env:GIT_CONFIG_COUNT = 1
+$env:GIT_CONFIG_KEY_0 = "core.symlinks"
+$env:GIT_CONFIG_VALUE_0 = "false"
+```
 
 ```pwsh
 git clone https://gitlab.com/pepi.woess/infinitysketch-server.git
@@ -57,17 +88,10 @@ cd infinitysketch-server
 swift run infsketch-server --docs $env:USERPROFILE\infsketch-docs
 ```
 
-Three Windows-specific things worth knowing:
-
-- **`~` is not expanded by PowerShell**, so `--docs ~/infsketch-docs` creates a directory literally
-  named `~`. Use `$env:USERPROFILE\...` as above.
-- **Turn on Developer Mode** (Settings → System → For developers) if you hit *"unable to create
-  symlink … Permission denied"* while dependencies are checked out. Windows needs it to create
-  symlinks unprivileged; without it SwiftPM also cannot create its `.build\debug` shortcut, and the
-  built binaries are under `.build\x86_64-unknown-windows-msvc\debug\` instead.
-- **The QR code needs a terminal that renders ANSI colour.** Windows Terminal does; the server also
-  turns on virtual-terminal processing itself, so the classic console works too. If you ever see
-  escape sequences as literal text, the code on screen will not scan.
+Two more Windows notes: **`~` is not expanded by PowerShell**, so `--docs ~/infsketch-docs` creates
+a directory literally named `~` — use `$env:USERPROFILE\...` as above; and without Developer Mode
+SwiftPM cannot create its `.build\debug` shortcut, so built binaries are under
+`.build\x86_64-unknown-windows-msvc\debug\` instead.
 
 ## App compatibility
 
@@ -134,7 +158,31 @@ beside the dependency that causes it. It is written as a POSITIVE list of the pl
 the capability, because it used to say `!os(Linux)` — naming the one platform then known to lack it
 — and Windows silently fell on the wrong side of that.
 
-Windows is built by `.github/workflows/windows.yml` on the GitHub mirror (inert on GitLab).
+Windows is built by `.github/workflows/windows.yml` on the GitHub mirror (inert on GitLab). That
+workflow also builds the self-contained release package on **every push** (uploaded as a build
+artifact) and attaches it to the GitHub Release for a `v*` tag.
+
+To build the package by hand:
+
+```pwsh
+.\scripts\package-windows.ps1              # version from `git describe`
+.\scripts\package-windows.ps1 -Version 1.0.0
+```
+
+It writes `dist/infsketch-server-<version>-windows-x86_64{,.zip}` (~32 MB zipped) and then
+**launches the packaged executable with `PATH` stripped to the system directories**. That
+verification is the point of the script rather than a nicety: the build machine has Swift
+installed, so an incomplete package finds the runtime through `PATH` and works perfectly there
+while failing on every user's machine. It is also why the script copies *every* DLL from the
+redistributable runtime instead of the ones the executable imports — `_FoundationICU.dll` is loaded
+transitively and appears in no import table, and a package built from the import table alone dies
+at startup.
+
+The single-executable alternative is not available: `--static-swift-stdlib` is accepted and
+silently ignored on Windows, `-Xswiftc -static-stdlib` fails with *"unable to load standard
+library"*, and the static runtime that does ship (in `WindowsExperimental.sdk`) cannot be reached
+from SwiftPM — pointing `SDKROOT` at it breaks manifest compilation. Revisit when swift.org
+publishes a Windows static Swift SDK as it already does for Linux and WebAssembly.
 
 Targets (`Package.swift`):
 

@@ -13,17 +13,63 @@ var docsPath = "./docs"
 var openBrowser = true
 var telemetryPath: String?
 
+/// True when this process created the console it is printing to — i.e. it was double-clicked from
+/// Explorer rather than started from a terminal that already existed.
+///
+/// `GetConsoleProcessList` reports how many processes are attached to this console. Alone means the
+/// console was made for us and DIES WITH US, taking whatever we just printed with it. Started from
+/// PowerShell or cmd the shell is attached too, so the count is at least 2 and the window outlives
+/// the process — nothing needs to change there.
+///
+/// Returns 0 when there is no console at all (a service, a redirect), which reads as false: there
+/// is no window to hold open and nothing to wait for.
+func ownsItsConsole() -> Bool {
+#if os(Windows)
+    var pids: [DWORD] = [0]
+    return GetConsoleProcessList(&pids, 1) == 1
+#else
+    return false
+#endif
+}
+
+/// Print why we are stopping and exit non-zero — holding the window open first if closing it would
+/// destroy the message.
+///
+/// WHY: a double-clicked executable whose bind fails printed its error and vanished in 2.2 seconds
+/// (measured 2026-08-10, port already in use). The user sees a window flash and nothing else, which
+/// is indistinguishable from the program doing nothing at all — on the distribution path that
+/// exists specifically to make this easy for people without a terminal.
+///
+/// The pause is gated on OWNING the console, so a terminal run, a script and CI are all untouched;
+/// gating on "is Windows" alone would hang every unattended run forever. Deliberately only on the
+/// FAILURE paths: quitting with `q` or Ctrl-C is something the user asked for and has nothing to
+/// read.
+func die(_ message: String) -> Never {
+    print(message)
+    fflush(nil)
+    if ownsItsConsole() {
+        // The reader thread may have left the console in raw mode; `atexit` would put it back, but
+        // not until after the wait below. Nil-guarded, so this is a no-op on the early paths that
+        // run before raw mode is ever entered.
+        restoreTerminalSettings()
+        print("\nPress Enter to close this window.")
+        fflush(nil)
+        _ = readLine()
+    }
+    exit(1)
+}
+
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
     switch argument {
     case "--port":
         guard let value = arguments.next().flatMap({ UInt16($0) }) else {
-            print("--port requires a number"); exit(1)
+            die("--port requires a number")
         }
         port = value
     case "--docs":
         guard let value = arguments.next() else {
-            print("--docs requires a path"); exit(1)
+            die("--docs requires a path")
         }
         docsPath = value
     case "--no-open":
@@ -35,7 +81,7 @@ while let argument = arguments.next() {
         // A path is REQUIRED rather than defaulted: this writes megabytes over a long session, and
         // where that landed must not be something the operator has to go looking for.
         guard let value = arguments.next() else {
-            print("--telemetry requires a path"); exit(1)
+            die("--telemetry requires a path")
         }
         telemetryPath = value
     case "--verbose":
@@ -45,9 +91,11 @@ while let argument = arguments.next() {
         // e2e gates grep.
         ServerLog.isVerbose = true
     default:
-        print("usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
-              + " [--telemetry FILE]")
-        exit(argument == "--help" ? 0 : 1)
+        let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
+            + " [--telemetry FILE]"
+        // `--help` is a request, not a failure: it exits 0 and never holds the window.
+        if argument == "--help" { print(usage); exit(0) }
+        die(usage)
     }
 }
 
@@ -55,8 +103,7 @@ let docsDirectory = URL(fileURLWithPath: docsPath, isDirectory: true)
 do {
     try FileManager.default.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
 } catch {
-    print("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
-    exit(1)
+    die("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
 }
 
 if let telemetryPath {
@@ -235,8 +282,7 @@ let serverTask = Task {
 // FlyingFox's 5: `serverFailure` already holds the real reason by then, and it is what decides.
 let listening = (try? await server.waitUntilListening(timeout: 2)) != nil
 if let failure = serverFailure {
-    print("infsketch-server stopped: \(failure)")
-    exit(1)
+    die(StartupFailure.describe("\(failure)", port: port))
 }
 
 let localURL = "http://localhost:\(port)/"
@@ -395,6 +441,5 @@ if keyReadingIsPossible() {
 // runs them, and the message is better than a stack trace.
 await serverTask.value
 if let failure = serverFailure {
-    print("infsketch-server stopped: \(failure)")
-    exit(1)
+    die(StartupFailure.describe("\(failure)", port: port))
 }
