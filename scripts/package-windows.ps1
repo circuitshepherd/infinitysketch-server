@@ -99,20 +99,21 @@ if (-not $SkipBuild) {
     Write-Step "Skipping build (-SkipBuild)"
 }
 
-# A resolve on Windows REWRITES Package.resolved destructively: it drops every pin that exists only
-# as an Apple-platform transitive dependency of `eventsource` (all of swift-nio, async-http-client,
-# swift-certificates, ... -- measured 25 pins down to 11). Committing that silently unpins them for
-# macOS and Linux, which is the opposite of what a lockfile is for.
+# Packaging must not be what changes the lockfile: this script builds, so a resolve can rewrite the
+# file underneath it, and a release whose pins moved as a side effect of packaging is a release
+# nobody chose. Restore the committed copy and carry on.
 #
 # Restored from GIT, not from a snapshot taken when this script started, and that distinction is
 # the whole point: ANY SwiftPM command re-resolves, so by the time packaging runs the file may
-# ALREADY have been clobbered by an earlier `swift build` or `swift test` in the same session. A
-# snapshot-and-restore guard was written first and preserved exactly that damage -- it faithfully
-# put back the broken 11-pin file it had been handed. `git` holds the only copy known to be right.
+# ALREADY have been rewritten by an earlier `swift build` or `swift test` in the same session -- a
+# snapshot-and-restore guard was written first and faithfully put back whatever it had been handed.
 #
-# Safe to do unconditionally on Windows because a re-resolve here is ALWAYS wrong: a genuine
-# dependency change has to be resolved on macOS, where the Apple-only branch of the graph is
-# visible. Outside a git checkout there is nothing to compare against and the check is skipped.
+# NOT a Windows-specific rule, though it was written believing it was (measured 2026-08-16 on
+# macOS: a plain `swift build` rewrites the file there identically). What a resolve drops are pins
+# for packages that have LEFT the dependency graph -- from a clean clone SwiftPM checks out exactly
+# the pins the lockfile now carries, on macOS and Linux alike -- so the drop is correct and this
+# restore is only about WHERE a lockfile change is allowed to come from: a deliberate commit, never
+# a build. Outside a git checkout there is nothing to compare against and the check is skipped.
 Write-Step "Checking Package.resolved"
 
 $resolvedPath = Join-Path $repoRoot "Package.resolved"
@@ -122,9 +123,9 @@ if ($LASTEXITCODE -eq 0) {
     if ($dirty) {
         git -C $repoRoot checkout -- Package.resolved
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  RESTORED from git - a resolve had rewritten it (a Windows resolve drops Apple-only transitive pins)" -ForegroundColor Yellow
+            Write-Host "  RESTORED from git - a resolve had rewritten it during this run" -ForegroundColor Yellow
         } else {
-            Fail "Package.resolved was rewritten by a resolve and could not be restored from git. Do NOT commit it: run ``git checkout -- Package.resolved``."
+            Fail "Package.resolved was rewritten by a resolve and could not be restored from git. Packaging must not change it as a side effect: run ``git checkout -- Package.resolved``, or commit the change deliberately if you meant it."
         }
     } else {
         Write-Host "  unmodified"
