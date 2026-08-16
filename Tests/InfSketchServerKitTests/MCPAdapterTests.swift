@@ -419,9 +419,19 @@ private actor FakeStrokeOpDevice {
     private func pumpLoop() async {
         while true {
             guard let message = try? await Self.receiveOne(ws) else { return }
-            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, _) = message else { continue }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, let kind) = message else { continue }
+            // The real device does exactly this, in `ServerMirror.resolveAndAnswerStrokeOpRequest`:
+            // an op-spec's bulk fields ride the chunked PAYLOAD and are spliced back into the spec
+            // before any handler sees it. Resolving it here is what lets every assertion below
+            // keep asserting the op CONTRACT rather than the transport's shape.
+            var docBytes = payload.inlineData ?? Data()
+            var resolvedSpec = spec
+            if kind == OpSpecBundleWire.kind, let bundle = try? OpSpecBundle(encoded: docBytes) {
+                docBytes = bundle.primary
+                resolvedSpec = (try? bundle.specRestoringParts(into: spec)) ?? spec
+            }
             receivedRequests.append(ReceivedRequest(
-                requestId: requestId, docId: docId, docBytes: payload.inlineData ?? Data(), spec: spec))
+                requestId: requestId, docId: docId, docBytes: docBytes, spec: resolvedSpec))
             switch autoReply {
             case .bytes(let bytes):
                 try? await ws.send(.string(ClientMessage.strokeOpReply(

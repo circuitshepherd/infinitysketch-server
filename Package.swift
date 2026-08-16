@@ -81,6 +81,14 @@ let package = Package(
                 .define("MCP_SSE_CLIENT", .when(platforms: [
                     .macOS, .iOS, .tvOS, .watchOS, .visionOS, .macCatalyst,
                 ])),
+                // `URLSessionWebSocketTask` — Foundation on Apple platforms has it;
+                // swift-corelibs-foundation does not, on Linux OR Windows. A test that drives a
+                // WebSocket client the way the APP does (the 1 MiB `maximumMessageSize` default is
+                // the whole subject of `LargeOpSpecFrameRepro`) can only compile where the type
+                // exists. Written as a POSITIVE platform list for the reason above it.
+                .define("URLSESSION_WEBSOCKET", .when(platforms: [
+                    .macOS, .iOS, .tvOS, .watchOS, .visionOS, .macCatalyst,
+                ])),
             ]
         ),
     ]

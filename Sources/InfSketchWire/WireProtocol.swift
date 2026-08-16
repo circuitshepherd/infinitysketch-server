@@ -17,7 +17,11 @@ public enum WireProtocol {
     /// diagnosable cause, arriving arbitrarily long after the upgrade.
     ///
     /// 10: op-spec envelopes gained colorAppearance and the render spec gained appearance.
-    public static let version = 10
+    // v11: op-spec bulk fields moved out of `spec` and into the chunked payload (`OpSpecBundle`).
+    // The message SHAPE is unchanged, so nothing here would reject an older peer — but an older
+    // app would read an `opBundle` payload as a document and hand an op garbage, so the exact
+    // equality gate is what forces app and server to deploy together.
+    public static let version = 11
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
