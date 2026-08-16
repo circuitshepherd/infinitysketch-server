@@ -19,18 +19,24 @@ on: [push, pull_request, workflow_dispatch]
 # job had never run, so the pin was picked rather than verified, and the DLLs it would have shipped
 # to users came from a toolchain the suite had never been exercised against.
 env:
-  SWIFT_BRANCH: swift-6.3.3-release
-  SWIFT_TAG: 6.3.3-RELEASE
+  SWIFT_VERSION: swift-6.3.3-release
+  SWIFT_BUILD: 6.3.3-RELEASE
 
+# `gha-setup-swift` is pinned to a tag THAT EXISTS, which sounds too obvious to write down: it read
+# `@v3` from the day this file was written until 2026-08-16, and that action has never published a
+# v3 -- its tags run v0.0.1 to v0.4.0. Every run died in 6 seconds on `unable to resolve action`,
+# before checkout, which is why nothing here had ever been exercised. An unresolvable action fails
+# the WHOLE job at set-up, so a bad pin cannot be caught by anything downstream of it. `branch`/
+# `tag` were renamed `swift-version`/`swift-build` (the old names still work, deprecated).
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: compnerd/gha-setup-swift@v3
+      - uses: compnerd/gha-setup-swift@v0.4.0
         with:
-          branch: ${{ env.SWIFT_BRANCH }}
-          tag: ${{ env.SWIFT_TAG }}
+          swift-version: ${{ env.SWIFT_VERSION }}
+          swift-build: ${{ env.SWIFT_BUILD }}
       # The MSVC environment is what supplies `link.exe`; without it the toolchain reports itself
       # invalid before compiling anything.
       - uses: ilammy/msvc-dev-cmd@v1
@@ -51,10 +57,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0        # scripts/package-windows.ps1 derives the version from git describe
-      - uses: compnerd/gha-setup-swift@v3
+      - uses: compnerd/gha-setup-swift@v0.4.0
         with:
-          branch: ${{ env.SWIFT_BRANCH }}
-          tag: ${{ env.SWIFT_TAG }}
+          swift-version: ${{ env.SWIFT_VERSION }}
+          swift-build: ${{ env.SWIFT_BUILD }}
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Build the Windows package
