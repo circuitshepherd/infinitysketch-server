@@ -66,4 +66,47 @@ import Testing
         DocumentSession.report("ServerLogTestsDoc: loud")
         #expect(captured.lines.contains("[blob-omission] ServerLogTestsDoc: loud"))
     }
+
+    /// FlyingFox's own lines obey the same gate. Its default logger prints to stdout on every
+    /// non-Apple platform, so before this the quiet console was Apple-only — invisible to everyone
+    /// developing on a Mac, and reported by the first user to double-click the Windows release.
+    @Test func theHttpLayersDiagnosticsObeyTheVerboseGate() {
+        let originalFlag = ServerLog.isVerbose
+        let originalSink = ServerLog.verboseSink
+        defer { ServerLog.isVerbose = originalFlag; ServerLog.verboseSink = originalSink }
+
+        let captured = Capture()
+        ServerLog.verboseSink = { captured.append($0) }
+        let logging = ServerLogHTTPLogging()
+
+        ServerLog.isVerbose = false
+        logging.logDebug("http-test-debug-dropped")
+        logging.logInfo("http-test-info-dropped")
+        logging.logWarning("http-test-warning-dropped")
+        #expect(!captured.lines.contains { $0.contains("http-test-debug-dropped") })
+        #expect(!captured.lines.contains { $0.contains("http-test-info-dropped") })
+        #expect(!captured.lines.contains { $0.contains("http-test-warning-dropped") })
+
+        ServerLog.isVerbose = true
+        logging.logDebug("http-test-debug-kept")
+        #expect(captured.lines.contains { $0.contains("http-test-debug-kept") })
+    }
+
+    /// A failed bind arrives as `logCritical`, and it is the message a first-time user most needs.
+    /// Genuine failure is never gated — it goes to stderr whatever `--verbose` says.
+    @Test func theHttpLayersFailuresAreNeverSilenced() {
+        let originalFlag = ServerLog.isVerbose
+        let originalSink = ServerLog.errorSink
+        defer { ServerLog.isVerbose = originalFlag; ServerLog.errorSink = originalSink }
+
+        let captured = Capture()
+        ServerLog.errorSink = { captured.append($0) }
+        let logging = ServerLogHTTPLogging()
+
+        ServerLog.isVerbose = false
+        logging.logError("http-test-error")
+        logging.logCritical("http-test-critical")
+        #expect(captured.lines.contains { $0.contains("http-test-error") })
+        #expect(captured.lines.contains { $0.contains("http-test-critical") })
+    }
 }

@@ -48,7 +48,10 @@ public final class InfSketchServer: Sendable {
         self.store = store
         let manager = SessionManager(store: store, config: config)
         self.manager = manager
-        self.http = HTTPServer(port: port)
+        // The logger is passed EXPLICITLY, never defaulted: FlyingFox's default prints to stdout on
+        // every non-Apple platform, which made the quiet console Apple-only by accident. See
+        // `ServerLogHTTPLogging`.
+        self.http = HTTPServer(port: port, logger: ServerLogHTTPLogging())
         self.config = config
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
