@@ -57,6 +57,10 @@ public actor MCPAdapter {
     /// the same instance `WSAdapter` registers capability-tagged connections
     /// with); `callCreateDoc` awaits `broker.requestCreation` on it.
     private let broker: DeviceCommandBroker
+    /// Where `render_sketch(writeToFile: true)` puts its PNGs, or nil when this server has no
+    /// render directory (the store-injecting init used by tests). A render is still perfectly
+    /// serviceable without one — it just comes back inline, which is the default anyway.
+    private let renderFileStore: RenderFileStore?
     /// What each agent tool call changed, so `undo_last_edit` can take one back. Deliberately NOT
     /// on `DocumentSession` — see the type's own doc comment for why agent scope has to hold by
     /// construction here rather than by a flag inside `submit`.
@@ -88,12 +92,14 @@ public actor MCPAdapter {
         manager: SessionManager,
         idleTimeout: Duration = .seconds(3600),
         cleanupInterval: Duration = .seconds(60),
-        broker: DeviceCommandBroker
+        broker: DeviceCommandBroker,
+        renderFileStore: RenderFileStore? = nil
     ) {
         self.manager = manager
         self.idleTimeout = idleTimeout
         self.cleanupInterval = cleanupInterval
         self.broker = broker
+        self.renderFileStore = renderFileStore
     }
 
     /// Starts the notification pump and the idle-session cleanup loop on
@@ -1726,6 +1732,10 @@ public actor MCPAdapter {
                 deviceFailed: <reason> for a bad spec (e.g. an unknown strokeKey). \
                 Read-only: it never writes to the document, so there is no seq assigned \
                 and nothing to retry.
+
+                REPLY: a PNG image plus a metadata text block. With writeToFile: true there is \
+                NO image — the reply is one JSON object of that same metadata with `filePath` \
+                added, naming an absolute path on the machine the server runs on.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1801,8 +1811,9 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": """
                             Pixels per canvas point, at most 16. THIS is the knob for how big the \
-                            image comes back — and the image is returned to you inline, so its \
-                            size is a cost you pay on every call. Omit it and the renderer picks \
+                            image comes back — and by default the image is returned INLINE, so its \
+                            size is a cost you pay on every call (with writeToFile: true it is not, \
+                            so a big scale is cheap there). Omit it and the renderer picks \
                             a scale that fits `maxPixels`.
                             """,
                     ]),
@@ -1820,6 +1831,22 @@ public actor MCPAdapter {
                         "description": "Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each.",
                     ]),
                     "colorAppearance": colorAppearanceProperty,
+                    "writeToFile": .object([
+                        "type": "boolean",
+                        "description": """
+                            Write the PNG to a file on the machine the server runs on and return \
+                            its absolute path as `filePath`, INSTEAD of returning the image \
+                            inline. Defaults to false. Use it when you want the pixels for \
+                            something other than looking at them — compositing, diffing, handing \
+                            to another program — or when you want a large render without paying \
+                            for it in context: a file costs nothing to receive, so `scale` can go \
+                            to 16 without the size penalty an inline image carries. The server \
+                            names the file (there is deliberately no output-path argument) and \
+                            keeps the directory bounded, evicting the oldest renders — so treat \
+                            the path as scratch and read it soon, not as somewhere to archive \
+                            anything.
+                            """,
+                    ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -4333,6 +4360,7 @@ public actor MCPAdapter {
     private func callRenderSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let writeToFile = try Self.boolArg(arguments, "writeToFile", default: false)
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -4366,6 +4394,30 @@ public actor MCPAdapter {
             // to an empty text block rather than throwing, so a malformed
             // device reply still surfaces the image content.
             let metadataText = out.meta.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+
+            // `writeToFile` is read HERE and nowhere else — it is a server-side instruction about
+            // where the bytes go, not a render parameter, so it is deliberately absent from
+            // `renderSpecParameterNames` and the device never learns of it. That is what keeps this
+            // feature server-only: no op-spec change, no wire change, no version bump (the same
+            // shape as merge_docs' `into:` and add_image's path).
+            if writeToFile {
+                guard let renderFileStore else {
+                    return Self.errorResult(
+                        "renderFileUnavailable: this server has no render directory configured")
+                }
+                let url: URL
+                do {
+                    url = try renderFileStore.write(docId: docId, png: out.bytes)
+                } catch {
+                    return Self.errorResult("renderFileWriteFailed: \(error)")
+                }
+                return CallTool.Result(content: [
+                    .text(
+                        text: Self.renderFileReplyJSON(filePath: url.path, metadataText: metadataText),
+                        annotations: nil, _meta: nil)
+                ])
+            }
+
             return CallTool.Result(content: [
                 .image(data: out.bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
                 .text(text: metadataText, annotations: nil, _meta: nil),
@@ -4375,6 +4427,25 @@ public actor MCPAdapter {
         } catch {
             return Self.errorResult("invalidArguments")
         }
+    }
+
+    /// The `writeToFile` reply: the device's own RenderMetadata with `filePath` merged in, so the
+    /// answer stays ONE named-key JSON object rather than two text blocks a caller has to tell
+    /// apart. An absent or undecodable metadata degrades to `filePath` alone — the path is the part
+    /// the caller cannot do without, and a malformed device reply must not cost them the file that
+    /// was successfully written.
+    static func renderFileReplyJSON(filePath: String, metadataText: String) -> String {
+        var object = (try? JSONSerialization.jsonObject(with: Data(metadataText.utf8)))
+            as? [String: Any] ?? [:]
+        object["filePath"] = filePath
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            // JSONSerialization refuses non-finite numbers, and the metadata is the device's, not
+            // ours. Losing the metadata is survivable; losing the path is not.
+            return #"{"filePath":"\#(filePath)"}"#
+        }
+        return text
     }
 
     /// The Global-Constraints parameter names `render_sketch` relays
