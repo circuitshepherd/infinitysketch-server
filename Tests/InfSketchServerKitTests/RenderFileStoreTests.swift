@@ -108,6 +108,66 @@ struct RenderFileStoreTests {
         #expect(pngFiles(dir).count == 1)
     }
 
+    // MARK: - Serving a render over HTTP
+    //
+    // writeToFile only helps an agent that shares the server's filesystem. Serving the same file at
+    // a URL is what makes it useful remotely — and it keeps the RENDER on MCP, so there is still
+    // exactly one place that parses a render spec.
+
+    @Test func readReturnsTheBytesOfARenderItWrote() throws {
+        let (store, _) = try makeStore()
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x11, 0x22])
+        let url = try store.write(docId: "d", png: png)
+
+        #expect(store.read(name: url.lastPathComponent) == png)
+    }
+
+    /// The name arrives from an HTTP path, so this is the one place a caller chooses part of a
+    /// filesystem path. It must not be able to reach outside the render directory — the rule
+    /// `DirectoryDocumentStore.fileURL` applies to a docId, applied here to a render name.
+    @Test func readRefusesANameThatWouldEscapeTheDirectory() throws {
+        let (store, dir) = try makeStore()
+        _ = try store.write(docId: "d", png: Data([1]))
+        // Something real to reach for, one level up from the render directory.
+        let secret = dir.deletingLastPathComponent().appendingPathComponent("secret.png")
+        try Data([0xBA, 0xDD]).write(to: secret)
+        defer { try? FileManager.default.removeItem(at: secret) }
+
+        #expect(store.read(name: "../secret.png") == nil)
+        #expect(store.read(name: "..%2Fsecret.png") == nil)
+        #expect(store.read(name: "sub/../../secret.png") == nil)
+        #expect(store.read(name: "/etc/hosts") == nil)
+    }
+
+    /// A render is scratch and the directory evicts, so a URL going 404 is a NORMAL state, not an
+    /// error condition — the reply's own description says to read it soon.
+    @Test func readReturnsNilForANameThatIsNotThere() throws {
+        let (store, _) = try makeStore()
+        #expect(store.read(name: "nothing-here.png") == nil)
+    }
+
+    /// Only PNGs. The directory holds nothing else today, but the route must not become a general
+    /// file server if something ever writes a stray file beside them.
+    @Test func readRefusesANameThatIsNotAPng() throws {
+        let (store, dir) = try makeStore()
+        _ = try store.write(docId: "d", png: Data([1]))
+        let stray = dir.appendingPathComponent("notes.txt")
+        try Data([0xAA]).write(to: stray)
+
+        #expect(store.read(name: "notes.txt") == nil)
+    }
+
+    /// The path the reply advertises and the path the route parses are ONE definition, so they
+    /// cannot drift apart — the failure this repo keeps hitting when a contract is written twice.
+    @Test func theAdvertisedUrlPathIsBuiltFromTheRoutePrefix() throws {
+        let (store, _) = try makeStore()
+        let url = try store.write(docId: "chart", png: Data([1]))
+        let name = url.lastPathComponent
+
+        #expect(RenderFileStore.urlPath(forName: name) == "\(RenderFileStore.routePrefix)/\(name)")
+        #expect(RenderFileStore.urlPath(forName: name).hasPrefix("/"))
+    }
+
     /// The directory is created on demand: a server that never renders to a file should not leave an
     /// empty dot-directory beside the documents.
     @Test func theDirectoryIsNotCreatedUntilSomethingIsWritten() throws {

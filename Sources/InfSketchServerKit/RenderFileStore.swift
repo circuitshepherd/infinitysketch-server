@@ -64,6 +64,40 @@ public struct RenderFileStore: Sendable {
         String(format: "%04x", UInt16.random(in: .min ... .max))
     }
 
+    // MARK: - Serving
+
+    /// The one definition of where a render is served. The reply advertises `urlPath(forName:)` and
+    /// the route parses this same prefix, so the two cannot drift — a contract written twice is how
+    /// this repo has broken before (`JoinPage.scheme` / `ServerJoinLink.scheme`).
+    public static let routePrefix = "/api/renders"
+
+    /// RELATIVE on purpose. An absolute URL needs a host, and the only honest host is the one the
+    /// caller reached this server on — which lives in the HTTP request's `Host` header, a layer
+    /// below MCP. The caller already knows the base it connected to, so it can join this itself,
+    /// and the same string is correct for a local and a remote agent alike.
+    public static func urlPath(forName name: String) -> String {
+        "\(routePrefix)/\(name)"
+    }
+
+    /// The bytes of a previously written render, or nil.
+    ///
+    /// `name` arrives from an HTTP path — the one place a caller picks part of a filesystem path
+    /// here — so it is checked rather than trusted: no separators, no `..`, and `.png` only, so the
+    /// route can never become a general file server. nil covers "evicted" as much as "never
+    /// existed", and both are ordinary: renders are scratch and the directory has a byte budget.
+    public func read(name: String) -> Data? {
+        guard name.hasSuffix(".png"),
+              !name.contains("/"), !name.contains("\\"), !name.contains(".."),
+              !name.isEmpty
+        else { return nil }
+        let url = directory.appendingPathComponent(name)
+        // Belt and braces: even with the checks above, the resolved file must sit directly in the
+        // render directory. A future change to the checks cannot widen the reach past this.
+        guard url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
+        else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
     // MARK: - Pruning
 
     /// Evict oldest-first until the directory is inside its budget.
