@@ -2823,6 +2823,15 @@ private actor FakeStrokeOpDevice {
         #expect(reply["scale"] as? Double == 2.0)
         #expect(reply["canvasRect"] as? [Double] == [0, 0, 100, 100])
 
+        // A remote agent cannot see filePath at all, so the same render is downloadable — and the
+        // advertised URL really serves the bytes, fetched here exactly as such an agent would.
+        let renderUrl = try #require(reply["renderUrl"] as? String)
+        #expect(renderUrl.hasPrefix("/api/renders/"))
+        let (downloaded, httpResponse) = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)\(renderUrl)")!)
+        #expect((httpResponse as? HTTPURLResponse)?.statusCode == 200)
+        #expect(downloaded == pngBytes)
+
         await server.stop()
     }
 
@@ -5787,7 +5796,7 @@ private actor FakeStrokeOpDevice {
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "stampWidth"],
             "list_open_docs": ["openDocs", "docId", "capabilities"],
-            "render_sketch": ["filePath"],
+            "render_sketch": ["filePath", "renderUrl"],
             "draw_strokes": ["storedColors"],
             "restyle_strokes": ["storedColor"],
             "fill_region": ["storedColors"],

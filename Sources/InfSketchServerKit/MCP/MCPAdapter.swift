@@ -1734,8 +1734,11 @@ public actor MCPAdapter {
                 and nothing to retry.
 
                 REPLY: a PNG image plus a metadata text block. With writeToFile: true there is \
-                NO image — the reply is one JSON object of that same metadata with `filePath` \
-                added, naming an absolute path on the machine the server runs on.
+                NO image — the reply is one JSON object of that same metadata plus `filePath` (an \
+                absolute path on the machine the server runs on) and `renderUrl` (a path RELATIVE \
+                to this server, e.g. /api/renders/<name>.png — join it to the address you reached \
+                this server on and download it, which is what to do when you are NOT on the \
+                server's machine).
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1844,7 +1847,9 @@ public actor MCPAdapter {
                             names the file (there is deliberately no output-path argument) and \
                             keeps the directory bounded, evicting the oldest renders — so treat \
                             the path as scratch and read it soon, not as somewhere to archive \
-                            anything.
+                            anything. If you are not on the server's machine, use the reply's \
+                            `renderUrl` instead of `filePath`: the same render is downloadable \
+                            from this server, and an evicted one is a plain 404.
                             """,
                     ]),
                 ]),
@@ -4413,7 +4418,10 @@ public actor MCPAdapter {
                 }
                 return CallTool.Result(content: [
                     .text(
-                        text: Self.renderFileReplyJSON(filePath: url.path, metadataText: metadataText),
+                        text: Self.renderFileReplyJSON(
+                            filePath: url.path,
+                            renderUrl: RenderFileStore.urlPath(forName: url.lastPathComponent),
+                            metadataText: metadataText),
                         annotations: nil, _meta: nil)
                 ])
             }
@@ -4434,16 +4442,20 @@ public actor MCPAdapter {
     /// apart. An absent or undecodable metadata degrades to `filePath` alone — the path is the part
     /// the caller cannot do without, and a malformed device reply must not cost them the file that
     /// was successfully written.
-    static func renderFileReplyJSON(filePath: String, metadataText: String) -> String {
+    static func renderFileReplyJSON(
+        filePath: String, renderUrl: String, metadataText: String
+    ) -> String {
         var object = (try? JSONSerialization.jsonObject(with: Data(metadataText.utf8)))
             as? [String: Any] ?? [:]
         object["filePath"] = filePath
+        object["renderUrl"] = renderUrl
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8)
         else {
             // JSONSerialization refuses non-finite numbers, and the metadata is the device's, not
-            // ours. Losing the metadata is survivable; losing the path is not.
-            return #"{"filePath":"\#(filePath)"}"#
+            // ours. Losing the metadata is survivable; losing the two ways to reach the render is
+            // not.
+            return #"{"filePath":"\#(filePath)","renderUrl":"\#(renderUrl)"}"#
         }
         return text
     }

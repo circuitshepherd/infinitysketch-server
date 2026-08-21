@@ -16,6 +16,11 @@ public struct DocSummary: Codable, Equatable, Sendable {
 public final class InfSketchServer: Sendable {
     public let manager: SessionManager
     private let store: any DocumentStore
+    /// Where `render_sketch(writeToFile: true)` puts its PNGs, or nil when this server has no
+    /// render directory. Held here as well as on the adapter because the HTTP route serves the same
+    /// files the tool writes — that is what makes the feature reach a REMOTE agent, which cannot
+    /// see the server's filesystem.
+    private let renderFileStore: RenderFileStore?
     private let http: HTTPServer
     private let config: SessionConfig
     /// The port this server was CONSTRUCTED with. `listeningPort` is the truth and is what the
@@ -58,6 +63,7 @@ public final class InfSketchServer: Sendable {
         renderFileStore: RenderFileStore? = nil
     ) {
         self.store = store
+        self.renderFileStore = renderFileStore
         let manager = SessionManager(store: store, config: config)
         self.manager = manager
         // The logger is passed EXPLICITLY, never defaulted: FlyingFox's default prints to stdout on
@@ -207,6 +213,33 @@ public final class InfSketchServer: Sendable {
                 .contentType: "image/png",
                 .cacheControl: "no-store",
                 HTTPHeader("X-Frame-Stale"): "true",
+            ], body: png)
+        }
+
+        // Serves what `render_sketch(writeToFile: true)` wrote. The tool reply advertises this
+        // exact path via `RenderFileStore.urlPath(forName:)`, so the two are one definition.
+        //
+        // No document lookup and no session: a render is a standalone file, already produced. The
+        // NAME is caller-chosen, which is why every containment rule lives in
+        // `RenderFileStore.read` rather than being re-implemented here.
+        await http.appendRoute(HTTPRoute("GET,HEAD \(RenderFileStore.routePrefix)/*")) { request in
+            let prefixParts = RenderFileStore.routePrefix.split(separator: "/").count
+            let parts = request.path.split(separator: "/").map(String.init)
+            // Exactly one segment past the prefix — "/api/renders/a/b.png" is not a render.
+            guard parts.count == prefixParts + 1 else {
+                return HTTPResponse(statusCode: .notFound)
+            }
+            guard let renders = self.renderFileStore,
+                  let png = renders.read(name: parts[prefixParts])
+            else {
+                return HTTPResponse(statusCode: .notFound)
+            }
+            return self.headAware(request, headers: [
+                .contentType: "image/png",
+                // A render's name carries a millisecond stamp and a random token, so the bytes at
+                // a given URL never change — but the file is evicted on a byte budget, so a cached
+                // 200 would outlive the resource. no-store keeps "gone" honest.
+                .cacheControl: "no-store",
             ], body: png)
         }
 
