@@ -2781,6 +2781,147 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - render_sketch writeToFile
+    //
+    // The PNG comes back INLINE by default and that stays the default: a render is usually made to
+    // be looked at, and most clients turn an image block into vision input rather than bytes. But a
+    // client that discards those bytes leaves an agent with no way to get the picture onto disk
+    // short of re-implementing an MCP client, and an inline image costs context on every call — so
+    // `writeToFile: true` hands the render to a server-owned file and returns its path instead.
+    //
+    // ENTIRELY SERVER-SIDE. The device renders and sends the PNG back exactly as before; where those
+    // bytes go afterwards is the server's decision, so the op-spec envelope, the wire and the
+    // protocol version know nothing about this (same shape as merge_docs' `into:` and add_image's
+    // path). renderSketchWriteToFileIsNeverRelayedToTheDevice is what holds that.
+
+    @Test func renderSketchWriteToFileReturnsThePathInsteadOfAnImageBlock() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF])
+        let metaBytes = Data(#"{"canvasRect":[0,0,100,100],"scale":2.0}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: metaBytes))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "writeToFile": .bool(true)])
+        #expect(isError != true)
+
+        // The whole point: no image block, so nothing here can be turned into vision input and
+        // nothing costs context.
+        #expect(toolResultImage(content) == nil)
+
+        let reply = try #require(
+            JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let path = try #require(reply["filePath"] as? String)
+        #expect(path.hasPrefix("/"))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pngBytes)
+        // The device's own metadata still rides along — an agent that wrote to a file still needs
+        // the covered rect and the scale actually used.
+        #expect(reply["scale"] as? Double == 2.0)
+        #expect(reply["canvasRect"] as? [Double] == [0, 0, 100, 100])
+
+        await server.stop()
+    }
+
+    /// `writeToFile` is a server-side instruction, NOT a render parameter — it must never reach
+    /// `renderSpecParameterNames`. If it did, the device would receive a key its `RenderSpec` does
+    /// not know, which decodes silently to nothing: harmless today, and exactly the kind of drift
+    /// this repo pins string-literally everywhere else.
+    @Test func renderSketchWriteToFileIsNeverRelayedToTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "writeToFile": .bool(true)])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(envelope.keys) == ["op"])
+
+        await server.stop()
+    }
+
+    /// The default is unchanged and stays unchanged: omitting `writeToFile` returns the image
+    /// inline and writes nothing. Most renders are made to be looked at once.
+    @Test func renderSketchWithoutWriteToFileStillReturnsTheImageInline() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0xDE, 0xAD])
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d"])
+        #expect(isError != true)
+
+        let image = try #require(toolResultImage(content))
+        #expect(Data(base64Encoded: image.data) == pngBytes)
+        #expect(!toolResultText(content).contains("filePath"))
+
+        await server.stop()
+    }
+
+    /// `writeToFile: false` is the default spelled out — it must behave exactly like omitting it,
+    /// not like asking for a file.
+    @Test func renderSketchWriteToFileFalseBehavesLikeTheDefault() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([2]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "writeToFile": .bool(false)])
+        #expect(isError != true)
+
+        #expect(toolResultImage(content) != nil)
+        #expect(!toolResultText(content).contains("filePath"))
+
+        await server.stop()
+    }
+
+    /// A server built around an injected store has no render directory, so `writeToFile` has
+    /// nowhere to put the PNG. It says so by name rather than silently falling back to an inline
+    /// image — a caller that asked for a file and got pixels instead would have no way to tell.
+    @Test func renderSketchWriteToFileWithoutARenderDirectoryFailsByName() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-render-dir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "d", bytes: Fixtures.docBytes)
+
+        let (server, port, task) = try await startServer(store: store)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{}"#.utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "writeToFile": .bool(true)])
+
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("renderFileUnavailable"))
+
+        await server.stop()
+    }
+
     @Test func renderSketchToolDescriptionStatesReadOnlyContract() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -5646,6 +5787,7 @@ private actor FakeStrokeOpDevice {
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "stampWidth"],
             "list_open_docs": ["openDocs", "docId", "capabilities"],
+            "render_sketch": ["filePath"],
             "draw_strokes": ["storedColors"],
             "restyle_strokes": ["storedColor"],
             "fill_region": ["storedColors"],

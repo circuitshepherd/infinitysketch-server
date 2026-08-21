@@ -34,7 +34,16 @@ public final class InfSketchServer: Sendable {
     public convenience init(
         port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
     ) {
-        self.init(port: port, store: DirectoryDocumentStore(directory: docsDirectory), config: config)
+        self.init(
+            port: port,
+            store: DirectoryDocumentStore(directory: docsDirectory),
+            config: config,
+            // A dot-directory beside the documents, for the same reason `.trash` is one: `list()`
+            // enumerates non-recursively and filters on the `.infsketch` extension, so a render can
+            // never surface as a document.
+            renderFileStore: RenderFileStore(
+                directory: docsDirectory.appendingPathComponent(
+                    RenderFileStore.directoryName, isDirectory: true)))
     }
 
     /// Store-injecting designated init — `internal`, for tests only (the
@@ -44,7 +53,10 @@ public final class InfSketchServer: Sendable {
     /// tool handler's read and the session-open behind its submit see
     /// DIFFERENT content with no timing involved at all — see
     /// `StaleReadStore` in MCPAdapterTests.
-    init(port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig()) {
+    init(
+        port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
+        renderFileStore: RenderFileStore? = nil
+    ) {
         self.store = store
         let manager = SessionManager(store: store, config: config)
         self.manager = manager
@@ -61,7 +73,8 @@ public final class InfSketchServer: Sendable {
             manager: manager,
             idleTimeout: config.mcpSessionIdleTimeout,
             cleanupInterval: config.mcpSessionCleanupInterval,
-            broker: deviceCommandBroker)
+            broker: deviceCommandBroker,
+            renderFileStore: renderFileStore)
     }
 
     /// Configures routes and serves until stopped.
