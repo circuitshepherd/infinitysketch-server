@@ -39,10 +39,17 @@ struct RenderFileStoreTests {
     /// The path has to be absolute: the agent reads it from a tool reply and hands it to some other
     /// program, which has no idea what the server's working directory is. `add_image` refuses a
     /// relative path for the same reason rather than resolving one.
+    ///
+    /// Absoluteness is tested by RESOLVING against an unrelated base — an absolute path ignores the
+    /// base, a relative one would be joined onto it. The obvious `hasPrefix("/")` is a POSIX
+    /// assumption and this server runs natively on Windows, where an absolute path is `C:/…`; that
+    /// version passed on macOS and Linux and failed the Windows gate.
     @Test func theReturnedPathIsAbsolute() throws {
         let (store, _) = try makeStore()
         let url = try store.write(docId: "d", png: Data([1, 2, 3]))
-        #expect(url.path.hasPrefix("/"))
+
+        let base = FileManager.default.homeDirectoryForCurrentUser
+        #expect(URL(fileURLWithPath: url.path, relativeTo: base).path == url.path)
     }
 
     /// Oldest-first eviction, so what survives is the RECENT past — the same reasoning the telemetry
@@ -165,6 +172,8 @@ struct RenderFileStoreTests {
         let name = url.lastPathComponent
 
         #expect(RenderFileStore.urlPath(forName: name) == "\(RenderFileStore.routePrefix)/\(name)")
+        // A URL path, not a filesystem path — "/" is right on every platform here, unlike in
+        // theReturnedPathIsAbsolute above.
         #expect(RenderFileStore.urlPath(forName: name).hasPrefix("/"))
     }
 
