@@ -2830,7 +2830,10 @@ private actor FakeStrokeOpDevice {
         // advertised URL really serves the bytes, fetched here exactly as such an agent would.
         let renderUrl = try #require(reply["renderUrl"] as? String)
         #expect(renderUrl.hasPrefix("/api/renders/"))
-        let (downloaded, httpResponse) = try await URLSession.shared.data(
+        // A fresh session, not URLSession.shared — see the note on RenderRouteTests.get.
+        let downloadSession = URLSession(configuration: .ephemeral)
+        defer { downloadSession.finishTasksAndInvalidate() }
+        let (downloaded, httpResponse) = try await downloadSession.data(
             from: URL(string: "http://127.0.0.1:\(port)\(renderUrl)")!)
         #expect((httpResponse as? HTTPURLResponse)?.statusCode == 200)
         #expect(downloaded == pngBytes)

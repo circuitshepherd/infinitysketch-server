@@ -28,8 +28,18 @@ import FoundationNetworking
         return (server, port, task, renders)
     }
 
+    /// A FRESH session per request, never `URLSession.shared`.
+    ///
+    /// Every test here starts a server on an OS-assigned port and stops it. The shared session
+    /// keeps pooled keep-alive connections keyed by host:port, so when the OS recycles a port onto
+    /// a NEW server, a pooled socket belonging to the dead one can be reused — surfacing as
+    /// `NSURLErrorNetworkConnectionLost` in some UNRELATED test later in the run. Measured: the
+    /// suite was 3/3 clean before these tests and 3 failures in 5 runs after, in three different
+    /// tests, always with that error.
     private func get(_ url: URL) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(from: url)
         return (data, try #require(response as? HTTPURLResponse))
     }
 
