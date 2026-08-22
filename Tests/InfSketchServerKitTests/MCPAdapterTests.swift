@@ -2816,7 +2816,10 @@ private actor FakeStrokeOpDevice {
         let reply = try #require(
             JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
         let path = try #require(reply["filePath"] as? String)
-        #expect(path.hasPrefix("/"))
+        // Absolute, tested without assuming POSIX — see theReturnedPathIsAbsolute.
+        #expect(
+            URL(fileURLWithPath: path, relativeTo: FileManager.default.homeDirectoryForCurrentUser)
+                .path == path)
         #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pngBytes)
         // The device's own metadata still rides along — an agent that wrote to a file still needs
         // the covered rect and the scale actually used.
