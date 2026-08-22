@@ -9,7 +9,10 @@ import FoundationNetworking
 /// that shares that filesystem and nobody else. Serving the same file at a URL is what makes the
 /// feature work for a remote agent — and it keeps the render itself on MCP, so there is still
 /// exactly one place that parses a render spec.
-@Suite struct RenderRouteTests {
+/// `.serialized` for the same reason the cases above share one server: this suite's tests each
+/// stand up a real listener, and running them alongside each other adds concurrent servers to a
+/// suite that is already dense with them.
+@Suite(.serialized) struct RenderRouteTests {
 
     private func startServer() async throws
         -> (InfSketchServer, UInt16, Task<Void, any Error>, RenderFileStore) {
@@ -28,8 +31,18 @@ import FoundationNetworking
         return (server, port, task, renders)
     }
 
+    /// A FRESH session per request, never `URLSession.shared`.
+    ///
+    /// Every test here starts a server on an OS-assigned port and stops it. The shared session
+    /// keeps pooled keep-alive connections keyed by host:port, so when the OS recycles a port onto
+    /// a NEW server, a pooled socket belonging to the dead one can be reused — surfacing as
+    /// `NSURLErrorNetworkConnectionLost` in some UNRELATED test later in the run. Measured: the
+    /// suite was 3/3 clean before these tests and 3 failures in 5 runs after, in three different
+    /// tests, always with that error.
     private func get(_ url: URL) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(from: url)
         return (data, try #require(response as? HTTPURLResponse))
     }
 
@@ -67,21 +80,27 @@ import FoundationNetworking
 
     /// The path segment is caller-chosen, so the route must not reach outside the render directory
     /// or serve anything that is not a render.
-    @Test(arguments: [
-        "/api/renders/..%2F..%2Fsecret.png",
-        "/api/renders/notes.txt",
-        "/api/renders/",
-        "/api/renders/a/b.png",
-    ])
-    func aCallerChosenPathCannotReachPastTheRenderDirectory(path: String) async throws {
+    ///
+    /// ONE server for every case, deliberately NOT `@Test(arguments:)`. Swift Testing runs the
+    /// cases concurrently, and each would stand up its own `InfSketchServer` — four more
+    /// short-lived listeners on top of a suite that already starts one per test. That measurably
+    /// destabilised the whole run: unrelated MCP tests began failing with
+    /// `NSURLErrorNetworkConnectionLost`, in a different test each time.
+    @Test func aCallerChosenPathCannotReachPastTheRenderDirectory() async throws {
         let (server, port, task, renders) = try await startServer()
         defer { task.cancel() }
         _ = try renders.write(docId: "d", png: Data([1, 2, 3]))
 
-        let (body, response) = try await get(URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        for path in [
+            "/api/renders/..%2F..%2Fsecret.png",
+            "/api/renders/notes.txt",
+            "/api/renders/",
+            "/api/renders/a/b.png",
+        ] {
+            let (_, response) = try await get(URL(string: "http://127.0.0.1:\(port)\(path)")!)
+            #expect(response.statusCode == 404, "\(path) should not be served")
+        }
 
-        #expect(response.statusCode == 404, "\(path) should not be served")
-        #expect(body.isEmpty || response.statusCode == 404)
         await server.stop()
     }
 
