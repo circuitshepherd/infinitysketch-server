@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Tests for scripts/check-release-version. No network, no git — a fixture ServerInfo.swift.
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+check="$here/check-release-version"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+fixture="$tmp/ServerInfo.swift"
+printf 'public enum ServerInfo {\n    public static let version = "1.2.3"\n}\n' >"$fixture"
+
+fails=0
+expect() { # <description> <expected-exit> <tag> <ServerInfo path> [output must contain...]
+    local desc="$1" want="$2" tag="$3" info="$4"; shift 4
+    local out; out="$("$check" "$tag" "$info" 2>&1)"; local got=$?
+    if [ "$got" != "$want" ]; then echo "FAIL: $desc — exit $got, wanted $want: $out"; fails=$((fails+1)); return; fi
+    for needle in "$@"; do
+        case "$out" in *"$needle"*) ;; *) echo "FAIL: $desc — output lacks '$needle': $out"; fails=$((fails+1)); return;; esac
+    done
+    echo "ok: $desc"
+}
+
+expect "matching tag passes"                    0 v1.2.3 "$fixture"
+expect "mismatched tag fails and names both"    1 v1.2.4 "$fixture" "1.2.3" "v1.2.4"
+expect "a tag without the v prefix fails"       1 1.2.3  "$fixture" "v1.2.3"
+expect "an unreadable ServerInfo path fails"    1 v1.2.3 "$tmp/missing.swift" "cannot read"
+[ "$fails" = 0 ] && echo "ALL PASSED" || { echo "$fails FAILED"; exit 1; }

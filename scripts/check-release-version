@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# check-release-version <tag> [path/to/ServerInfo.swift]
+#
+# Refuses a release tag that does not match the version the server PRINTS and reports over MCP.
+# `ServerInfo.version` is a hand-maintained literal — v1.0.1 and v1.1.0 both shipped binaries that
+# announced themselves as 1.0.0 because nothing compared the two. Run this before tagging (the
+# releasing-the-server skill), and the Windows workflow runs it on every `v*` tag.
+set -u
+tag="${1:-}"
+info="${2:-$(cd "$(dirname "$0")/.." && pwd)/Sources/InfSketchServerKit/ServerInfo.swift}"
+
+[ -n "$tag" ] || { echo "usage: check-release-version <tag> [ServerInfo.swift]" >&2; exit 2; }
+[ -r "$info" ] || { echo "check-release-version: cannot read $info" >&2; exit 1; }
+
+version="$(sed -n 's/.*static let version = "\([^"]*\)".*/\1/p' "$info" | head -1)"
+[ -n "$version" ] || { echo "check-release-version: no 'static let version = \"…\"' in $info" >&2; exit 1; }
+
+if [ "$tag" != "v$version" ]; then
+    echo "check-release-version: tag is $tag but ServerInfo.version is $version — the tag must be v$version" >&2
+    echo "  Bump ServerInfo.version (and the README compatibility table) or re-tag; see the releasing-the-server skill." >&2
+    exit 1
+fi
+echo "check-release-version: $tag matches ServerInfo.version"
