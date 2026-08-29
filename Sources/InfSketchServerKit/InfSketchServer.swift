@@ -137,6 +137,15 @@ public final class InfSketchServer: Sendable {
         await manager.setContentProvider { docId, deviceId in
             try await broker.requestProvideContent(docId: docId, deviceId: deviceId)
         }
+        // A document with watchers and no subscriber gets its frame from any connected device
+        // that can render — the relay `render_sketch` walks, so the picture is the one an agent
+        // gets and the deployed app already serves it (spec 2026-08-29-watcher-frames-...).
+        await manager.setFrameProvider { docId, bytes, px in
+            let reply = try await broker.requestStrokeOp(
+                docId: docId, docBytes: bytes, spec: WatcherFrame.renderSpec(longSidePx: px),
+                capability: "render")
+            return (png: reply.bytes, canvasRect: WatcherFrame.canvasRect(fromMetadata: reply.meta))
+        }
 
         await http.appendRoute("GET,HEAD /api/docs") { request in
             let live = await manager.liveInfo()

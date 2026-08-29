@@ -117,6 +117,17 @@ import InfSketchWire
         // (it parses, never executes) — this pins the embed itself.
         #expect(html.contains(WebUI.viewportJS))
     }
+
+
+    /// A socket that died without a FIN (laptop sleep, a Wi-Fi hop) looks exactly like a quiet
+    /// document — except that the server pings an idle connection every 30 s, so a healthy socket
+    /// is never silent for a minute. The page closes one that is, and its own `onclose` path
+    /// reconnects and re-watches. Coming back to the tab checks at once.
+    @Test func aSilentSocketIsClosedSoTheReconnectPathRuns() {
+        #expect(html.contains("lastMessageAt"))
+        #expect(html.contains("SILENT_SOCKET_MS = 60000"))
+        #expect(html.contains("visibilitychange"))
+    }
 }
 
 #if canImport(JavaScriptCore)

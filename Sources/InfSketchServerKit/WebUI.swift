@@ -765,16 +765,37 @@ public enum WebUI {
         }
         setInterval(updateBadge, 1000);
 
+        // A socket that died without a FIN — laptop sleep, a Wi-Fi hop — looks exactly like a
+        // quiet document, except that the server pings an idle connection every 30 s, so a
+        // healthy socket is never silent for a minute. Close one that is: `ws.close()` runs
+        // `onclose` locally at once, and that path reconnects and re-watches. Coming back to
+        // the tab checks immediately (a background tab's timers are throttled) and refetches,
+        // since a frame may have landed while the tab could not act on the nudge.
+        const SILENT_SOCKET_MS = 60000;
+        let lastMessageAt = Date.now();
+        function closeIfSilent() {
+          if (ws && ws.readyState === WebSocket.OPEN
+              && Date.now() - lastMessageAt > SILENT_SOCKET_MS) ws.close();
+        }
+        setInterval(closeIfSilent, 15000);
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) return;
+          closeIfSilent();
+          if (!paused) refetch(`visible-${Date.now()}`);
+        });
+
         let ws = null;
         function connect() {
           ws = new WebSocket(`ws://${location.host}/ws`);
           ws.onopen = () => {
             disconnected = false;
+            lastMessageAt = Date.now();
             ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
             if (!paused) ws.send(watchMessage());
             updateBadge();
           };
           ws.onmessage = (e) => {
+            lastMessageAt = Date.now();
             const m = JSON.parse(e.data);
             // The server drops a connection that will not prove it is reading.
             if (m.type === "ping") return ws.send(JSON.stringify({ type: "pong" }));
