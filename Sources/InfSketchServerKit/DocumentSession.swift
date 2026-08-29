@@ -256,6 +256,8 @@ actor DocumentSession {
     }
 
     var watcherCount: Int { watchers.count }
+    /// The largest long side any watcher asked for; nil when none did (the device's default).
+    var requestedFramePx: Int? { watcherFramePx.values.max() }
 
     func watch(framePx: Int? = nil) -> WatchResult {
         let token = UUID()
@@ -541,6 +543,12 @@ actor DocumentSession {
         for (_, continuation) in subscribers { continuation.finish() }
         subscribers.removeAll()
         strippedCapableSubscribers.removeAll()
+        // Watchers end here too. Left open, a browser on the deleted document sat on a socket
+        // that would never carry another nudge; a finished stream is what `WSAdapter` turns
+        // into a close, and a close is what makes the page reconnect and learn the truth.
+        for (_, continuation) in watchers { continuation.finish() }
+        watchers.removeAll()
+        watcherFramePx.removeAll()
     }
 
     /// Send a document to every subscriber — whole, or with the image blobs it already has left

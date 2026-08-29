@@ -165,6 +165,10 @@ actor Connection {
             // "provideContent" (M2c-1, Task 4) joined the same way, for
             // requestProvideContent's capability: "provideContent" relay — a
             // device advertising only content-provisioning must still register.
+            // "render" (watcher-frame relay, 2026-08-29) joined the same way: it
+            // was never listed because the app always advertised the others too,
+            // so a device offering ONLY render was silently never registered —
+            // and never announced to the manager's relay below.
             let caps = Set(capabilities)
             // M3: only a peer that says it understands a stripped document gets one. The web UI
             // never subscribes to document events, but `infsketch-demo` does — and it would take a
@@ -173,12 +177,15 @@ actor Connection {
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
-                "provideContent",
+                "provideContent", "render",
             ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, deviceId: deviceId, capabilities: caps) { [weak self] message in
                     Task { await self?.emitFromBroker(message) }
                 }
+                // Registered first, then announced: the relay this wakes asks the broker for a device,
+                // and must find this one.
+                await manager.deviceAppeared(capabilities: caps)
             }
             emit(.helloAck(protocolVersion: WireProtocol.version))
 
@@ -428,8 +435,13 @@ actor Connection {
         await manager.unwatch(docId: docId, token: token)
     }
 
-    /// Forwards frameAvailable nudges to the browser. On server-side stream
-    /// finish (watcher dropped), releases the registration.
+    /// Forwards frameAvailable nudges to the browser. When the stream finishes SERVER-SIDE —
+    /// the watcher dropped as stalled, or its document deleted — the connection is CLOSED, not
+    /// merely released: nothing else tells the browser, whose socket otherwise stays open waiting
+    /// for a nudge that can never come (the badge decaying to "as of seq N" was the only sign,
+    /// and this comment used to claim the page reconnects). A close is what runs the page's
+    /// `onclose`, which reconnects and re-watches. An `unwatchDoc` cancels the pump first and
+    /// takes the early return.
     private func pumpWatch(
         _ events: AsyncStream<ServerMessage>, docId: String, token: UUID
     ) -> Task<Void, Never> {
@@ -439,6 +451,8 @@ actor Connection {
             }
             guard !Task.isCancelled else { return }
             await self.releaseWatchSubscription(docId: docId, token: token)
+            self.emit(.error(reason: "watchDropped"))
+            await self.close()
         }
     }
 

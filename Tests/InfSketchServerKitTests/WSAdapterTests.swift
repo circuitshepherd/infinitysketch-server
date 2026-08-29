@@ -490,6 +490,56 @@ private struct ServerMessageReader {
         browser.input.finish()
         #expect(try await appReader.next() == .watchers(docId: "d", count: 0, framePx: nil))
     }
+
+
+    /// The silent stop: a watcher whose stream ends SERVER-SIDE (dropped as stalled, or its
+    /// document deleted) used to be released with the browser's socket left open — the page kept
+    /// waiting for a `frameAvailable` that could never come, badge decaying to "as of seq N", and
+    /// the comment beside the release claimed the page reconnects. Now the connection is closed,
+    /// so `onclose` fires and the page reconnects and re-watches.
+    @Test func aWatcherDroppedServerSideClosesTheBrowserConnection() async throws {
+        let manager = try makeManager()
+        let browser = try await Harness(manager: manager)
+        var reader = ServerMessageReader(browser.output)
+        try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await reader.next()
+        try browser.send(.watchDoc(docId: "d", framePx: nil))
+        try await Task.sleep(for: .milliseconds(30))
+
+        try await manager.deleteDoc(docId: "d")
+        #expect(try await reader.next() == .error(reason: "watchDropped"))
+        #expect(try await reader.next() == nil)   // stream finished = connection closed
+    }
+
+    /// The hello is where a device becomes known; a render-capable one arriving must reach the
+    /// manager, so a watcher waiting on the stored thumbnail gets a frame without reloading.
+    @Test func aDeviceConnectingRendersTheFrameAWatcherIsWaitingFor() async throws {
+        let manager = try makeManager()
+        let device = ArrivalFlag()
+        struct NoDevice: Error {}
+        await manager.setFrameProvider { _, _, _ in
+            guard await device.arrived else { throw NoDevice() }
+            return (png: Data([5]), canvasRect: nil)
+        }
+        let browser = try await Harness(manager: manager)
+        var browserReader = ServerMessageReader(browser.output)
+        try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await browserReader.next()
+        try browser.send(.watchDoc(docId: "d", framePx: nil))
+        try await Task.sleep(for: .milliseconds(50))   // the relay tried and found no device
+
+        await device.set()
+        let app = try await Harness(manager: manager)
+        var appReader = ServerMessageReader(app.output)
+        try app.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: nil))
+        _ = try await appReader.next()
+        #expect(try await browserReader.next() == .frameAvailable(docId: "d", seq: 0))
+    }
+
+    private actor ArrivalFlag {
+        private(set) var arrived = false
+        func set() { arrived = true }
+    }
 }
 
 /// Task 3 (create_doc branch): wires `DeviceCommandBroker` into `Connection` —

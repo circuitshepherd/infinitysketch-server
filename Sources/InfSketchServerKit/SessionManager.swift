@@ -67,6 +67,80 @@ public actor SessionManager {
         contentProvider = provider
     }
 
+    // MARK: - Frames for a watched, unopened document
+
+    /// Renders a frame for a document that has WATCHERS and NO SUBSCRIBER: the bytes to render,
+    /// the largest long side any watcher asked for (nil = the device's default), and back the PNG
+    /// plus the canvas rect it covers. Injected by `InfSketchServer`, which routes it through
+    /// `DeviceCommandBroker` to a device advertising `render` — the relay `render_sketch` uses,
+    /// so the deployed app already serves it. Nil until wired, which leaves the old behaviour
+    /// (the cached frame, then the stored thumbnail) exactly as it was.
+    public typealias FrameProvider =
+        @Sendable (String, Data, Int?) async throws -> (png: Data, canvasRect: [Double]?)
+    private var frameProvider: FrameProvider?
+    /// One render in flight per document plus at most one pending — a burst of agent writes
+    /// yields one render after the last, never a queue of ten (the app's `FrameScheduler` shape).
+    private var relayRenders: [String: Task<Void, Never>] = [:]
+    private var relayPending: Set<String> = []
+    /// What the relay last rendered for a document, so the same state is not rendered twice
+    /// (a second page opening, a re-watch at the same size) while a write or a larger request
+    /// renders again. A frame the DEVICE pushed never sets it.
+    private var relayed: [String: (seq: Int, px: Int?)] = [:]
+
+    public func setFrameProvider(_ provider: @escaping FrameProvider) {
+        frameProvider = provider
+    }
+
+    /// A device that can render has connected: render whatever is watched and unopened. This is
+    /// what a server restart produces every time — the page reconnects in 2 s and the device in
+    /// 5, so the re-watch found no device and the page sat on the stored thumbnail until reloaded.
+    /// `relayFrameIfNeeded` still decides; a document whose frame is current renders nothing.
+    public func deviceAppeared(capabilities: Set<String>) async {
+        guard capabilities.contains("render") else { return }
+        for (docId, watchers) in watcherCounts where watchers > 0 {
+            await relayFrameIfNeeded(docId: docId)
+        }
+    }
+
+    /// The trigger: on `watch`, after every accepted write, and when a render-capable device
+    /// connects. A subscriber present means a device will push its own frame, and the relay
+    /// stays out of its way.
+    private func relayFrameIfNeeded(docId: String) async {
+        guard frameProvider != nil, (counts[docId] ?? 0) == 0, (watcherCounts[docId] ?? 0) > 0,
+              let session = sessions[docId] else { return }
+        let seq = await session.seq
+        let px = await session.requestedFramePx
+        if let done = relayed[docId], done.seq == seq, done.px == px,
+           await session.latestFrame != nil {
+            return
+        }
+        if relayRenders[docId] != nil {
+            relayPending.insert(docId)
+            return
+        }
+        relayRenders[docId] = Task { await self.runRelay(docId: docId) }
+    }
+
+    private func runRelay(docId: String) async {
+        if let provider = frameProvider, let session = sessions[docId] {
+            let bytes = await session.currentBytes
+            let seq = await session.seq
+            let px = await session.requestedFramePx
+            // A refused or failed render changes nothing: the page keeps what it has, and the
+            // next trigger tries again. No timer retries a device that is not there.
+            if let frame = try? await provider(docId, bytes, px) {
+                // The document may have gained a subscriber or lost its watchers meanwhile; the
+                // frame is still the newest picture of these bytes, so it is cached either way.
+                await session.submitFrame(bytes: frame.png, canvasRect: frame.canvasRect)
+                relayed[docId] = (seq, px)
+            }
+        }
+        relayRenders[docId] = nil
+        if relayPending.remove(docId) != nil {
+            await relayFrameIfNeeded(docId: docId)
+        }
+    }
+
     /// `acceptsStrippedDocuments` — the caller's connection advertised `blobOmission`, so its
     /// broadcasts may leave out image blobs it already holds. Defaults to false: a peer that never
     /// said so keeps receiving whole documents.
@@ -228,6 +302,7 @@ public actor SessionManager {
         let result = await session.watch(framePx: framePx)
         tokenWatchDocs[result.token] = docId
         watcherCounts[docId, default: 0] += 1
+        await relayFrameIfNeeded(docId: docId)
         return result
     }
 
@@ -275,6 +350,7 @@ public actor SessionManager {
         // racing write's seq (see SubmitOutcome).
         if case .accepted(let seq) = outcome {
             emitStatus(docId: docId, kind: "docUpdated", seq: seq, count: counts[docId] ?? 0)
+            await relayFrameIfNeeded(docId: docId)
         }
         return outcome
     }
