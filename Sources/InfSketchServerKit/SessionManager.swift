@@ -267,6 +267,7 @@ public actor SessionManager {
         guard hadContent || hadAdvertisement else { throw DocumentStoreError.notFound }
 
         if hadContent { try store.delete(docId: docId) }
+        ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(liveIndex[docId]?.holders.sorted() ?? [])")
 
         // Drop the advertisement so the deleting device's own browser does not keep showing the
         // document as a remote row until the next advertisement refresh. A device that still holds
@@ -533,6 +534,7 @@ public actor SessionManager {
     /// document nobody can produce.
     public func applyAdvertisements(_ ads: [DocAdvertisement], connectionId: UUID, deviceId: String?) {
         guard let deviceId else { return }
+        ServerLog.verbose("[live-index] \(Self.stamp()) advertise from \(deviceId): \(ads.map(\.docId).sorted())")
         let before = liveIndex
         // Track this connection as live for its device, so a LATER close of a DIFFERENT (stale)
         // connection for the same device can't wipe its advertisements (`removeConnection` below).
@@ -632,6 +634,11 @@ public actor SessionManager {
     /// broker still has in flight), so the honest worst case is the budget plus one attempt. The
     /// deadline is computed per CALL — never stored on the entry — so a doc whose fetch timed out
     /// once is fully retryable later.
+    static func stamp() -> String {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: Date())
+    }
+
     private func fetchFromHolders(docId: String) async throws -> Data {
         guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
             throw DocumentStoreError.notFound
@@ -639,6 +646,7 @@ public actor SessionManager {
         if let existing = inFlightFetches[docId] { return try await existing.value }
 
         let holders = entry.holders.sorted()
+        ServerLog.verbose("[live-index] \(Self.stamp()) fetchFromHolders \(docId): holders=\(holders)")
         let deadline = ContinuousClock.now.advanced(by: config.fetchTotalTimeout)
         let task = Task<Data, Error> {
             var lastError: Error = DocumentStoreError.notFound
