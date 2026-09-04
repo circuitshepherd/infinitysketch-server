@@ -624,10 +624,13 @@ public actor MCPAdapter {
                     them and look. Below an ink's minimum a stroke is effectively INVISIBLE, so \
                     widths under it are raised and the reply says so.
 
-                    `monoline` is accepted and READS BACK AS `pen`. Nothing went wrong: PencilKit \
-                    records it as pen when the document is saved, and the two are pixel-identical \
-                    for strokes you author — monoline means "hold the width constant whatever the \
-                    pressure", which yours already do.
+                    A pen whose width is CONSTANT is a monoline, and lists as one — including \
+                    every pen you author with a single `stampWidth`. Monoline is not a different \
+                    rendered ink but a tool behaviour ("hold the width constant whatever the \
+                    pressure"), PencilKit's archive records it as pen, and the app derives the name \
+                    back from the uniform sizes, so `pen` with one width and `monoline` are the \
+                    same stroke and read back as `monoline`. A pen reads back as `pen` only when \
+                    its per-point `stampSize` varies.
                     """,
             ]),
             "smooth": .object([
@@ -1068,7 +1071,7 @@ public actor MCPAdapter {
                     "inkType": .object([
                         "type": "string",
                         "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
-                        "description": "Defaults to pen, which is opaque and even. monoline is accepted and reads back as pen.",
+                        "description": "Defaults to pen, which is opaque and even. A constant-width pen IS a monoline and lists as `monoline` (the app derives the name from the uniform sizes; PencilKit's archive records it as pen), so a fill lists as `monoline` whichever of the two you ask for.",
                     ]),
                     "spacingRatio": .object([
                         "type": "number",
@@ -1447,7 +1450,11 @@ public actor MCPAdapter {
                 never writes to the document. A stroke drawn by hand with an ink outside \
                 pen/pencil/marker (fountain pen, watercolour, crayon…) lists under that \
                 ink's name but cannot be re-drawn with draw_strokes, whose inkType enum \
-                covers only the four names above.
+                covers only the four names above. `inkType` is the ink the stroke IS: a pen \
+                whose width is constant lists as `monoline` — every pen authored with one \
+                stampWidth, and every monoline the user drew — the same name the user's \
+                Layers panel shows (PencilKit's archive records monoline as pen; the app \
+                derives it back from the uniform sizes).
 
                 REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, \
                 stampWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
@@ -1879,8 +1886,10 @@ public actor MCPAdapter {
                 decimated by the server — use list_strokes' pointCount to price a \
                 fetch first, and maxPoints if you want a guard of your own; a request \
                 over that guard fails with pointBudgetExceeded(<actual>), naming the \
-                real total. Note: a stroke asked for in `monoline` lists back as `pen` — \
-                PencilKit records it that way and the two are identical on the page. \
+                real total. Note: `inkType` is the ink the stroke IS — a pen whose width is \
+                constant reports `monoline` (the same name the user's Layers panel shows), \
+                whichever name it was drawn or authored under; PencilKit's archive records \
+                monoline as pen and the app derives it back from the uniform sizes. \
                 This tool does not report grids — render_sketch's metadata does, \
                 including each grid's id (what snap_points' gridIds and \
                 transform_strokes' snapTo refer to). Read-only.
@@ -2130,8 +2139,11 @@ public actor MCPAdapter {
                 stroke's original width only APPROXIMATELY, because the tool-slider \
                 value the user drew with is not recorded anywhere and cannot be \
                 recovered from the stroke (a colour-only restyle, and any stroke the \
-                user HAS width-edited, are unaffected). Note: `monoline` reads back as `pen` \
-                — PencilKit's archive format does not preserve it. `color` is LIGHT-CANONICAL — \
+                user HAS width-edited, are unaffected). An omitted `inkType` keeps the ink the \
+                stroke IS: a constant-width pen is a monoline, so a width-only restyle of one \
+                lands uniform rather than taking on its recorded pressure, and lists as `monoline` \
+                afterwards (PencilKit's archive records monoline as pen; the app derives it back \
+                from the uniform sizes). `color` is LIGHT-CANONICAL — \
                 pass colorAppearance: "dark" if you picked it for the dark canvas; the device \
                 converts it before storing, and the reply's storedColor reports what was \
                 actually stored. \(writeToolCaveats)
@@ -2164,8 +2176,9 @@ public actor MCPAdapter {
                         "type": "string",
                         "enum": .array(["pen", "pencil", "marker", "monoline", "fountainPen", "watercolor", "crayon"].map(Value.string)),
                         "description": """
-                            Note: `monoline` reads back as `pen` — PencilKit records it \
-                            that way, and the two are identical on the page.
+                            Note: a constant-width pen IS a monoline and lists as `monoline` — \
+                            PencilKit's archive records monoline as pen, and the app derives \
+                            the name back from the uniform sizes.
                             """,
                     ]),
                 ]),

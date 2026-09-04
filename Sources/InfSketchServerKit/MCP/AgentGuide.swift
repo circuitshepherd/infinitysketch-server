@@ -89,7 +89,10 @@ enum AgentGuide {
 
     The inks differ in character, not just name, and you cannot see that from a listing:
 
-    - **`monoline`** — opaque, uniform. The one for solid fills, flat colour, anything layered.
+    - **`monoline`** — opaque, uniform. The one for solid fills, flat colour, anything layered. \
+      A pen whose width is constant IS a monoline and lists as one — every pen you author \
+      with a single `stampWidth` reads back as `monoline`, the name the user's Layers panel \
+      shows for it too.
     - **`marker`** — wide and TRANSLUCENT. Colours build where strokes overlap and whatever is \
       underneath shows through. Painting a solid area with it leaves the paper visible.
     - **`pen`** — tapers with force; the everyday line.
