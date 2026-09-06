@@ -57,7 +57,8 @@ public enum ConnectPanel {
             <div class="address" data-index="\(index)"\(index == selected ? "" : " hidden")>
               <div class="qr">\(qr)</div>
               <div class="meta">
-                <div class="ip">\(HTML.escape(candidate.ip)):\(port)</div>
+                <div class="ip"><span id="addr-\(index)">\(HTML.escape(candidate.ip)):\(port)</span>
+                  <button class="copy" data-target="addr-\(index)">copy</button></div>
                 <div class="iface">\(HTML.escape(candidate.interface))</div>
                 <p>Scan with the camera on your iPhone or iPad. The app asks before it joins.</p>
                 <p class="agent">AI agent (MCP)<br>

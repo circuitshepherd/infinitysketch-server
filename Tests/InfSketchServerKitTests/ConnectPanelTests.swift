@@ -176,6 +176,17 @@ import Testing
         }
     }
 
+    /// The address beside the code is what a Mac user types or pastes into the app, so it has a
+    /// copy button like the agent urls — it had none (Josef, 2026-09-06), so it had to be selected
+    /// by hand out of a line that also carries the interface name.
+    @Test func everyAddressHasItsOwnCopyButton() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains("<span id=\"addr-0\">192.168.1.42:8080</span>"))
+        #expect(html.contains("data-target=\"addr-0\""))
+        #expect(html.contains("<span id=\"addr-1\">10.8.0.3:8080</span>"))
+        #expect(html.contains("data-target=\"addr-1\""))
+    }
+
     // MARK: - the app link for a Mac
 
     /// A Mac cannot point its camera at its own screen. The page the server already opened on it
