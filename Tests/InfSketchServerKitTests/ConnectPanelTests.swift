@@ -187,6 +187,18 @@ import Testing
         #expect(html.contains("data-target=\"addr-1\""))
     }
 
+    /// The terminal prints the join url as TEXT and this page is meant to carry the same connect
+    /// information — but it carried the url only inside the QR image (Josef, 2026-09-06). As text
+    /// with a copy button it covers the cases where scanning is not the path: a camera that does
+    /// not pick the code up, typing it into the device's browser, or sending it to the device.
+    @Test func everyAddressShowsItsJoinUrlAsTextWithACopyButton() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains("<code id=\"join-0\">http://192.168.1.42:8080/join</code>"))
+        #expect(html.contains("data-target=\"join-0\""))
+        #expect(html.contains("<code id=\"join-1\">http://10.8.0.3:8080/join</code>"))
+        #expect(html.contains("data-target=\"join-1\""))
+    }
+
     // MARK: - the app link for a Mac
 
     /// A Mac cannot point its camera at its own screen. The page the server already opened on it
