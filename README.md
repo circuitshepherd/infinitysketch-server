@@ -20,7 +20,8 @@ Swift 6.3.3). Windows users do not need a toolchain at all — there is a
   previews; each document has its own page with a live frame while a device has it open.
 - **Scan to join.** At startup the server prints a QR code in the terminal. Scanning it with an
   iPhone/iPad camera opens InfinitySketch and asks — always asks — before pointing the app at this
-  server.
+  server. On a Mac, which cannot scan its own screen, the web overview offers the same as a click:
+  **Open InfinitySketch**.
 - **AI agents over MCP.** `http://<host>:<port>/mcp` exposes the document store to agents: listing,
   rendering (PNG), stroke/text/image/grid authoring and revision, selection control, tagging,
   merging, undo. Operations that need PencilKit (drawing, rendering) are relayed to a connected
@@ -37,8 +38,8 @@ swift run infsketch-server --docs ~/infsketch-docs
 ```
 
 Then scan the QR code the server prints with your iPad or iPhone camera — the app opens and asks to
-join. Or type the address by hand in the app under Settings. The web overview is at
-`http://localhost:8080/`.
+join. On a Mac, click **Open InfinitySketch** on the web overview the server opens in your browser
+instead, or enter the address in the app. The web overview is at `http://localhost:8080/`.
 
 Flags: `--port N` (default 8080), `--docs DIR` (default `./docs` — created if missing; documents
 are stored there as plain `.infsketch` files, deletions go to a `.trash/` folder pruned after 30
