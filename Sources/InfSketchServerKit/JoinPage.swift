@@ -26,6 +26,14 @@ enum JoinPage {
     /// while this page arrived over the LAN, so the page says so rather than looking broken.
     static let appStoreURL = "https://apps.apple.com/app/id6736661584"
 
+    /// The link that hands `host` to the app — UNESCAPED, so a page embedding it escapes it like
+    /// any other value. Defined once, because two pages offer it: this one, and the overview
+    /// page's connect panel for a Mac that cannot scan a code on its own screen. A second spelling
+    /// of the shape would be a second thing to keep in step with the app's `ServerJoinLink`.
+    static func appLink(host: String) -> String {
+        "\(scheme)://join?address=\(host)"
+    }
+
     /// `host` is the `Host` header verbatim — host and port as the device reached them.
     static func html(host: String) -> String {
         // The host reaches both an `href` and the page's text, and it arrives from the network.
@@ -54,7 +62,7 @@ enum JoinPage {
         <body>
           <h1>Sync with this server</h1>
           <p>This will point InfinitySketch at <code>\(safe)</code> and turn syncing on.</p>
-          <a class="join" href="\(scheme)://join?address=\(safe)">Open InfinitySketch</a>
+          <a class="join" href="\(HTML.escape(appLink(host: host)))">Open InfinitySketch</a>
           <p class="small">Nothing happening? InfinitySketch isn't installed on this device, or it is
           an older version that doesn't know how to join a server yet.</p>
           <a class="store" href="\(appStoreURL)">Get InfinitySketch on the App Store</a>

@@ -41,7 +41,7 @@ public enum ConnectPanel {
 
     public static func html(candidates: [LocalAddress], port: UInt16, host: String?) -> String {
         guard let selected = selectedIndex(candidates: candidates, host: host) else {
-            return section(body: noAddressBody(port: port), script: "")
+            return section(body: noAddressBody(port: port) + appLinkBlock(host: host), script: "")
         }
 
         var blocks = ""
@@ -57,7 +57,8 @@ public enum ConnectPanel {
             <div class="address" data-index="\(index)"\(index == selected ? "" : " hidden")>
               <div class="qr">\(qr)</div>
               <div class="meta">
-                <div class="ip">\(HTML.escape(candidate.ip)):\(port)</div>
+                <div class="ip"><span id="addr-\(index)">\(HTML.escape(candidate.ip)):\(port)</span>
+                  <button class="copy" data-target="addr-\(index)">copy</button></div>
                 <div class="iface">\(HTML.escape(candidate.interface))</div>
                 <p>Scan with the camera on your iPhone or iPad. The app asks before it joins.</p>
                 <p class="agent">AI agent (MCP)<br>
@@ -98,7 +99,29 @@ public enum ConnectPanel {
         <div class="chips">\(chips)</div>
         """ : ""
 
-        return section(body: blocks + local + switcher, script: behaviour)
+        return section(body: blocks + appLinkBlock(host: host) + local + switcher, script: behaviour)
+    }
+
+    /// The door for a Mac: it cannot point its camera at its own screen, and the server has
+    /// already opened this page in its browser. A click on the link is what a scan reaches four
+    /// steps later — the app's own "Sync with this server?" question (measured on the Designed-for-
+    /// iPad build: LaunchServices routes the scheme to it as it does on iOS).
+    ///
+    /// The SAME link `/join` offers, under the SAME rule: the address is the `Host` header this page
+    /// was reached on, which has proved itself reachable by loading — so the startup tab hands the
+    /// app on the same Mac `localhost`, and a page opened from another Mac hands that Mac the address
+    /// it used. Without a Host header no address has proved itself, so no link is offered rather
+    /// than one guessed. It sits OUTSIDE the per-address blocks the chips hide and show, because it
+    /// does not depend on which network address is selected.
+    static func appLinkBlock(host: String?) -> String {
+        guard let host, !host.isEmpty else { return "" }
+        return """
+        <p class="agent">InfinitySketch on this Mac<br>
+          <a class="open" href="\(HTML.escape(JoinPage.appLink(host: host)))">Open InfinitySketch</a>
+          — it asks before it syncs with <code>\(HTML.escape(host))</code>.<br>
+          Nothing happening? InfinitySketch isn't installed on this Mac.</p>
+
+        """
     }
 
     private static func noAddressBody(port: UInt16) -> String {
@@ -153,6 +176,7 @@ public enum ConnectPanel {
              narrow window instead of wrapping. */
           #connect .cmd { overflow-wrap: anywhere; }
           #connect .hint { font-size: 0.85rem; color: var(--fg-dim, gray); margin: 1rem 0 0.35rem; }
+          #connect .open { color: var(--accent, #0a84ff); font-weight: 600; text-decoration: none; }
           #connect .chips { display: flex; gap: 0.5rem; flex-wrap: wrap; }
           #connect .chip { font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem;
                            border-radius: 999px;

@@ -175,4 +175,79 @@ import Testing
             #expect(html.contains("data-target=\"\(target)\""), "missing button for \(target)")
         }
     }
+
+    /// The address beside the code is what a Mac user types or pastes into the app, so it has a
+    /// copy button like the agent urls — it had none (Josef, 2026-09-06), so it had to be selected
+    /// by hand out of a line that also carries the interface name.
+    @Test func everyAddressHasItsOwnCopyButton() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(html.contains("<span id=\"addr-0\">192.168.1.42:8080</span>"))
+        #expect(html.contains("data-target=\"addr-0\""))
+        #expect(html.contains("<span id=\"addr-1\">10.8.0.3:8080</span>"))
+        #expect(html.contains("data-target=\"addr-1\""))
+    }
+
+    // MARK: - the app link for a Mac
+
+    /// A Mac cannot point its camera at its own screen. The page the server already opened on it
+    /// offers the SAME link `/join` does, under the SAME rule: the address is the Host header the
+    /// page was reached on, which has proved itself reachable by loading.
+    @Test func theAppLinkCarriesTheHostThePageWasReachedOn() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: "192.168.1.42:8080")
+        #expect(html.contains("href=\"infinitysketch://join?address=192.168.1.42:8080\""))
+    }
+
+    /// The startup tab is localhost — for the app on the same Mac exactly the right address, and
+    /// one that survives every change of network.
+    @Test func theStartupTabLinksTheAppOverLoopback() {
+        let html = ConnectPanel.html(candidates: [wifi], port: 8080, host: "localhost:8080")
+        #expect(html.contains("href=\"infinitysketch://join?address=localhost:8080\""))
+    }
+
+    /// Without a Host header no address has proved itself, so no link is offered rather than one
+    /// guessed — a guessed address is what the whole join design refuses.
+    @Test func withoutAHostThereIsNoAppLink() {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: nil)
+        #expect(!html.contains("infinitysketch://"))
+    }
+
+    /// ONE definition of the link: this page and `/join` must offer the identical href for a host.
+    @Test func theAppLinkIsTheJoinPagesLink() {
+        let host = "10.8.0.3:18551"
+        let href = "href=\"\(JoinPage.appLink(host: host))\""
+        #expect(ConnectPanel.html(candidates: [wifi, vpn], port: 18551, host: host).contains(href))
+        #expect(JoinPage.html(host: host).contains(href))
+    }
+
+    /// Outside the switchable blocks, like the loopback agent url: the link does not depend on
+    /// which network address is selected, so hiding it with one would lose it for every other.
+    @Test func theAppLinkIsNotInsideASwitchableAddressBlock() throws {
+        let html = ConnectPanel.html(candidates: [wifi, vpn], port: 8080, host: "10.8.0.3:8080")
+        let link = try #require(html.range(of: "infinitysketch://join"))
+        let prefix = html[html.startIndex..<link.lowerBound]
+        let opened = prefix.components(separatedBy: "<div").count - 1
+        let closed = prefix.components(separatedBy: "</div>").count - 1
+        #expect(opened == closed, "app link sits inside \(opened - closed) unclosed div(s)")
+    }
+
+    /// A machine with no network address still serves the app on the same Mac over loopback, so the
+    /// fallback body carries the link too.
+    @Test func theNoAddressFallbackStillOffersTheAppLink() {
+        let html = ConnectPanel.html(candidates: [], port: 8080, host: "localhost:8080")
+        #expect(html.contains("href=\"infinitysketch://join?address=localhost:8080\""))
+    }
+
+    /// The host arrives from the network and reaches both an href and the page's text.
+    @Test func theAppLinkHostIsEscaped() {
+        let html = ConnectPanel.html(candidates: [wifi], port: 8080,
+                                     host: "\"><script>alert(1)</script>")
+        #expect(!html.contains("<script>alert"))
+        #expect(html.contains("&lt;script&gt;"))
+    }
+
+    /// Says what to do when nothing happens — the case a user cannot diagnose alone.
+    @Test func theAppLinkExplainsTheSilentFailure() {
+        let html = ConnectPanel.html(candidates: [wifi], port: 8080, host: "localhost:8080")
+        #expect(html.localizedCaseInsensitiveContains("isn't installed"))
+    }
 }
