@@ -61,6 +61,9 @@ public enum ConnectPanel {
                   <button class="copy" data-target="addr-\(index)">copy</button></div>
                 <div class="iface">\(HTML.escape(candidate.interface))</div>
                 <p>Scan with the camera on your iPhone or iPad. The app asks before it joins.</p>
+                <p class="agent">Can't scan? Open this on the device:<br>
+                  <code id="join-\(index)">\(HTML.escape(joinURL))</code>
+                  <button class="copy" data-target="join-\(index)">copy</button></p>
                 <p class="agent">AI agent (MCP)<br>
                   <code id="mcp-\(index)">\(HTML.escape(mcpURL))</code>
                   <button class="copy" data-target="mcp-\(index)">copy</button><br>
