@@ -101,11 +101,14 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 
 | InfinitySketch (App Store) | infsketch-server tag | wire protocol |
 |---|---|---|
+| 2.2 (iOS and Mac) | v1.2.0 | 11 |
 | 2.1 | v1.1.0 | 11 |
 | 2.1 | v1.0.1 | 11 |
 | 2.1 | v1.0.0 | 11 |
 
-Every tag so far speaks wire 11, so any of them pairs with InfinitySketch 2.1 — prefer the newest.
+Every tag so far speaks wire 11, so any of them pairs with InfinitySketch 2.1 and 2.2 — prefer
+the newest. v1.2.0 adds the join link a Mac can click, live previews of documents nobody has open,
+and render-to-file for agents.
 
 Run the tagged release that matches your app version; `main` may be ahead of what the shipped app
 speaks. Syncing with a server arrived in InfinitySketch 2.1 — earlier versions have no server
