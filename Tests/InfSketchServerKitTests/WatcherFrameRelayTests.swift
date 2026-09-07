@@ -43,6 +43,37 @@ import InfSketchWire
         #expect(asked == [.init(docId: "d", bytes: Fixtures.docBytes, px: 2048)])
     }
 
+    /// The case a real user hits first: a document the DEVICE holds and has never opened during
+    /// this server's life — advertised, listed on the overview with its 256 px thumbnail, and
+    /// NOT in the store. `subscribe` pulls such a document from its holder; `watch` threw
+    /// `notFound` instead, the page got a silent `unknownDoc`, no watcher was registered, and the
+    /// relay that exists for exactly this document never ran. The viewer sat on the thumbnail.
+    @Test func watchingAnAdvertisedDocumentTheStoreLacksFetchesItAndRendersIt() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relay-frame-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        let manager = SessionManager(store: store, config: SessionConfig(gracePeriod: .milliseconds(50)))
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Held", modifiedAt: Date(timeIntervalSince1970: 0),
+                              sizeBytes: 3, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await manager.setContentProvider { _, _ in Fixtures.docBytes }
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            return (png: Data([7]), canvasRect: nil)
+        }
+
+        let watch = try await manager.watch(docId: "Held", framePx: 1024)
+        var it = watch.events.makeAsyncIterator()
+        #expect(await it.next() == .frameAvailable(docId: "Held", seq: 0))
+        #expect(await manager.latestFrame(docId: "Held")?.png == Data([7]))
+        #expect(await calls.all == [.init(docId: "Held", bytes: Fixtures.docBytes, px: 1024)])
+        // Fetched content is persisted, as a subscribe's is — the document is now an ordinary one.
+        #expect(try store.load(docId: "Held") == Fixtures.docBytes)
+    }
+
     @Test func aSubscribedDocumentIsLeftToItsDevice() async throws {
         let manager = try makeManager()
         await manager.setFrameProvider { _, _, _ in
