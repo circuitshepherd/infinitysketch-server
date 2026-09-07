@@ -187,32 +187,7 @@ public actor SessionManager {
                 // M2c-1: the server holds no bytes, but a connected device does — pull them from
                 // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
                 // then open the session normally. With no holders/provider this rethrows notFound.
-                let bytes = try await fetchFromHolders(docId: docId)
-                // Re-check BEFORE persisting. This fetch is the only suspension point in
-                // `subscribe`, and the actor is REENTRANT: another subscribe for this docId may
-                // already have saved, opened and registered a session — which may since have
-                // accepted writes. Writing our fetched (by now possibly stale) bytes here would
-                // silently revert those on disk, invisible until the session recycles and reloads
-                // from the store. An adopting caller must therefore persist nothing at all.
-                // Nothing below suspends, so once these checks pass the save/open/register
-                // sequence completes without further reentrancy.
-                if let raced = sessions[docId] {
-                    opened = raced
-                } else {
-                    // …and a session is not the only thing that can have landed content while we
-                    // awaited: a writer may have opened a session, written, and then had it GRACE
-                    // TORN DOWN, leaving durable bytes with NO session behind them (the same
-                    // store-only state `currentBytesOrFetch`'s own re-check guards). Relying on
-                    // `gracePeriod` outlasting the fetch would be a config coupling, not a
-                    // guarantee — and with the F9 budget the worst-case fetch (budget + one
-                    // attempt) can legitimately approach it. So consult the durable truth: if
-                    // anything is stored now it WINS, and opening from the store loads it.
-                    if (try? store.exists(docId: docId)) != true {
-                        try store.save(docId: docId, bytes: bytes)
-                    }
-                    opened = try DocumentSession(docId: docId, store: store,
-                                                 bufferLimit: config.outboundBufferLimit)
-                }
+                opened = try await openSessionFetchingFromHolders(docId: docId)
             }
             // The fetch arm above is the ONLY branch here containing a suspension point, and this
             // actor is REENTRANT: a second concurrent subscribe for the SAME docId can have
@@ -296,9 +271,27 @@ public actor SessionManager {
         if let existing = sessions[docId] {
             session = existing
         } else {
-            session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
-            sessions[docId] = session
-            emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            let opened: DocumentSession
+            do {
+                opened = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
+            } catch DocumentStoreError.notFound {
+                // The document a user reaches for first is one the DEVICE holds and has not opened
+                // during this server's life: advertised, on the overview, and not in the store.
+                // `subscribe` has pulled such a document from its holder since M2c-1; `watch` threw
+                // `notFound` here instead, the page received a silent `unknownDoc`, no watcher was
+                // registered, and the relay built for exactly this document never ran — so the
+                // viewer sat on the 256 px thumbnail with the device's dot green (2026-09-07).
+                opened = try await openSessionFetchingFromHolders(docId: docId)
+            }
+            // The fetch arm suspends and this actor is reentrant — a second watch or a subscribe
+            // may have registered a session meanwhile; adopt it (see `subscribe`).
+            if let raced = sessions[docId] {
+                session = raced
+            } else {
+                session = opened
+                sessions[docId] = opened
+                emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
+            }
         }
         let result = await session.watch(framePx: framePx)
         tokenWatchDocs[result.token] = docId
@@ -637,6 +630,32 @@ public actor SessionManager {
     static func stamp() -> String {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.string(from: Date())
+    }
+
+    /// Opens a session for a document the store LACKS by pulling its bytes from a holder — the one
+    /// branch `subscribe` and `watch` share. Returns a session that is NOT yet registered in
+    /// `sessions` unless one raced in, in which case that one is returned and the caller adopts it.
+    private func openSessionFetchingFromHolders(docId: String) async throws -> DocumentSession {
+        let bytes = try await fetchFromHolders(docId: docId)
+        // Re-check BEFORE persisting. This fetch is the only suspension point in the callers,
+        // and the actor is REENTRANT: another subscribe or watch for this docId may already have
+        // saved, opened and registered a session — which may since have accepted writes. Writing
+        // our fetched (by now possibly stale) bytes here would silently revert those on disk,
+        // invisible until the session recycles and reloads from the store. An adopting caller
+        // must therefore persist nothing at all. Nothing below suspends, so once these checks
+        // pass the save/open sequence completes without further reentrancy.
+        if let raced = sessions[docId] { return raced }
+        // …and a session is not the only thing that can have landed content while we awaited: a
+        // writer may have opened a session, written, and then had it GRACE TORN DOWN, leaving
+        // durable bytes with NO session behind them (the same store-only state
+        // `currentBytesOrFetch`'s own re-check guards). Relying on `gracePeriod` outlasting the
+        // fetch would be a config coupling, not a guarantee — and with the F9 budget the
+        // worst-case fetch (budget + one attempt) can legitimately approach it. So consult the
+        // durable truth: if anything is stored now it WINS, and opening from the store loads it.
+        if (try? store.exists(docId: docId)) != true {
+            try store.save(docId: docId, bytes: bytes)
+        }
+        return try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
     }
 
     private func fetchFromHolders(docId: String) async throws -> Data {
