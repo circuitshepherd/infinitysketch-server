@@ -24,6 +24,14 @@ import InfSketchWire
         struct Call: Equatable { let docId: String; let bytes: Data; let px: Int? }
         private(set) var all: [Call] = []
         func record(_ docId: String, _ bytes: Data, _ px: Int?) { all.append(Call(docId: docId, bytes: bytes, px: px)) }
+        /// Waits for the provider to have been asked `n` times, or gives up after `deadline`.
+        /// A fixed sleep asserted a count that a starved scheduler (the 2-vCPU CI runner, the
+        /// whole suite in parallel) had not yet reached — measured on Linux, 2026-09-08.
+        func reached(_ n: Int, within deadline: Duration = .seconds(5)) async -> Int {
+            let clock = ContinuousClock(); let start = clock.now
+            while all.count < n, clock.now - start < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+            return all.count
+        }
     }
 
     @Test func watchingAnUnopenedDocumentAsksTheProviderAndCachesItsFrame() async throws {
@@ -111,12 +119,12 @@ import InfSketchWire
             throw DeviceCommandBroker.DeviceCommandError.deviceFailed("renderTooLarge")
         }
         let watch = try await manager.watch(docId: "d")
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(await calls.all.count == 2)   // the attempt plus one retry, then quiet
+        #expect(await calls.reached(2) == 2)   // the attempt plus one retry…
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await calls.all.count == 2)   // …then quiet: no timer is armed past the last retry
         _ = watch
         _ = try await manager.watch(docId: "d", framePx: 2048)   // an explicit trigger
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(await calls.all.count == 4)
+        #expect(await calls.reached(4) == 4)
     }
 
     /// No device is not a failure to retry on a timer: the device that connects triggers the
@@ -129,11 +137,11 @@ import InfSketchWire
             throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable
         }
         _ = try await manager.watch(docId: "d")
+        #expect(await calls.reached(1) == 1)
         try await Task.sleep(for: .milliseconds(150))
-        #expect(await calls.all.count == 1)
+        #expect(await calls.all.count == 1)   // no timer: still one
         await manager.deviceAppeared(capabilities: ["render"])
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(await calls.all.count == 2)
+        #expect(await calls.reached(2) == 2)
     }
 
     /// The device rendering a watched document's frames closes it: from then on nobody renders
