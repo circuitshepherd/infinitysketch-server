@@ -177,7 +177,10 @@ actor DocumentSession {
     /// reported it — `nil` from a device that drew nothing. It travels WITH the bytes
     /// rather than on the frameAvailable nudge so a browser can never pair a new PNG
     /// with an older rect.
-    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?)?
+    /// `px` is the long side the frame was RENDERED FOR: the relay's request, or, for a frame the
+    /// device pushed, what the watchers were asking at the time — the one fact the relay needs
+    /// to decide whether the page already has a current picture (see `SessionManager.relayFrameIfNeeded`).
+    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?, px: Int)?
 
     /// Designated: session over already-known bytes (createIfMissing path uses
     /// empty bytes; nothing is persisted until the first op's store.save).
@@ -303,9 +306,19 @@ actor DocumentSession {
 
     /// Cache the frame and nudge every watcher. Ephemeral: no seq, no store,
     /// no subscriber echo.
-    func submitFrame(bytes: Data, canvasRect: [Double]?) {
-        latestFrame = (png: bytes, seq: seq, receivedAt: Date(),
-                       canvasRect: DocumentSession.validCanvasRect(canvasRect))
+    /// The bytes and the seq they are at, read in ONE actor turn — a relay that read them in two
+    /// could render seq N's bytes and stamp the frame N+1, which then reads as current.
+    var renderSnapshot: (bytes: Data, seq: Int) { (bytes, seq) }
+
+    /// `renderedFor` is the long side this frame was rendered for; nil means "whatever the
+    /// watchers are asking now", which is what a device renders its own frames at. `atSeq` is
+    /// the seq of the bytes the frame shows; nil means the session's current seq, which is what
+    /// a device's own frame of its live state is stamped with. A relayed render finishing after
+    /// a write MUST name the older seq, or the write's re-render is skipped as already done.
+    func submitFrame(bytes: Data, canvasRect: [Double]?, renderedFor: Int? = nil, atSeq: Int? = nil) {
+        latestFrame = (png: bytes, seq: atSeq ?? seq, receivedAt: Date(),
+                       canvasRect: DocumentSession.validCanvasRect(canvasRect),
+                       px: renderedFor ?? requestedFramePx ?? WatcherFrame.defaultLongSidePx)
         let message = ServerMessage.frameAvailable(docId: docId, seq: seq)
         for (token, continuation) in watchers {
             switch continuation.yield(message) {

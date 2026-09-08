@@ -165,6 +165,25 @@ import InfSketchWire
         #expect(await calls.all == [.init(docId: "d", bytes: Data("V2".utf8), px: 2048)])
     }
 
+    /// A device frame AT the current seq is a current picture: the handover renders nothing.
+    /// The relay used to keep its own "last rendered" record beside the cached frame, and the two
+    /// disagreed after a refetch dance — this and the test above pin the one-source rule.
+    @Test func aDeviceFrameAtTheCurrentSeqMakesTheHandoverANoOp() async throws {
+        let manager = try makeManager()
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            return (png: bytes, canvasRect: nil)
+        }
+        let device = try await manager.subscribe(docId: "d")
+        _ = try await manager.watch(docId: "d", framePx: 1024)
+        _ = await manager.submitFrame(docId: "d", bytes: Data([5]), canvasRect: nil)   // the device's own frame at seq 0
+        await manager.unsubscribe(docId: "d", token: device.token)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await calls.all.isEmpty)
+        #expect(await manager.latestFrame(docId: "d")?.png == Data([5]))
+    }
+
     /// "Res: auto" IS the default size; toggling to 1024 must not render the same picture twice.
     @Test func autoAndTheDefaultSizeAreOneRequest() async throws {
         let manager = try makeManager()
