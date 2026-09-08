@@ -17,6 +17,15 @@ public struct SessionConfig: Sendable {
     public var mcpSessionIdleTimeout: Duration
     /// How often the MCP adapter sweeps for idle sessions.
     public var mcpSessionCleanupInterval: Duration
+    /// After a relayed watcher-frame render FAILS on a device (timeout, refusal, a device that
+    /// dropped mid-request), the waits before trying again — one entry per attempt, then the
+    /// document waits for its next trigger. `noDeviceAvailable` is not retried on a timer: a
+    /// device that connects triggers the relay itself. Injectable so a test need not wait seconds.
+    /// The last wait is longer than the keepalive takes to drop a dead connection (30 s idle
+    /// ping + 10 s grace): the broker always asks the MOST RECENTLY connected capable device,
+    /// so with two devices and one asleep the earlier retries all hit the sleeping one, and only
+    /// an attempt after it is gone reaches the other.
+    public var relayRetryDelays: [Duration]
     /// How long `DeviceCommandBroker.requestCreation` waits for a device's
     /// `createDocReply` before failing with `.deviceTimeout`.
     public var createDocTimeout: Duration
@@ -83,8 +92,10 @@ public struct SessionConfig: Sendable {
         keepaliveIdleInterval: Duration = .seconds(30),
         keepalivePingGrace: Duration = .seconds(10),
         keepaliveTickInterval: Duration = .seconds(5),
-        assumedMinimumDrainRate: Int = 1024 * 1024
+        assumedMinimumDrainRate: Int = 1024 * 1024,
+        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)]
     ) {
+        self.relayRetryDelays = relayRetryDelays
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
         self.inlineLimit = inlineLimit
@@ -166,7 +177,10 @@ actor DocumentSession {
     /// reported it — `nil` from a device that drew nothing. It travels WITH the bytes
     /// rather than on the frameAvailable nudge so a browser can never pair a new PNG
     /// with an older rect.
-    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?)?
+    /// `px` is the long side the frame was RENDERED FOR: the relay's request, or, for a frame the
+    /// device pushed, what the watchers were asking at the time — the one fact the relay needs
+    /// to decide whether the page already has a current picture (see `SessionManager.relayFrameIfNeeded`).
+    private(set) var latestFrame: (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?, px: Int)?
 
     /// Designated: session over already-known bytes (createIfMissing path uses
     /// empty bytes; nothing is persisted until the first op's store.save).
@@ -292,9 +306,19 @@ actor DocumentSession {
 
     /// Cache the frame and nudge every watcher. Ephemeral: no seq, no store,
     /// no subscriber echo.
-    func submitFrame(bytes: Data, canvasRect: [Double]?) {
-        latestFrame = (png: bytes, seq: seq, receivedAt: Date(),
-                       canvasRect: DocumentSession.validCanvasRect(canvasRect))
+    /// The bytes and the seq they are at, read in ONE actor turn — a relay that read them in two
+    /// could render seq N's bytes and stamp the frame N+1, which then reads as current.
+    var renderSnapshot: (bytes: Data, seq: Int) { (bytes, seq) }
+
+    /// `renderedFor` is the long side this frame was rendered for; nil means "whatever the
+    /// watchers are asking now", which is what a device renders its own frames at. `atSeq` is
+    /// the seq of the bytes the frame shows; nil means the session's current seq, which is what
+    /// a device's own frame of its live state is stamped with. A relayed render finishing after
+    /// a write MUST name the older seq, or the write's re-render is skipped as already done.
+    func submitFrame(bytes: Data, canvasRect: [Double]?, renderedFor: Int? = nil, atSeq: Int? = nil) {
+        latestFrame = (png: bytes, seq: atSeq ?? seq, receivedAt: Date(),
+                       canvasRect: DocumentSession.validCanvasRect(canvasRect),
+                       px: renderedFor ?? requestedFramePx ?? WatcherFrame.defaultLongSidePx)
         let message = ServerMessage.frameAvailable(docId: docId, seq: seq)
         for (token, continuation) in watchers {
             switch continuation.yield(message) {

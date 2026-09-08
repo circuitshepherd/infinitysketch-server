@@ -82,10 +82,17 @@ public actor SessionManager {
     /// yields one render after the last, never a queue of ten (the app's `FrameScheduler` shape).
     private var relayRenders: [String: Task<Void, Never>] = [:]
     private var relayPending: Set<String> = []
-    /// What the relay last rendered for a document, so the same state is not rendered twice
-    /// (a second page opening, a re-watch at the same size) while a write or a larger request
-    /// renders again. A frame the DEVICE pushed never sets it.
-    private var relayed: [String: (seq: Int, px: Int?)] = [:]
+    // There is deliberately NO record of "what the relay last rendered": the cached frame itself
+    // is the only memory. A separate record was set by a handover during a refetch dance, then a
+    // device frame at the same seq replaced the cached frame, and at the real close the record
+    // still said "current" — so the relay skipped, silently (measured inside a landing,
+    // 2026-09-08). One source of truth cannot disagree with itself.
+    /// Failed relay attempts since the last success or explicit trigger, and the retry sleeping
+    /// for the next one. A render that fails on the device used to be swallowed by a `try?` — the
+    /// page kept what it had and nothing anywhere said why (measured 2026-09-08: every 2048 px
+    /// request was refused as `renderTooLarge`, on every document, silently).
+    private var relayAttempts: [String: Int] = [:]
+    private var relayRetries: [String: Task<Void, Never>] = [:]
 
     public func setFrameProvider(_ provider: @escaping FrameProvider) {
         frameProvider = provider
@@ -102,42 +109,84 @@ public actor SessionManager {
         }
     }
 
-    /// The trigger: on `watch`, after every accepted write, and when a render-capable device
-    /// connects. A subscriber present means a device will push its own frame, and the relay
-    /// stays out of its way.
-    private func relayFrameIfNeeded(docId: String) async {
+    /// The trigger: on `watch`, after every accepted write, when the LAST SUBSCRIBER leaves a
+    /// watched document, and when a render-capable device connects. A subscriber present means
+    /// a device will push its own frame, and the relay stays out of its way.
+    ///
+    /// `isRetry` is the timer coming back after a failure; an explicit trigger starts the attempt
+    /// count over, so a document that failed three times is not stranded once something changes.
+    private func relayFrameIfNeeded(docId: String, isRetry: Bool = false) async {
+        if !isRetry { relayAttempts[docId] = 0 }
         guard frameProvider != nil, (counts[docId] ?? 0) == 0, (watcherCounts[docId] ?? 0) > 0,
               let session = sessions[docId] else { return }
         let seq = await session.seq
-        let px = await session.requestedFramePx
-        if let done = relayed[docId], done.seq == seq, done.px == px,
-           await session.latestFrame != nil {
+        // "No preference" IS the default size — comparing nil against 1024 rendered the same
+        // picture twice when a page toggled Res from auto to 1024.
+        let px = await session.requestedFramePx ?? WatcherFrame.defaultLongSidePx
+        // The page already has a current picture when the cached frame — whoever rendered it —
+        // is at this seq and at least this size. Anything else renders: a write moved the seq,
+        // a page asked for more, or the device's last frame predates its close push.
+        if let frame = await session.latestFrame, frame.seq == seq, frame.px >= px {
+            ServerLog.verbose("[relay] '\(docId)' is current (seq \(seq), \(frame.px) px); nothing to render")
             return
         }
         if relayRenders[docId] != nil {
+            ServerLog.verbose("[relay] '\(docId)': a render is in flight; one more queued")
             relayPending.insert(docId)
             return
         }
+        relayRetries.removeValue(forKey: docId)?.cancel()
+        ServerLog.verbose("[relay] rendering '\(docId)' at \(px) px (seq \(seq)) on a device")
         relayRenders[docId] = Task { await self.runRelay(docId: docId) }
     }
 
     private func runRelay(docId: String) async {
         if let provider = frameProvider, let session = sessions[docId] {
-            let bytes = await session.currentBytes
-            let seq = await session.seq
-            let px = await session.requestedFramePx
-            // A refused or failed render changes nothing: the page keeps what it has, and the
-            // next trigger tries again. No timer retries a device that is not there.
-            if let frame = try? await provider(docId, bytes, px) {
+            let (bytes, seq) = await session.renderSnapshot
+            let px = await session.requestedFramePx ?? WatcherFrame.defaultLongSidePx
+            do {
+                let frame = try await provider(docId, bytes, px)
                 // The document may have gained a subscriber or lost its watchers meanwhile; the
-                // frame is still the newest picture of these bytes, so it is cached either way.
-                await session.submitFrame(bytes: frame.png, canvasRect: frame.canvasRect)
-                relayed[docId] = (seq, px)
+                // frame is still the newest picture of these bytes, so it is cached either way —
+                // stamped with THEIR seq, so a write that landed during the render is not read
+                // as already rendered.
+                await session.submitFrame(bytes: frame.png, canvasRect: frame.canvasRect,
+                                          renderedFor: px, atSeq: seq)
+                relayAttempts[docId] = 0
+                ServerLog.verbose("[relay] '\(docId)' rendered: \(frame.png.count) bytes at seq \(seq)")
+            } catch {
+                noteRelayFailure(docId: docId, px: px, error: error)
             }
         }
         relayRenders[docId] = nil
         if relayPending.remove(docId) != nil {
             await relayFrameIfNeeded(docId: docId)
+        }
+    }
+
+    /// A failed render is SAID and, unless no device is there to ask, TRIED AGAIN on a short
+    /// backoff while the document stays watched and unopened. The page keeps what it has
+    /// meanwhile — a stale picture is a defined state, a silently permanent one is not.
+    private func noteRelayFailure(docId: String, px: Int, error: any Error) {
+        if case DeviceCommandBroker.DeviceCommandError.noDeviceAvailable = error {
+            // A device that connects re-triggers the relay itself (`deviceAppeared`).
+            ServerLog.verbose("[relay] no device can render '\(docId)' at \(px) px; waiting for one")
+            return
+        }
+        let attempt = (relayAttempts[docId] ?? 0) + 1
+        relayAttempts[docId] = attempt
+        let delays = config.relayRetryDelays
+        guard attempt <= delays.count else {
+            ServerLog.error("[relay] render of '\(docId)' at \(px) px failed: \(error) — giving up until the document is watched or written again")
+            return
+        }
+        let delay = delays[attempt - 1]
+        ServerLog.error("[relay] render of '\(docId)' at \(px) px failed: \(error) — retrying in \(delay)")
+        relayRetries[docId]?.cancel()
+        relayRetries[docId] = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.relayFrameIfNeeded(docId: docId, isRetry: true)
         }
     }
 
@@ -224,6 +273,12 @@ public actor SessionManager {
         emitStatus(docId: docId, kind: "subscriberCount", seq: await session.seq, count: remaining)
         if remaining == 0 && (watcherCounts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
+        } else if remaining == 0 {
+            // The device that was rendering this document's frames has just closed it. Its last
+            // frame may predate its close push, and from here nobody renders unless asked — so
+            // the relay takes over exactly where a subscriber's own frames stop.
+            ServerLog.verbose("[relay] the last subscriber left '\(docId)' with \(watcherCounts[docId] ?? 0) watcher(s)")
+            await relayFrameIfNeeded(docId: docId)
         }
     }
 
@@ -317,7 +372,7 @@ public actor SessionManager {
         return true
     }
 
-    public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?)? {
+    public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?, px: Int)? {
         guard let session = sessions[docId] else { return nil }
         return await session.latestFrame
     }
