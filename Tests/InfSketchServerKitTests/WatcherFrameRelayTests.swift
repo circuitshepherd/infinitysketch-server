@@ -74,6 +74,106 @@ import InfSketchWire
         #expect(try store.load(docId: "Held") == Fixtures.docBytes)
     }
 
+    private func makeManager(retryDelays: [Duration]) throws -> SessionManager {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relay-frame-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "d", bytes: Fixtures.docBytes)
+        return SessionManager(store: store, config: SessionConfig(gracePeriod: .milliseconds(50),
+                                                                   relayRetryDelays: retryDelays))
+    }
+
+    /// A render the device refused or timed out on used to be swallowed by a `try?`: the page
+    /// kept what it had and nothing said why. Now it is tried again on the configured backoff.
+    @Test func aFailedRenderIsTriedAgain() async throws {
+        let manager = try makeManager(retryDelays: [.milliseconds(20), .milliseconds(20)])
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            if await calls.all.count < 3 { throw DeviceCommandBroker.DeviceCommandError.deviceTimeout }
+            return (png: Data([9]), canvasRect: nil)
+        }
+        let watch = try await manager.watch(docId: "d", framePx: 2048)
+        var it = watch.events.makeAsyncIterator()
+        #expect(await it.next() == .frameAvailable(docId: "d", seq: 0))
+        #expect(await calls.all.count == 3)
+        #expect(await manager.latestFrame(docId: "d")?.png == Data([9]))
+    }
+
+    /// After the configured attempts the document waits for its next trigger — and that trigger
+    /// starts the count over, so a document is never stranded by an old run of failures.
+    @Test func afterTheLastRetryTheNextTriggerStartsOver() async throws {
+        let manager = try makeManager(retryDelays: [.milliseconds(10)])
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            throw DeviceCommandBroker.DeviceCommandError.deviceFailed("renderTooLarge")
+        }
+        let watch = try await manager.watch(docId: "d")
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await calls.all.count == 2)   // the attempt plus one retry, then quiet
+        _ = watch
+        _ = try await manager.watch(docId: "d", framePx: 2048)   // an explicit trigger
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await calls.all.count == 4)
+    }
+
+    /// No device is not a failure to retry on a timer: the device that connects triggers the
+    /// relay itself (`deviceAppeared`).
+    @Test func noDeviceIsNotRetriedOnATimer() async throws {
+        let manager = try makeManager(retryDelays: [.milliseconds(10), .milliseconds(10)])
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable
+        }
+        _ = try await manager.watch(docId: "d")
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await calls.all.count == 1)
+        await manager.deviceAppeared(capabilities: ["render"])
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await calls.all.count == 2)
+    }
+
+    /// The device rendering a watched document's frames closes it: from then on nobody renders
+    /// unless asked, and its last frame may predate its close push. The relay takes over.
+    @Test func theLastSubscriberLeavingAWatchedDocumentRendersIt() async throws {
+        let manager = try makeManager()
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            return (png: bytes, canvasRect: nil)
+        }
+        let device = try await manager.subscribe(docId: "d")
+        let watch = try await manager.watch(docId: "d", framePx: 2048)
+        var it = watch.events.makeAsyncIterator()
+        _ = await manager.submit(docId: "d", opId: "w", payload: OpPayload(type: "fullDoc", data: Data("V2".utf8)),
+                                 submitter: device.token)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await calls.all.isEmpty)   // the device renders its own frames while it is open
+        await manager.unsubscribe(docId: "d", token: device.token)
+        #expect(await it.next() == .frameAvailable(docId: "d", seq: 1))
+        #expect(await calls.all == [.init(docId: "d", bytes: Data("V2".utf8), px: 2048)])
+    }
+
+    /// "Res: auto" IS the default size; toggling to 1024 must not render the same picture twice.
+    @Test func autoAndTheDefaultSizeAreOneRequest() async throws {
+        let manager = try makeManager()
+        let calls = Calls()
+        await manager.setFrameProvider { docId, bytes, px in
+            await calls.record(docId, bytes, px)
+            return (png: Data([1]), canvasRect: nil)
+        }
+        let first = try await manager.watch(docId: "d")
+        var it = first.events.makeAsyncIterator()
+        #expect(await it.next() == .frameAvailable(docId: "d", seq: 0))
+        _ = try await manager.watch(docId: "d", framePx: WatcherFrame.defaultLongSidePx)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await calls.all.count == 1)
+        #expect(await calls.all.first?.px == WatcherFrame.defaultLongSidePx)
+    }
+
     @Test func aSubscribedDocumentIsLeftToItsDevice() async throws {
         let manager = try makeManager()
         await manager.setFrameProvider { _, _, _ in
@@ -141,7 +241,8 @@ import InfSketchWire
         let big = try await manager.watch(docId: "d", framePx: 2048)
         var it2 = big.events.makeAsyncIterator()
         #expect(await it2.next() == .frameAvailable(docId: "d", seq: 0))
-        #expect(await calls.all.map(\.px) == [nil, 2048])
+        // A page with no preference asks for the default size by name — auto and 1024 are one request.
+        #expect(await calls.all.map(\.px) == [WatcherFrame.defaultLongSidePx, 2048])
     }
 
     @Test func aFailedRenderKeepsWhatThePageHasAndTheNextTriggerTriesAgain() async throws {
@@ -248,7 +349,13 @@ import InfSketchWire
         #expect(spec?["op"] as? String == "render")
         #expect(spec?["include"] as? String == "document")
         #expect(spec?["background"] as? String == "paper")
-        #expect(spec?["maxPixels"] as? Double == Double(2048 * 2048))
+        // 2048² is 4,194,304 — over the app renderer's 4,000,000 ceiling, which REFUSES rather
+        // than clamps (measured: `deviceFailed: renderTooLarge` on a 252×202 pt document). The
+        // budget stays under it; this line used to pin the refused value.
+        #expect(spec?["maxPixels"] as? Double == WatcherFrame.relayPixelBudget)
+        #expect(WatcherFrame.relayPixelBudget < 4_000_000)
+        let small = try JSONSerialization.jsonObject(with: WatcherFrame.renderSpec(longSidePx: 1024)) as? [String: Any]
+        #expect(small?["maxPixels"] as? Double == Double(1024 * 1024))
     }
 
     @Test func noRequestMeansTheDeviceDefault() throws {

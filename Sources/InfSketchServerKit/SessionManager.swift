@@ -86,6 +86,12 @@ public actor SessionManager {
     /// (a second page opening, a re-watch at the same size) while a write or a larger request
     /// renders again. A frame the DEVICE pushed never sets it.
     private var relayed: [String: (seq: Int, px: Int?)] = [:]
+    /// Failed relay attempts since the last success or explicit trigger, and the retry sleeping
+    /// for the next one. A render that fails on the device used to be swallowed by a `try?` — the
+    /// page kept what it had and nothing anywhere said why (measured 2026-09-08: every 2048 px
+    /// request was refused as `renderTooLarge`, on every document, silently).
+    private var relayAttempts: [String: Int] = [:]
+    private var relayRetries: [String: Task<Void, Never>] = [:]
 
     public func setFrameProvider(_ provider: @escaping FrameProvider) {
         frameProvider = provider
@@ -102,14 +108,20 @@ public actor SessionManager {
         }
     }
 
-    /// The trigger: on `watch`, after every accepted write, and when a render-capable device
-    /// connects. A subscriber present means a device will push its own frame, and the relay
-    /// stays out of its way.
-    private func relayFrameIfNeeded(docId: String) async {
+    /// The trigger: on `watch`, after every accepted write, when the LAST SUBSCRIBER leaves a
+    /// watched document, and when a render-capable device connects. A subscriber present means
+    /// a device will push its own frame, and the relay stays out of its way.
+    ///
+    /// `isRetry` is the timer coming back after a failure; an explicit trigger starts the attempt
+    /// count over, so a document that failed three times is not stranded once something changes.
+    private func relayFrameIfNeeded(docId: String, isRetry: Bool = false) async {
+        if !isRetry { relayAttempts[docId] = 0 }
         guard frameProvider != nil, (counts[docId] ?? 0) == 0, (watcherCounts[docId] ?? 0) > 0,
               let session = sessions[docId] else { return }
         let seq = await session.seq
-        let px = await session.requestedFramePx
+        // "No preference" IS the default size — comparing nil against 1024 rendered the same
+        // picture twice when a page toggled Res from auto to 1024.
+        let px = await session.requestedFramePx ?? WatcherFrame.defaultLongSidePx
         if let done = relayed[docId], done.seq == seq, done.px == px,
            await session.latestFrame != nil {
             return
@@ -118,6 +130,7 @@ public actor SessionManager {
             relayPending.insert(docId)
             return
         }
+        relayRetries.removeValue(forKey: docId)?.cancel()
         relayRenders[docId] = Task { await self.runRelay(docId: docId) }
     }
 
@@ -125,19 +138,47 @@ public actor SessionManager {
         if let provider = frameProvider, let session = sessions[docId] {
             let bytes = await session.currentBytes
             let seq = await session.seq
-            let px = await session.requestedFramePx
-            // A refused or failed render changes nothing: the page keeps what it has, and the
-            // next trigger tries again. No timer retries a device that is not there.
-            if let frame = try? await provider(docId, bytes, px) {
+            let px = await session.requestedFramePx ?? WatcherFrame.defaultLongSidePx
+            do {
+                let frame = try await provider(docId, bytes, px)
                 // The document may have gained a subscriber or lost its watchers meanwhile; the
                 // frame is still the newest picture of these bytes, so it is cached either way.
                 await session.submitFrame(bytes: frame.png, canvasRect: frame.canvasRect)
                 relayed[docId] = (seq, px)
+                relayAttempts[docId] = 0
+            } catch {
+                noteRelayFailure(docId: docId, px: px, error: error)
             }
         }
         relayRenders[docId] = nil
         if relayPending.remove(docId) != nil {
             await relayFrameIfNeeded(docId: docId)
+        }
+    }
+
+    /// A failed render is SAID and, unless no device is there to ask, TRIED AGAIN on a short
+    /// backoff while the document stays watched and unopened. The page keeps what it has
+    /// meanwhile — a stale picture is a defined state, a silently permanent one is not.
+    private func noteRelayFailure(docId: String, px: Int, error: any Error) {
+        if case DeviceCommandBroker.DeviceCommandError.noDeviceAvailable = error {
+            // A device that connects re-triggers the relay itself (`deviceAppeared`).
+            ServerLog.verbose("[relay] no device can render '\(docId)' at \(px) px; waiting for one")
+            return
+        }
+        let attempt = (relayAttempts[docId] ?? 0) + 1
+        relayAttempts[docId] = attempt
+        let delays = config.relayRetryDelays
+        guard attempt <= delays.count else {
+            ServerLog.error("[relay] render of '\(docId)' at \(px) px failed: \(error) — giving up until the document is watched or written again")
+            return
+        }
+        let delay = delays[attempt - 1]
+        ServerLog.error("[relay] render of '\(docId)' at \(px) px failed: \(error) — retrying in \(delay)")
+        relayRetries[docId]?.cancel()
+        relayRetries[docId] = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.relayFrameIfNeeded(docId: docId, isRetry: true)
         }
     }
 
@@ -224,6 +265,11 @@ public actor SessionManager {
         emitStatus(docId: docId, kind: "subscriberCount", seq: await session.seq, count: remaining)
         if remaining == 0 && (watcherCounts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
+        } else if remaining == 0 {
+            // The device that was rendering this document's frames has just closed it. Its last
+            // frame may predate its close push, and from here nobody renders unless asked — so
+            // the relay takes over exactly where a subscriber's own frames stop.
+            await relayFrameIfNeeded(docId: docId)
         }
     }
 

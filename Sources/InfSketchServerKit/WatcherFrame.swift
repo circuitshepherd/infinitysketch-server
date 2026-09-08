@@ -14,15 +14,26 @@ public enum WatcherFrame {
     /// this number; they should move together.
     public static let defaultLongSidePx = 1024
 
+    /// The most output pixels a relayed render may ask for. The app's `SketchRenderer` REFUSES
+    /// (`renderTooLarge`) any output over its `pixelCeiling` of 4,000,000 — and 2048² is
+    /// 4,194,304, so until 2026-09-08 every closed-document render at the viewer's "Res: 2048"
+    /// was refused by every device, the failure swallowed, and the page sat on whatever it had.
+    /// The budget sits below the ceiling with a margin, because the device checks the exact
+    /// floating product `(w·scale)·(h·scale)`, which can land a hair above the budget it was
+    /// derived from. A square document comes back ~1975 px on a side; the label says 2048, the
+    /// device's metadata says what it drew. Two repositories name the ceiling; they move together.
+    public static let relayPixelBudget: Double = 3_900_000
+
     /// A whole-document render on paper (the device's own frame draws no grid either), budgeted
-    /// at the requested long side squared. `maxPixels` is an AREA budget, so a non-square
-    /// document comes back with its long side past `px` and its area at px² — the viewer maps a
-    /// frame by its reported rect, so that is well defined. `appearance` is omitted: the device
-    /// then renders the document's own theme, exactly as its own frame does.
+    /// at the requested long side squared, capped at `relayPixelBudget`. `maxPixels` is an AREA
+    /// budget, so a non-square document comes back with its long side past `px` and its area at
+    /// the budget — the viewer maps a frame by its reported rect, so that is well defined.
+    /// `appearance` is omitted: the device then renders the document's own theme, exactly as its
+    /// own frame does.
     public static func renderSpec(longSidePx: Int?) -> Data {
         let side = Double(longSidePx ?? defaultLongSidePx)
         let spec: [String: Any] = ["op": "render", "include": "document", "background": "paper",
-                                   "maxPixels": side * side]
+                                   "maxPixels": min(side * side, relayPixelBudget)]
         return (try? JSONSerialization.data(withJSONObject: spec, options: [.sortedKeys])) ?? Data()
     }
 

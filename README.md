@@ -101,6 +101,7 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 
 | InfinitySketch (App Store) | infsketch-server tag | wire protocol |
 |---|---|---|
+| 2.2 (iOS and Mac) | v1.2.2 | 11 |
 | 2.2 (iOS and Mac) | v1.2.1 | 11 |
 | 2.2 (iOS and Mac) | v1.2.0 | 11 |
 | 2.1 | v1.1.0 | 11 |
@@ -108,9 +109,11 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 | 2.1 | v1.0.0 | 11 |
 
 Every tag so far speaks wire 11, so any of them pairs with InfinitySketch 2.1 and 2.2 — prefer
-the newest. v1.2.1 fixes the web viewer for a document the server had only seen advertised — it
-sat on the 256 px thumbnail instead of asking a connected device to render it. v1.2.0 adds the join
-link a Mac can click, live previews of documents nobody has open, and render-to-file for agents.
+the newest. v1.2.2 makes the web viewer's live frame for a closed document reliable: the Res 2048
+setting works (v1.2.1 asked the device for more pixels than it will draw and was refused every time),
+a failed render is logged and retried, and the relay takes over when a device closes a watched
+document. v1.2.1 fixed the viewer for a document the server had only seen advertised. v1.2.0 adds
+the join link a Mac can click, live previews of documents nobody has open, and render-to-file for agents.
 
 Run the tagged release that matches your app version; `main` may be ahead of what the shipped app
 speaks. Syncing with a server arrived in InfinitySketch 2.1 — earlier versions have no server

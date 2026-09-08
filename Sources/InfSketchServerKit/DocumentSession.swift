@@ -17,6 +17,15 @@ public struct SessionConfig: Sendable {
     public var mcpSessionIdleTimeout: Duration
     /// How often the MCP adapter sweeps for idle sessions.
     public var mcpSessionCleanupInterval: Duration
+    /// After a relayed watcher-frame render FAILS on a device (timeout, refusal, a device that
+    /// dropped mid-request), the waits before trying again — one entry per attempt, then the
+    /// document waits for its next trigger. `noDeviceAvailable` is not retried on a timer: a
+    /// device that connects triggers the relay itself. Injectable so a test need not wait seconds.
+    /// The last wait is longer than the keepalive takes to drop a dead connection (30 s idle
+    /// ping + 10 s grace): the broker always asks the MOST RECENTLY connected capable device,
+    /// so with two devices and one asleep the earlier retries all hit the sleeping one, and only
+    /// an attempt after it is gone reaches the other.
+    public var relayRetryDelays: [Duration]
     /// How long `DeviceCommandBroker.requestCreation` waits for a device's
     /// `createDocReply` before failing with `.deviceTimeout`.
     public var createDocTimeout: Duration
@@ -83,8 +92,10 @@ public struct SessionConfig: Sendable {
         keepaliveIdleInterval: Duration = .seconds(30),
         keepalivePingGrace: Duration = .seconds(10),
         keepaliveTickInterval: Duration = .seconds(5),
-        assumedMinimumDrainRate: Int = 1024 * 1024
+        assumedMinimumDrainRate: Int = 1024 * 1024,
+        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)]
     ) {
+        self.relayRetryDelays = relayRetryDelays
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
         self.inlineLimit = inlineLimit
