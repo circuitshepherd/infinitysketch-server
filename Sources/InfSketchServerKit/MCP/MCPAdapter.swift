@@ -476,15 +476,45 @@ public actor MCPAdapter {
     /// JSON null) — the plain-vs-styled routing decision for
     /// `callAddText`/`callEditText`.
     ///
-    /// `name` is in the list even though it is not a style: an element name lives in
-    /// `elementNames`, which the server-side `DocJSON` path does not write, so a named
-    /// `add_text` must take the device path or the name would be silently dropped.
+    /// `tags` and the anchor are in the list even though they are not styles: tags live in
+    /// `elementTags` and an anchor realigns the paragraphs (UIKit attributes) and needs a newer
+    /// document format, none of which the server-side `DocJSON` path writes — so a tagged or
+    /// anchored call must take the device path or the argument would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        (styleArgKeys + ["tags"]).contains { key in
+        (styleArgKeys + ["tags", "anchor", "anchorParagraphs"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
     }
+
+    /// A text's anchor — the point of its box that stays put as it grows — and what picking
+    /// one does to the paragraphs' alignment; the Properties panel's anchor grid, as arguments.
+    private static let textAnchorProperties: [String: Value] = [
+        "anchor": .object([
+            "description": """
+                The point of the text box that stays put when the text grows or shrinks:                 {row: "top"|"middle"|"bottom", column: "left"|"center"|"right"}, or                 "automatic" (the default: the first line's baseline keeps its place). A                 picked anchor does not move the text; it aligns its paragraphs to the                 anchor's column (see anchorParagraphs). list_texts reports it. Needs a                 connected device.
+                """,
+            "anyOf": .array([
+                .object(["type": "string", "enum": .array([.string("automatic")])]),
+                .object([
+                    "type": "object",
+                    "properties": .object([
+                        "row": .object(["type": "string", "enum": .array(["top", "middle", "bottom"].map(Value.string))]),
+                        "column": .object(["type": "string", "enum": .array(["left", "center", "right"].map(Value.string))]),
+                    ]),
+                    "required": .array(["row", "column"].map(Value.string)),
+                    "additionalProperties": .bool(false),
+                ]),
+            ]),
+        ]),
+        "anchorParagraphs": .object([
+            "type": "string",
+            "enum": .array(["all", "reference", "none"].map(Value.string)),
+            "description": """
+                Which paragraphs take a picked anchor's column: "all" (default),                 "reference" (only the first, or the last for the bottom row) or "none". A                 single paragraph always takes it. Only with a picked anchor.
+                """,
+        ]),
+    ]
 
     /// Every colour hex on this surface is LIGHT-CANONICAL (the light-appearance value —
     /// what PencilKit stores; a dark canvas renders its conversion). This call-level
@@ -667,7 +697,8 @@ public actor MCPAdapter {
                 needs a connected device; plain text does not. Returns the new text's id so you \
                 can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
                 author for the dark canvas). Font families come from list_fonts — call it \
-                before setting a `family`. \(writeToolCaveats)
+                before setting a `family`. `anchor` picks the point of the box that stays put \
+                as the text grows, as the app's anchor grid does (needs a device). \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -698,6 +729,7 @@ public actor MCPAdapter {
                             "items": textSpanItemSchema,
                         ]),
                     ].merging(textStyleProperties) { current, _ in current }
+                     .merging(textAnchorProperties) { current, _ in current }
                 ),
                 "required": .array(["docId", "text", "canvasX", "canvasY"].map(Value.string)),
             ])
@@ -718,7 +750,9 @@ public actor MCPAdapter {
                 and/or canvasY with no text/style) do not touch formatting. Colours: \
                 #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark \
                 canvas). Font \
-                families come from list_fonts. \(writeToolCaveats)
+                families come from list_fonts. `anchor` sets or clears ("automatic") the point \
+                of the box that stays put as the text grows (needs a device); an anchored text \
+                keeps that point when its characters change. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -748,6 +782,7 @@ public actor MCPAdapter {
                             "items": textSpanItemSchema,
                         ]),
                     ].merging(textStyleProperties) { current, _ in current }
+                     .merging(textAnchorProperties) { current, _ in current }
                 ),
                 "required": .array(["docId", "textId"].map(Value.string)),
             ])
@@ -3074,7 +3109,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3270,12 +3305,25 @@ public actor MCPAdapter {
         if Self.hasStyleArgs(arguments) {
             return await callEditTextStyled(arguments)
         }
-        return await callEditTextServerSide(arguments)
+        // New characters on an ANCHORED text: the device re-lays it so the anchor point stays
+        // put, which the server-side path cannot (it has no text layout).
+        // The one read is handed to the server-side path, so its CAS token is the bytes this
+        // decision was made on.
+        var prefetched: Data?
+        if let text = arguments?["text"], !text.isNull,
+           case .string(let docId)? = arguments?["docId"], case .string(let textId)? = arguments?["textId"],
+           let bytes = await manager.currentBytesOrFetch(docId: docId) {
+            if DocJSON.textHasAnchor(in: bytes, textId: textId) {
+                return await callEditTextStyled(arguments)
+            }
+            prefetched = bytes
+        }
+        return await callEditTextServerSide(arguments, prefetched: prefetched)
     }
 
     /// The pre-styled_text `edit_text` body, extracted verbatim — same
     /// behaviour, same tests (see plainEditTextStillUsesTheServerSidePathAndDoesNotRelay).
-    private func callEditTextServerSide(_ arguments: [String: Value]?) async -> CallTool.Result {
+    private func callEditTextServerSide(_ arguments: [String: Value]?, prefetched: Data? = nil) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
@@ -3283,7 +3331,9 @@ public actor MCPAdapter {
             let x = try Self.optionalDoubleArg(arguments, "canvasX")
             let y = try Self.optionalDoubleArg(arguments, "canvasY")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            var read = prefetched
+            if read == nil { read = await manager.currentBytesOrFetch(docId: docId) }
+            guard let bytes = read else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -3319,7 +3369,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }

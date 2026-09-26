@@ -1194,6 +1194,32 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// An anchor realigns paragraphs and needs the newer document format, neither of which the
+    /// server-side path can write — so an anchored add_text relays, carrying both arguments.
+    @Test func anchoredAddTextRelaysThroughTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "a\nb", "canvasX": 0, "canvasY": 0,
+                        "anchor": ["row": "bottom", "column": "right"], "anchorParagraphs": "reference"])
+        #expect(isError != true)
+
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addText")
+        #expect(spec["anchor"] as? [String: String] == ["row": "bottom", "column": "right"])
+        #expect(spec["anchorParagraphs"] as? String == "reference")
+
+        await server.stop()
+    }
+
     /// THE BYTE-IDENTICAL GUARANTEE for edit_text, mirroring
     /// plainAddTextStillUsesTheServerSidePathAndDoesNotRelay.
     @Test func plainEditTextStillUsesTheServerSidePathAndDoesNotRelay() async throws {

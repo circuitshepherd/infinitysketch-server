@@ -113,6 +113,18 @@ public enum DocJSON {
     /// untouched axis, size, sibling entries (including unrecognized array
     /// elements), and every other key are passed through unchanged (not
     /// re-rounded — the original `Any`/`NSNumber` values are preserved).
+    /// Whether the text `textId` carries a picked anchor (format v3). Its re-layout on new
+    /// characters is the device's (`TextAuthoring`), so a plain edit of its characters must not
+    /// take the server-side path, which would leave the anchor point to drift.
+    public static func textHasAnchor(in bytes: Data, textId: String) -> Bool {
+        guard let doc = try? parseDocument(bytes) else { return false }
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              let entry = elements[index] as? [String: Any],
+              let anchor = entry["anchor"] else { return false }
+        return !(anchor is NSNull)
+    }
+
     public static func editText(
         in bytes: Data,
         textId: String,
