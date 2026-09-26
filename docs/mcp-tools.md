@@ -55,7 +55,7 @@ Plain text is written server-side; styled text and every listing need a connecte
 | [`add_text`](#add_text) | Appends a placed-text entry to a document: a new id, the document's current colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text box's top-left corner. |
 | [`edit_text`](#edit_text) | Mutates an existing placed text by id: replace its string and/or move it, or restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` array (parts of it… |
 | [`remove_text`](#remove_text) | Removes a placed text entry from a document by id. |
-| [`list_texts`](#list_texts) | Lists a document's placed texts, one per text, as {id, text, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. |
+| [`list_texts`](#list_texts) | Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. |
 | [`list_fonts`](#list_fonts) | The font families installed on the connected device, sorted. |
 
 ## Images
@@ -455,9 +455,9 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 ### `list_texts`
 
-Lists a document's placed texts, one per text, as {id, text, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
+Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags}`. The box is `canvasBounds`, NOT `bounds`.
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place).
 
 | Argument | Type | Required | Description |
 |---|---|---|---|

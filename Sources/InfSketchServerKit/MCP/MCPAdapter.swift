@@ -1474,15 +1474,17 @@ public actor MCPAdapter {
         Tool(
             name: "list_texts",
             description: """
-                Lists a document's placed texts, one per text, as \
-                {id, text, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a \
+                Lists a document's placed texts, one per text — authored by a \
                 connected InfinitySketch device. REQUIRES a connected device — fails with \
                 noDeviceAvailable if none is connected and deviceTimeout if it doesn't \
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
 
-                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags}`. The box is \
-                `canvasBounds`, NOT `bounds`.
+                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. The box \
+                is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
+                picked anchor — the point of its box that stays put as the text grows — as \
+                {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the \
+                first line's baseline keeps its place).
                 """,
             inputSchema: .object([
                 "type": "object",

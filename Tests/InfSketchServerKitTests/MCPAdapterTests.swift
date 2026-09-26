@@ -5791,7 +5791,7 @@ private actor FakeStrokeOpDevice {
         let expected: [String: [String]] = [
             "list_strokes": ["canvasInkBounds", "canvasPathBounds", "stampWidth", "tags"],
             "get_strokes": ["canvasPoints", "canvasPathBounds", "localToCanvasTransform"],
-            "list_texts": ["canvasBounds", "pinned", "opacity", "tags"],
+            "list_texts": ["canvasBounds", "pinned", "opacity", "tags", "anchor"],
             "list_images": ["canvasBounds", "pinned", "opacity", "tags"],
             "list_tags": ["roof", "elements", "grids"],
             "find_elements": ["roof"],
