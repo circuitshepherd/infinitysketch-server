@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-54 tools, served over streamable HTTP at `/mcp`.
+55 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -92,6 +92,7 @@ Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to
 | [`find_elements`](#find_elements) | Resolve TAGS to element ids, so you can act on them with any tool that takes ids. |
 | [`list_tags`](#list_tags) | Every tag in a document, with how many live things carry it, split by family. |
 | [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts AND images together — on ANY document, open or not. |
+| [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` (background) flag on the named placed texts and/or images of a document. `ids` may mix text ids and image ids (as returned by… |
 | [`copy_elements`](#copy_elements) | Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
@@ -671,6 +672,18 @@ ATOMIC: every id must resolve or nothing moves, so a set can never end up sheare
 | `rotate` | number | no | Degrees about the anchor; positive = clockwise on screen. |
 | `scale` | array | no | [sx, sy] about the anchor; non-zero. |
 | `strokeIds` | array | no | Stroke ids, as returned by list_strokes or draw_strokes. |
+| `textIds` | array | no | Placed-text ids, as returned by list_texts. |
+
+### `reset_element_transforms`
+
+Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text transforms" selection-menu items, and the same implementation, so the two cannot disagree. An image keeps its CENTER where it is shown; a text keeps its ANCHOR point (the `anchor` list_texts reports, or the automatic one on its first baseline). Only the transform changes — content, style, anchor and wrap width stay. Works on any document, open or not.
+
+ATOMIC: every id must resolve or nothing is reset. When every named element is already untransformed (a plain move at most), NOTHING is written and the reply says so. Strokes are not touched: to undo a stroke's scaled ink width use restore_stroke_widths, and to move or turn anything use transform_elements. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document id to modify. |
+| `imageIds` | array | no | Placed-image ids, as returned by list_images. |
 | `textIds` | array | no | Placed-text ids, as returned by list_texts. |
 
 ### `reorder_elements`

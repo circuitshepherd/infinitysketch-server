@@ -817,7 +817,7 @@ private actor FakeStrokeOpDevice {
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
-            "restore_stroke_widths",
+            "restore_stroke_widths", "reset_element_transforms",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -3311,6 +3311,75 @@ private actor FakeStrokeOpDevice {
         #expect(text.hasPrefix("restored 1 of 3 stroke(s) at seq 1"))
         #expect(text.contains("2 had no scale to factor out"), "got \(text)")
 
+        await server.stop()
+    }
+
+    /// `reset_element_transforms` relays the ids under `transformElements` and writes the bytes.
+    @Test func resetElementTransformsSendsSpecAndWritesReturnedBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let resetBytes = Data(#"{"aaa001_thumbnailData":"","texts":["reset"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: resetBytes,
+            meta: Data(#"{"resetIds":["T1","I1"],"unchangedIds":["T2"]}"#.utf8)),
+            capabilities: ["transformElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "reset_element_transforms", arguments: [
+            "docId": "d",
+            "textIds": .array([.string("T1"), .string("T2")]),
+            "imageIds": .array([.string("I1")]),
+        ])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("reset 2 of 3 element(s) at seq 1"), "got \(text)")
+        #expect(text.contains("1 had nothing to reset"), "got \(text)")
+
+        let received = try #require(await device.receivedRequests.first)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(specJSON["op"] as? String == "resetElementTransforms")
+        #expect(specJSON["textIds"] as? [String] == ["T1", "T2"])
+        #expect(specJSON["imageIds"] as? [String] == ["I1"])
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == resetBytes)
+        await server.stop()
+    }
+
+    /// Nothing to reset ⇒ nothing written, like restore_stroke_widths.
+    @Test func resetElementTransformsWithNothingToResetWritesNothing() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","texts":["same"]}"#.utf8),
+            meta: Data(#"{"resetIds":[],"unchangedIds":["T1"]}"#.utf8)),
+            capabilities: ["transformElements"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "reset_element_transforms", arguments: [
+            "docId": "d", "textIds": .array([.string("T1")]),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("no change"))
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+        await server.stop()
+    }
+
+    @Test func resetElementTransformsNeedsAnId() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(name: "reset_element_transforms", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("missingArgument"))
         await server.stop()
     }
 

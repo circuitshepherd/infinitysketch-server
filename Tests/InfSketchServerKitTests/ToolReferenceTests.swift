@@ -73,6 +73,7 @@ enum ToolReference {
               blurb: "Strokes, texts and images addressed by id, whatever their kind. Resolve a "
                    + "tag to ids with `find_elements`, then act with the id-taking tools.",
               tools: ["tag_elements", "find_elements", "list_tags", "transform_elements",
+                      "reset_element_transforms",
                       "reorder_elements", "set_pinned", "copy_elements"]),
         Group(title: "Selection",
               blurb: "These act on the LIVE rect-select session on a connected device, not on "

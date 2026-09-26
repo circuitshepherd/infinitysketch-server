@@ -906,6 +906,39 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "reset_element_transforms",
+            description: """
+                Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, \
+                WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and \
+                "Reset text transforms" selection-menu items, and the same implementation, so the \
+                two cannot disagree. An image keeps its CENTER where it is shown; a text keeps its \
+                ANCHOR point (the `anchor` list_texts reports, or the automatic one on its first \
+                baseline). Only the transform changes — content, style, anchor and wrap width stay. \
+                Works on any document, open or not.
+
+                ATOMIC: every id must resolve or nothing is reset. When every named element is \
+                already untransformed (a plain move at most), NOTHING is written and the reply \
+                says so. Strokes are not touched: to undo a stroke's scaled ink width use \
+                restore_stroke_widths, and to move or turn anything use transform_elements. \
+                \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "textIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Placed-text ids, as returned by list_texts.",
+                    ]),
+                    "imageIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Placed-image ids, as returned by list_images.",
+                    ]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "undo_last_edit",
             description: """
                 Take back YOUR OWN last write to a document — the one you just made and wish you \
@@ -2953,6 +2986,7 @@ public actor MCPAdapter {
         case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
         case "restore_stroke_widths": return await callRestoreStrokeWidths(arguments)
+        case "reset_element_transforms": return await callResetElementTransforms(arguments)
         case "restyle_strokes": return await callRestyleStrokes(arguments)
         case "reshape_strokes": return await callReshapeStrokes(arguments)
         case "list_fonts": return await callListFonts(arguments)
@@ -5834,6 +5868,69 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in "transformed elements in \(docId) at seq \(seq)" }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `reset_element_transforms` — the agent door onto the app's "Reset image/text transforms"
+    /// menu items; the device runs the SAME functions the menu does (`ElementTransform.
+    /// resetTransforms`, pinned against the menu in the app's `ResetElementTransformsOpTests`). A
+    /// whole-set no-op writes nothing — the `restore_stroke_widths` rule: a pointless write bumps
+    /// seq for every subscriber and spends the agent's one undo on nothing. An absent or
+    /// undecodable meta means WRITE (fail open: the bytes are the device's own, CAS-guarded).
+    private func callResetElementTransforms(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
+            let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            guard !textIds.isEmpty || !imageIds.isEmpty else { return Self.errorResult("missingArgument") }
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("resetElementTransforms"),
+                    "textIds": .array(textIds.map(Value.string)),
+                    "imageIds": .array(imageIds.map(Value.string)),
+                ]))
+            } catch {
+                return Self.errorResult("invalidArguments")
+            }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: "transformElements")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            struct ResetMeta: Decodable {
+                let resetIds: [String]
+                let unchangedIds: [String]
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(ResetMeta.self, from: $0) }
+            let total = textIds.count + imageIds.count
+            let resetCount = meta?.resetIds.count ?? total
+            guard resetCount > 0 else {
+                return CallTool.Result(content: [.text(
+                    text: "no change: all \(total) element(s) already have no size, rotation or skew "
+                        + "to reset — nothing was written",
+                    annotations: nil, _meta: nil)])
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+            ) { seq in
+                var summary = "reset \(resetCount) of \(total) element(s) at seq \(seq)"
+                if let unchanged = meta?.unchangedIds.count, unchanged > 0 {
+                    summary += "; \(unchanged) had nothing to reset"
+                }
+                return summary
+            }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
