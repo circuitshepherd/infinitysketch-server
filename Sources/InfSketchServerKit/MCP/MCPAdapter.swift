@@ -2127,9 +2127,9 @@ public actor MCPAdapter {
                 geometry survive. At least one of color, width, or inkType must be \
                 supplied — omitting all three is rejected. width is the TARGET PEAK \
                 stroke width — the same quantity get_strokes/list_strokes report, not a tool-slider value — \
-                and is CLAMPED to what the target ink can express (pen tops out around \
-                peak 6; marker cannot render below roughly 7.5), so a thin pen stroke \
-                necessarily gets thicker when restyled to marker. THE REPLY SAYS SO when \
+                and lands EXACTLY as asked, even past what the drawing tool's slider can reach \
+                (as in the app's Properties panel), within the ink's peak range: from its floor, \
+                below which nothing draws (2.5; pencil 1.2), up to 100. THE REPLY SAYS SO when \
                 it happens, naming what you asked for and what it became, so you do not \
                 have to call list_strokes to find out; get_strokes reports the actual \
                 resulting peak either way. An ink-only restyle (no width) preserves the \
@@ -2167,9 +2167,9 @@ public actor MCPAdapter {
                         "description": """
                             Target PEAK STAMP width (> 0) — the stroke's own ink size, the same \
                             quantity get_strokes/list_strokes report, not a tool-slider value. \
-                            Clamped to what the target ink can express (pen tops out \
-                            around peak 6; marker cannot go below roughly 7.5) — \
-                            get_strokes reports the actual resulting peak.
+                            Lands exactly, past the tool slider's range too, within the ink's \
+                            peak range (its floor — 2.5, pencil 1.2 — to 100); outside it, \
+                            clamped and reported. get_strokes reports the actual resulting peak.
                             """,
                     ]),
                     "inkType": .object([
@@ -4818,9 +4818,8 @@ public actor MCPAdapter {
                     summary += "\nnote: \(notes.count) stroke(s) did not land on the width asked "
                         + "for (\(example)\(asked) became \(got))."
                     if notes.allSatisfy({ $0.inkCanExpress == 0 }) {
-                        summary += " That ink cannot render \(asked) — each ink expresses a "
-                            + "limited range, pen topping out near 6 and marker not going below "
-                            + "about 7.5."
+                        summary += " \(asked) is outside the ink's peak range — from its floor, "
+                            + "below which nothing draws (2.5; pencil 1.2), up to 100."
                     }
                     if notes.allSatisfy({ $0.sourcePeakExpressible == 0 }) {
                         // "…that range too" only reads correctly when the clause above ran; on its
