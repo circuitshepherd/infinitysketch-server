@@ -101,6 +101,7 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 
 | InfinitySketch (App Store) | infsketch-server tag | wire protocol |
 |---|---|---|
+| 2.3 (iOS and Mac) | v1.3.0 | 11 |
 | 2.2 (iOS and Mac) | v1.2.2 | 11 |
 | 2.2 (iOS and Mac) | v1.2.1 | 11 |
 | 2.2 (iOS and Mac) | v1.2.0 | 11 |
@@ -108,8 +109,12 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 | 2.1 | v1.0.1 | 11 |
 | 2.1 | v1.0.0 | 11 |
 
-Every tag so far speaks wire 11, so any of them pairs with InfinitySketch 2.1 and 2.2 — prefer
-the newest. v1.2.2 makes the web viewer's live frame for a closed document reliable: the Res 2048
+Every tag so far speaks wire 11, so for SYNC any of them pairs with InfinitySketch 2.1, 2.2 and 2.3
+— prefer the newest. **The agent tools pair by version:** v1.3.0's tools speak the app's Properties
+panel widths (`drawnWidth`, `toolWidth` — `stampWidth` is refused by name), take a text anchor and
+add `reset_element_transforms`, which need InfinitySketch 2.3; with an older app an agent's widths
+and anchors are not understood. InfinitySketch 2.3 in turn needs v1.3.0 for its agent tools (with an
+older server, an agent's drawing fails naming the rename). v1.2.2 makes the web viewer's live frame for a closed document reliable: the Res 2048
 setting works (v1.2.1 asked the device for more pixels than it will draw and was refused every time),
 a failed render is logged and retried, and the relay takes over when a device closes a watched
 document. v1.2.1 fixed the viewer for a document the server had only seen advertised. v1.2.0 adds

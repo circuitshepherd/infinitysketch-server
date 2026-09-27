@@ -219,9 +219,10 @@ infsketch-server $Version (Windows x86_64)
 The local-network sync server for InfinitySketch. Nothing to install -- the Swift runtime is
 included in this folder.
 
-Pair it with InfinitySketch 2.1 or newer. The app and the server check their protocol versions
-exactly, so an older app will not connect to this build -- it simply shows the server as offline
-rather than reporting a mismatch.
+Pair it with InfinitySketch 2.3 or newer. InfinitySketch 2.1 and 2.2 speak the same protocol and
+sync with it too, but its agent tools need 2.3. The app and the server check their protocol
+versions exactly, so an app with a different protocol will not connect -- it simply shows the
+server as offline rather than reporting a mismatch.
 
 RUNNING IT
 ----------
