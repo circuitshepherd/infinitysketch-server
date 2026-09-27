@@ -2178,7 +2178,7 @@ private actor FakeStrokeOpDevice {
         let strokesArg: Value = .array([
             .object([
                 "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
-                "stampWidth": .int(4),
+                "drawnWidth": .int(4),
                 "color": .string("#000000"),
                 "inkType": .string("pen"),
             ])
@@ -2212,7 +2212,7 @@ private actor FakeStrokeOpDevice {
     /// envelope shape with the CANONICAL key names as string literals:
     ///
     ///     {"op": "draw", "strokes": [{"canvasPoints": [[x,y],…],
-    ///                                 "stampWidth": …, "color": …, "inkType": …}]}
+    ///                                 "drawnWidth": …, "color": …, "inkType": …}]}
     ///
     /// Task 5's own StrokeSpec decode tests must decode a fixture using
     /// EXACTLY these field names (binding rider carried by the plan). If
@@ -2236,7 +2236,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         let canonicalMeta = Data(#"""
-        {"keys":["111-222.5"],"resolvedTool":{"inkType":"marker","stampWidth":19.5,"color":"#12AB34FF"}}
+        {"keys":["111-222.5"],"resolvedTool":{"inkType":"marker","drawnWidth":19.5,"color":"#12AB34FF"}}
         """#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: canonicalMeta))
@@ -2274,7 +2274,7 @@ private actor FakeStrokeOpDevice {
                     .array([.double(1.5), .double(2.5)]),
                     .array([.int(30), .int(40)]),
                 ]),
-                "stampWidth": .double(6.5),
+                "drawnWidth": .double(6.5),
                 "color": .string("#FF00AA"),
                 "inkType": .string("marker"),
             ])
@@ -2293,10 +2293,10 @@ private actor FakeStrokeOpDevice {
         #expect(strokes.count == 1)
         let stroke = try #require(strokes.first)
         // The CANONICAL per-stroke field names, asserted string-literally.
-        #expect(Set(stroke.keys) == ["canvasPoints", "stampWidth", "color", "inkType"])
+        #expect(Set(stroke.keys) == ["canvasPoints", "drawnWidth", "color", "inkType"])
         let points = try #require(stroke["canvasPoints"] as? [[Double]])
         #expect(points == [[1.5, 2.5], [30, 40]])
-        #expect(stroke["stampWidth"] as? Double == 6.5)
+        #expect(stroke["drawnWidth"] as? Double == 6.5)
         #expect(stroke["color"] as? String == "#FF00AA")
         #expect(stroke["inkType"] as? String == "marker")
 
@@ -2710,7 +2710,7 @@ private actor FakeStrokeOpDevice {
     /// `draw_strokes` (points/width/color/inkType):
     ///
     ///     {"op": "render", "include": …, "strokeIds": […],
-    ///      "strokes": [{"canvasPoints": […], "stampWidth": …, "color": …, "inkType": …}],
+    ///      "strokes": [{"canvasPoints": […], "drawnWidth": …, "color": …, "inkType": …}],
     ///      "canvasRect": […], "padding": …, "background": …, "axes": …, "maxPixels": …}
     @Test func renderSketchSpecEnvelopeMatchesCanonicalShape() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
@@ -2728,7 +2728,7 @@ private actor FakeStrokeOpDevice {
                     .array([.double(1.5), .double(2.5)]),
                     .array([.int(30), .int(40)]),
                 ]),
-                "stampWidth": .double(6.5),
+                "drawnWidth": .double(6.5),
                 "color": .string("#FF00AA"),
                 "inkType": .string("marker"),
             ])
@@ -2768,10 +2768,10 @@ private actor FakeStrokeOpDevice {
         let stroke = try #require(strokes.first)
         // The CANONICAL per-stroke field names, asserted string-literally —
         // the exact set draw_strokes's own envelope test pins.
-        #expect(Set(stroke.keys) == ["canvasPoints", "stampWidth", "color", "inkType"])
+        #expect(Set(stroke.keys) == ["canvasPoints", "drawnWidth", "color", "inkType"])
         let points = try #require(stroke["canvasPoints"] as? [[Double]])
         #expect(points == [[1.5, 2.5], [30, 40]])
-        #expect(stroke["stampWidth"] as? Double == 6.5)
+        #expect(stroke["drawnWidth"] as? Double == 6.5)
         #expect(stroke["color"] as? String == "#FF00AA")
         #expect(stroke["inkType"] as? String == "marker")
 
@@ -3510,7 +3510,7 @@ private actor FakeStrokeOpDevice {
             "docId": "d",
             "ids": .array([.string("seed123:1.0")]),
             "color": .string("#FF0000"),
-            "stampWidth": .double(8),
+            "drawnWidth": .double(8),
             "inkType": .string("marker"),
         ])
         #expect(isError != true)
@@ -3544,7 +3544,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let call = Task { try await client.callTool(name: "restyle_strokes", arguments: [
-            "docId": "d", "ids": .array([.string("seed123:1.0")]), "stampWidth": .double(9),
+            "docId": "d", "ids": .array([.string("seed123:1.0")]), "drawnWidth": .double(9),
         ]) }
 
         var inFlight = false
@@ -3703,10 +3703,10 @@ private actor FakeStrokeOpDevice {
                 "canvasTranslate": .array([.double(1), .double(1)]),
             ]),
             ("restyle_strokes", [
-                // `stampWidth`, not `width` — this said `width` until the strict-argument check
+                // `drawnWidth`, not `width` — this said `width` until the strict-argument check
                 // caught it, a leftover from the explicit-coordinate-spaces rename that had been
                 // silently dropped ever since.
-                "docId": "ghost", "ids": .array([.string("1-2")]), "stampWidth": .double(3),
+                "docId": "ghost", "ids": .array([.string("1-2")]), "drawnWidth": .double(3),
             ]),
             ("reshape_strokes", ["docId": "ghost", "strokes": Self.minimalReshapeStrokes]),
         ]
@@ -3745,7 +3745,7 @@ private actor FakeStrokeOpDevice {
                     "canvasTranslate": .array([.double(1), .double(1)]),
                 ]
             case "restyle_strokes":
-                args = ["docId": "d", "ids": .array([.string("ghost")]), "stampWidth": .double(9)]
+                args = ["docId": "d", "ids": .array([.string("ghost")]), "drawnWidth": .double(9)]
             default:
                 args = ["docId": "d", "strokes": Self.minimalReshapeStrokes]
             }
@@ -3794,12 +3794,12 @@ private actor FakeStrokeOpDevice {
             "docId": "d",
             "ids": .array([.string("1-2")]),
             "color": .string("#FF0000"),
-            "stampWidth": .double(8),
+            "drawnWidth": .double(8),
             "inkType": .string("marker"),
         ])
         received = try #require(await device.receivedRequests.last)
         envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
-        #expect(Set(envelope.keys) == ["op", "ids", "color", "stampWidth", "inkType"])
+        #expect(Set(envelope.keys) == ["op", "ids", "color", "drawnWidth", "inkType"])
         #expect(envelope["op"] as? String == "restyle")
 
         _ = try await client.callTool(name: "reshape_strokes", arguments: [
@@ -5754,7 +5754,7 @@ private actor FakeStrokeOpDevice {
         let (tools, _) = try await client.listTools()
         let tool = try #require(tools.first { $0.name == "restyle_strokes" })
         let declared = MCPAdapter.declaredArguments(of: tool)
-        #expect(declared == ["docId", "ids", "color", "stampWidth", "inkType", "colorAppearance"],
+        #expect(declared == ["docId", "ids", "color", "drawnWidth", "toolWidth", "inkType", "colorAppearance"],
                 "restyle_strokes declares \(declared.sorted()) — every one must reach the device")
 
         await server.stop()
@@ -5795,13 +5795,13 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         // `width` is exactly the mistake this caught in this suite: restyle_strokes takes
-        // `stampWidth` since the coordinate-space rename, and `width` was being dropped in silence.
+        // a named width (`drawnWidth` since 2026-09-27), and `width` was being dropped in silence.
         let (content, isError) = try await client.callTool(
             name: "restyle_strokes",
             arguments: ["docId": "d", "ids": .array([.string("1-2")]), "width": .double(3)])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("invalidArgument: width"))
-        #expect(toolResultText(content).contains("stampWidth"), "must name what the tool DOES take")
+        #expect(toolResultText(content).contains("drawnWidth"), "must name what the tool DOES take")
 
         await server.stop()
     }
@@ -5816,7 +5816,7 @@ private actor FakeStrokeOpDevice {
 
         let (content, isError) = try await client.callTool(
             name: "restyle_strokes",
-            arguments: ["docId": "ghost", "ids": .array([.string("1-2")]), "stampWidth": .double(3)])
+            arguments: ["docId": "ghost", "ids": .array([.string("1-2")]), "drawnWidth": .double(3)])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("unknownDoc"), "should fail on the DOC, not the args")
 
@@ -5884,7 +5884,7 @@ private actor FakeStrokeOpDevice {
     /// this the first time (`bbox` → `canvasInkBounds` and friends) would fail here now.
     @Test func everyStructuredReplyNamesItsKeys() async throws {
         let expected: [String: [String]] = [
-            "list_strokes": ["canvasInkBounds", "canvasPathBounds", "stampWidth", "tags"],
+            "list_strokes": ["canvasInkBounds", "canvasPathBounds", "drawnWidth", "toolWidth", "tags"],
             "get_strokes": ["canvasPoints", "canvasPathBounds", "localToCanvasTransform"],
             "list_texts": ["canvasBounds", "pinned", "opacity", "tags", "anchor"],
             "list_images": ["canvasBounds", "pinned", "opacity", "tags"],
@@ -5895,7 +5895,7 @@ private actor FakeStrokeOpDevice {
             "list_grids": ["families", "drawSpacing", "snapSpacing", "lineAngleDeg", "tags"],
             "get_selection": ["elements", "canvasBounds", "canvasRect", "canvasReferencePoint",
                               "active", "sessionActive", "uncommittedCopy"],
-            "get_tool": ["inkType", "toolWidth", "stampWidth"],
+            "get_tool": ["inkType", "toolWidth", "pickerDialWidth"],
             "list_open_docs": ["openDocs", "docId", "capabilities"],
             "render_sketch": ["filePath", "renderUrl"],
             "draw_strokes": ["storedColors"],

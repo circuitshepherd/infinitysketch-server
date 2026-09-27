@@ -625,12 +625,14 @@ public actor MCPAdapter {
                     """,
                 "items": pointSchema,
             ]),
-            "stampWidth": .object([
+            "drawnWidth": .object([
                 "type": "number",
                 "description": """
-                    Peak STAMP width — the stroke's own ink size, which a transform does NOT \
-                    scale (canvasInkBounds shows its true on-screen extent). OMIT IT to inherit \
-                    the width of the tool the user currently has selected (see get_tool).
+                    How wide the stroke DRAWS, in canvas points — the ink you see, the \
+                    Properties panel's Drawn width; 5 matches a 5 pt grid. Not scaled by a \
+                    later transform (canvasInkBounds shows the extent on screen). OMIT IT to \
+                    inherit the width of the tool the user currently has selected (see \
+                    get_tool's toolWidth).
                     """,
             ]),
             "color": .object([
@@ -649,13 +651,13 @@ public actor MCPAdapter {
                     colour, and anything you layer; `marker` is wide and TRANSLUCENT, so colours \
                     build where strokes overlap and whatever is underneath shows through \
                     (painting a solid area in marker leaves the paper visible between passes); \
-                    `pencil` is textured and goes finest, with a minimum width of 1.2 against 2.5 \
-                    for the others; `fountainPen`, `watercolor` and `crayon` are expressive — try \
-                    them and look. Below an ink's minimum a stroke is effectively INVISIBLE, so \
-                    widths under it are raised and the reply says so.
+                    `pencil` is textured; `fountainPen`, `watercolor` and `crayon` are \
+                    expressive — try them and look. Each ink has a thinnest width it can draw \
+                    (below it a stroke is effectively INVISIBLE), so a drawnWidth under it is \
+                    raised and the reply says so.
 
                     A pen whose width is CONSTANT is a monoline, and lists as one — including \
-                    every pen you author with a single `stampWidth`. Monoline is not a different \
+                    every pen you author with a single `drawnWidth`. Monoline is not a different \
                     rendered ink but a tool behaviour ("hold the width constant whatever the \
                     pressure"), PencilKit's archive records it as pen, and the app derives the name \
                     back from the uniform sizes, so `pen` with one width and `monoline` are the \
@@ -1076,15 +1078,14 @@ public actor MCPAdapter {
 
                 `inkType` defaults to **pen** on purpose: marker is TRANSLUCENT and builds up \
                 where passes overlap, so a fill made from it shows the paper through. \
-                `spacingRatio` is the scanline spacing as a fraction of the stroke width — it \
-                defaults to 0.4, which overlaps by more than mere coverage so the fill stays even \
-                when the canvas is zoomed out or exported small; below 1 \
-                the passes overlap and it reads solid (default 0.8), above 1 you get visible \
-                hatching, and `angleDeg` turns the hatch.
+                `spacingRatio` at or below 1 makes a SOLID fill (default 0.4, which overlaps by \
+                more than mere coverage so the fill stays even when the canvas is zoomed out or \
+                exported small); above 1 you get visible hatching, the distance between hatch \
+                lines being spacingRatio × drawnWidth, and `angleDeg` turns the hatch.
 
                 A SOLID fill is ONE stroke: the passes are joined into a serpentine, so you can \
                 select, name, restyle or move the filled area as a single thing. It also traces \
-                its own boundary, centred, at the same `stampWidth` — that border is what you see \
+                its own boundary, centred, at the same `drawnWidth` — that border is what you see \
                 at the edge. Pass `border: false` when part of your outline is construction rather \
                 than a real edge (a silhouette closed along a base line does not want that line \
                 drawn) — but note it is ALL OR NOTHING: with it off, EVERY edge shows the \
@@ -1132,9 +1133,9 @@ public actor MCPAdapter {
                         "type": "string",
                         "description": "#RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
-                    "stampWidth": .object([
+                    "drawnWidth": .object([
                         "type": "number",
-                        "description": "Width of each pass. Also sets the spacing, via spacingRatio.",
+                        "description": "How wide each pass and the border DRAW, in canvas points (the Properties panel's Drawn width). Omit to inherit the user's pen. A hatch's spacing is spacingRatio × this.",
                     ]),
                     "inkType": .object([
                         "type": "string",
@@ -1143,7 +1144,7 @@ public actor MCPAdapter {
                     ]),
                     "spacingRatio": .object([
                         "type": "number",
-                        "description": "Spacing as a fraction of the width. < 1 solid (default 0.8), > 1 hatched.",
+                        "description": "At or below 1 a solid fill (default 0.4; lower is denser); above 1 hatching, lines spacingRatio × drawnWidth apart.",
                     ]),
                     "angleDeg": .object([
                         "type": "number",
@@ -1152,7 +1153,7 @@ public actor MCPAdapter {
                     "border": .object([
                         "type": "boolean",
                         "description": """
-                            Trace the boundary, centred on it, at stampWidth. Default true — it \
+                            Trace the boundary, centred on it, at drawnWidth. Default true — it \
                             covers the scalloped edge the round pass-ends leave. Set FALSE when \
                             part of your boundary is CONSTRUCTION rather than a real edge: a \
                             mountain silhouette closed along a base line does not want that base \
@@ -1501,14 +1502,16 @@ public actor MCPAdapter {
                 points — what you actually placed. Use pathBounds to verify geometry you \
                 positioned.
 
-                `width` is the stroke's own STAMP width and does NOT include any transform it \
-                carries, while its coordinates DO — so a stroke that was scaled up reports \
-                tripled bounds and an unchanged width, and two strokes both reporting `width: 4` \
-                can render three times apart. That matters for exactly one intent: matching a new \
-                stroke to an existing one. Call get_strokes for that stroke — it reports the \
-                `transform`, and stamp width times its scale is what you see. \
-                (This is deliberate: `width` is the same quantity restyle_strokes SETS, so \
-                reading one and writing it back is consistent.)
+                TWO WIDTHS, the Properties panel's own, both in canvas points: `drawnWidth` is \
+                how wide the stroke draws at its widest, pressure and all (the panel's Drawn); \
+                `toolWidth` is how wide its tool setting draws at nominal pressure (the panel's \
+                Tool, only ever a width the dial can set) — equal for a stroke drawn at even \
+                pressure within the dial's range, which covers what you author. restyle_strokes SETS either, so one read and written back leaves the \
+                stroke as it was. Neither includes a transform the stroke carries, while its \
+                coordinates DO — a stroke scaled up by 3 reports tripled bounds and unchanged \
+                widths, and draws three times wider. To match a new stroke to such a one, call \
+                get_strokes for its `localToCanvasTransform` (width × its scale is what you see), \
+                or restore_stroke_widths it first.
 
                 This tool does not report grids — render_sketch's metadata does, \
                 including each grid's id (what snap_points' gridIds and transform_strokes' \
@@ -1520,12 +1523,12 @@ public actor MCPAdapter {
                 ink's name but cannot be re-drawn with draw_strokes, whose inkType enum \
                 covers only the four names above. `inkType` is the ink the stroke IS: a pen \
                 whose width is constant lists as `monoline` — every pen authored with one \
-                stampWidth, and every monoline the user drew — the same name the user's \
+                drawnWidth, and every monoline the user drew — the same name the user's \
                 Layers panel shows (PencilKit's archive records monoline as pen; the app \
                 derives it back from the uniform sizes).
 
                 REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, \
-                stampWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
+                drawnWidth, toolWidth, pointCount, tags}`. `canvasInkBounds` is the INK's extent (cap and \
                 antialias included) and `canvasPathBounds` is the control points' box — use the \
                 latter to verify placement, the former for true on-screen size. `color` is the \
                 stored LIGHT-CANONICAL hex; on a dark document what you SEE is its conversion, \
@@ -1965,7 +1968,7 @@ public actor MCPAdapter {
                 transform_strokes' snapTo refer to). Read-only.
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasPathBounds, localToCanvasTransform, \
-                color, inkType, stampWidth, pointCount}`. NOTE there is no `canvasInkBounds` here \
+                color, inkType, drawnWidth, toolWidth, pointCount}`. NOTE there is no `canvasInkBounds` here \
                 — only list_strokes reports it. `color` is the stored LIGHT-CANONICAL hex; on a \
                 dark document what you SEE is its conversion, not this value.
                 """,
@@ -2170,7 +2173,7 @@ public actor MCPAdapter {
                 canvasPoints and canvasPathBounds are unaffected. A stroke that carries \
                 no scale is LEFT ALONE and counted in the reply, not an error, and when \
                 that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply \
-                says "no change" and quotes no seq). stampWidth is not touched — to \
+                says "no change" and quotes no seq). drawnWidth is not touched — to \
                 change the drawn thickness itself, use restyle_strokes. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -2194,16 +2197,17 @@ public actor MCPAdapter {
             name: "restyle_strokes",
             description: """
                 Changes strokes' colour, width and/or ink in place; identity and \
-                geometry survive. At least one of color, width, or inkType must be \
-                supplied — omitting all three is rejected. width is the TARGET PEAK \
-                stroke width — the same quantity get_strokes/list_strokes report, not a tool-slider value — \
-                and lands EXACTLY as asked, even past what the drawing tool's slider can reach \
-                (as in the app's Properties panel), within the ink's peak range: from its floor, \
-                below which nothing draws (2.5; pencil 1.2), up to 100. THE REPLY SAYS SO when \
-                it happens, naming what you asked for and what it became, so you do not \
-                have to call list_strokes to find out; get_strokes reports the actual \
-                resulting peak either way. An ink-only restyle (no width) preserves the \
-                stroke's apparent thickness. A colour-only restyle changes nothing \
+                geometry survive. At least one of color, drawnWidth, toolWidth or inkType \
+                must be supplied. The two widths are the app's Properties panel's own, in \
+                canvas points, and list_strokes/get_strokes report both: `drawnWidth` makes \
+                each stroke DRAW exactly that wide at its widest (the panel's Drawn) — even \
+                past what the drawing tool's slider can reach, within what the ink can draw; \
+                `toolWidth` re-inks each stroke as if drawn with the tool setting that draws \
+                that wide at nominal pressure, KEEPING its own pressure (the panel's Tool, and \
+                what its palette presets do). Give at most one of the two. When a stroke does \
+                not land on the width asked for (below the ink's thinnest, above its widest), \
+                THE REPLY SAYS SO, naming what you asked for, what it became and the ink's \
+                range. An ink-only restyle (no width) preserves the stroke's thickness. A colour-only restyle changes nothing \
                 else. One user-visible cost, worth knowing before you restyle a stroke \
                 the user has never width-edited: the app can afterwards restore that \
                 stroke's original width only APPROXIMATELY, because the tool-slider \
@@ -2232,14 +2236,22 @@ public actor MCPAdapter {
                         "type": "string",
                         "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance.",
                     ]),
-                    "stampWidth": .object([
+                    "drawnWidth": .object([
                         "type": "number",
                         "description": """
-                            Target PEAK STAMP width (> 0) — the stroke's own ink size, the same \
-                            quantity get_strokes/list_strokes report, not a tool-slider value. \
-                            Lands exactly, past the tool slider's range too, within the ink's \
-                            peak range (its floor — 2.5, pencil 1.2 — to 100); outside it, \
-                            clamped and reported. get_strokes reports the actual resulting peak.
+                            How wide each stroke should DRAW at its widest, in canvas points \
+                            (> 0) — the Properties panel's Drawn width, as list_strokes reports \
+                            it. Lands exactly, past the tool slider's range too, within what the \
+                            ink can draw; outside that, the nearest end, reported.
+                            """,
+                    ]),
+                    "toolWidth": .object([
+                        "type": "number",
+                        "description": """
+                            The width of the TOOL SETTING to re-ink with, in canvas points (> 0): \
+                            what that setting draws at nominal pressure — the Properties panel's \
+                            Tool width, and get_tool's toolWidth. Each stroke keeps its own \
+                            pressure, so a lightly drawn stroke stays lighter than one drawn hard.
                             """,
                     ]),
                     "inkType": .object([
@@ -2418,7 +2430,7 @@ public actor MCPAdapter {
             name: "get_tool",
             description: """
                 Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, \
-                and when true `inkType`, `toolWidth`, `stampWidth` and `color` (#RRGGBBAA). READ THIS BEFORE DRAWING and pass the values explicitly to \
+                and when true `inkType`, `toolWidth`, `pickerDialWidth` and `color` (#RRGGBBAA). READ THIS BEFORE DRAWING and pass the values explicitly to \
                 draw_strokes / draw_selection / render_sketch, so strokes you author match the \
                 pen the user is holding unless they asked for something else. The values are \
                 never applied implicitly: you hold them, so a preview and its commit are the same \
@@ -2428,14 +2440,12 @@ public actor MCPAdapter {
                 is currently showing — copy it into draw_strokes/restyle_strokes verbatim, no \
                 colorAppearance needed.
 
-                TWO WIDTHS, and they are DIFFERENT NUMBERS. `stampWidth` is what the pen \
-                actually lays down — the same quantity list_strokes / get_strokes report and \
-                draw_* / restyle_* accept, under the SAME NAME, so copying it straight across is \
-                correct by construction. `toolWidth` is the picker DIAL, a third quantity, \
-                reported because it is the unit stroke anchors record; do NOT pass it to draw_*. \
-                They coincide only for marker: monoline lays down `dial + 2`, and pen and pencil \
-                follow a non-linear curve, so a dial of 2 on monoline draws a 4. Omitting \
-                stampWidth entirely inherits it for you. Needs no selection. \
+                `toolWidth` is how wide this tool DRAWS at nominal pressure, in canvas points — \
+                the Properties panel's Tool width — so it is what to pass as draw_strokes' \
+                drawnWidth to match the user's pen (an omitted drawnWidth inherits it for you), \
+                and restyle_strokes' toolWidth takes the same unit. `pickerDialWidth` is the \
+                picker's raw dial, PencilKit's own number, reported for completeness; no tool \
+                takes it. Needs no selection. \
                 REQUIRES a connected `controlSelection` device.
                 """,
             inputSchema: .object([
@@ -2481,9 +2491,12 @@ public actor MCPAdapter {
             name: "restyle_selection",
             description: """
                 Restyle the strokes in the user's LIVE rect-select selection — `color` \
-                (#RRGGBB/#RRGGBBAA), `width` (target peak stroke width), and/or `inkType` \
-                (pen/pencil/marker/monoline). At least one is required; an omitted field is left \
-                alone. Unlike restyle_strokes (which edits document bytes and cannot refresh the \
+                (#RRGGBB/#RRGGBBAA), a width, and/or `inkType` (pen/pencil/marker/monoline), \
+                exactly as the Properties panel does: `drawnWidth` makes every selected stroke \
+                draw that wide (the panel's Drawn), `toolWidth` re-inks each with the tool setting \
+                that draws that wide at nominal pressure, keeping its own pressure (the panel's \
+                Tool) — at most one of the two, both in canvas points. At least one field is \
+                required; an omitted field is left as each stroke has it. Unlike restyle_strokes (which edits document bytes and cannot refresh the \
                 canvas while a selection is open) this drives the app's own reink path, so the \
                 change appears immediately and lands as one undo step. `color` is light-canonical \
                 — pass colorAppearance: "dark" if you picked it for the dark canvas. \
@@ -2497,7 +2510,8 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document id."]),
                     "colorAppearance": colorAppearanceProperty,
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance."]),
-                    "stampWidth": .object(["type": "number", "description": "Target peak STAMP width — the stroke's own ink size."]),
+                    "drawnWidth": .object(["type": "number", "description": "How wide every selected stroke should DRAW at its widest, in canvas points — the Properties panel's Drawn width."]),
+                    "toolWidth": .object(["type": "number", "description": "The width of the tool setting to re-ink with, in canvas points: what it draws at nominal pressure — the Properties panel's Tool width. Each stroke keeps its own pressure."]),
                     "inkType": .object([
                         "type": "string",
                         "description": "pen, pencil, marker, or monoline.",
@@ -3749,7 +3763,7 @@ public actor MCPAdapter {
                         let color: String
                         enum CodingKeys: String, CodingKey {
                             case inkType
-                            case width = "stampWidth"
+                            case width = "drawnWidth"
                             case color
                         }
                     }
@@ -3778,9 +3792,9 @@ public actor MCPAdapter {
                     // supplied all three fields on every stroke, because there was then nothing
                     // to inherit and reporting the picker told the caller its stroke was a width
                     // and colour it is not (measured: a stroke drawn at width 4 / #112233FF was
-                    // reported back as stampWidth 3.0, color #000000FF).
+                    // reported back as the picker's width and color #000000FF).
                     if let tool = decoded.resolvedTool {
-                        summary += "\ninherited from the user's tool: inkType \(tool.inkType), stampWidth \(tool.width), color \(tool.color)"
+                        summary += "\ninherited from the user's tool: inkType \(tool.inkType), drawnWidth \(Self.trimmed(tool.width)), color \(tool.color)"
                     }
                     // A name that was already taken MOVES to the new stroke. The element it came
                     // from is still on the canvas, now unnamed — reported so you can delete it if
@@ -3790,8 +3804,9 @@ public actor MCPAdapter {
                     if let clamped = decoded.clampedWidths, !clamped.isEmpty {
                         summary += "\nnote: \(clamped.count) stroke(s) asked for a width "
                                  + "(\(clamped.map { String(format: "%.1f", $0) }.joined(separator: ", "))) "
-                                 + "below what that ink can render, and were raised to its minimum "
-                                 + "(2.5, or 1.2 for pencil). Below it a stroke is effectively invisible."
+                                 + "outside what that ink can draw, and were drawn at the nearest end — "
+                                 + "the ink's thinnest (below it a stroke is effectively invisible) or widest. "
+                                 + "list_strokes reports the drawnWidth each stroke got."
                     }
                     if let displaced = decoded.displacedNames {
                         for taken in displaced where !taken.isEmpty {
@@ -4834,7 +4849,7 @@ public actor MCPAdapter {
                 "op": .string("restyle"),
                 "ids": .array(ids.map(Value.string)),
             ]
-            for name in ["color", "stampWidth", "inkType", "colorAppearance"] {
+            for name in ["color", "drawnWidth", "toolWidth", "inkType", "colorAppearance"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
@@ -4863,18 +4878,16 @@ public actor MCPAdapter {
             // agent asking for 1.1 on a pen got 2.5 and could only find out by calling
             // `list_strokes` afterwards.
             struct WidthNote: Decodable {
+                /// In the unit asked for — drawnWidth or toolWidth, canvas points.
                 let requested: Double
                 let actual: Double
-                let sourcePeak: Double
-                /// 1 when the target ink COULD have rendered the requested width. The two cases
-                /// need different words, and asserting the wrong one is worse than saying nothing:
-                /// an agent that asked for 5 and got 8.33 was previously told "pen tops out near
-                /// 6", which contradicts itself as well as being the wrong reason.
+                /// What the ink can reach in that unit: its thinnest and widest.
+                let lowest: Double?
+                let highest: Double?
+                /// 1 when the target ink COULD have reached the requested width. Asserting the
+                /// wrong cause is worse than saying nothing: an agent that asked for 5 and got
+                /// 8.33 was once told "pen tops out near 6".
                 let inkCanExpress: Double
-                /// 1 when the stroke's EXISTING peak is within the ink's range. When it is not,
-                /// the anchor's own inference saturates and the re-ink scales from a wrong
-                /// estimate — a separate cause that can hold at the same time as the first.
-                let sourcePeakExpressible: Double
             }
             struct RestyleMeta: Decodable {
                 let widthNotes: [WidthNote]?
@@ -4904,17 +4917,12 @@ public actor MCPAdapter {
                     summary += "\nnote: \(notes.count) stroke(s) did not land on the width asked "
                         + "for (\(example)\(asked) became \(got))."
                     if notes.allSatisfy({ $0.inkCanExpress == 0 }) {
-                        summary += " \(asked) is outside the ink's peak range — from its floor, "
-                            + "below which nothing draws (2.5; pencil 1.2), up to 100."
-                    }
-                    if notes.allSatisfy({ $0.sourcePeakExpressible == 0 }) {
-                        // "…that range too" only reads correctly when the clause above ran; on its
-                        // own it refers to nothing.
-                        let alsoRange = notes.allSatisfy({ $0.inkCanExpress == 0 })
-                            ? "outside that range too"
-                            : "outside what that ink can express"
-                        summary += " The stroke's own peak of \(Self.trimmed(first.sourcePeak)) is "
-                            + "\(alsoRange), so the re-ink scales from a saturated estimate."
+                        if let lo = first.lowest, let hi = first.highest {
+                            summary += " \(asked) is outside what the ink reaches "
+                                + "(\(Self.trimmed(lo)) to \(Self.trimmed(hi))), so the nearest end was used."
+                        } else {
+                            summary += " \(asked) is outside what the ink reaches, so the nearest end was used."
+                        }
                     }
                     summary += " list_strokes reports what each stroke actually got."
                 }
@@ -5174,7 +5182,8 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             var envelope: [String: Value] = ["op": .string("restyleSelection")]
             if let c = arguments?["color"], case .string(let hex) = c { envelope["color"] = .string(hex) }
-            if let w = arguments?["stampWidth"] { envelope["stampWidth"] = w }
+            if let w = arguments?["drawnWidth"] { envelope["drawnWidth"] = w }
+            if let w = arguments?["toolWidth"] { envelope["toolWidth"] = w }
             if let i = arguments?["inkType"], case .string(let ink) = i { envelope["inkType"] = .string(ink) }
             if let ca = arguments?["colorAppearance"], case .string(let appearance) = ca {
                 envelope["colorAppearance"] = .string(appearance)
@@ -6062,7 +6071,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "stampWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
+            for key in ["color", "drawnWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data

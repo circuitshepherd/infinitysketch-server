@@ -57,23 +57,36 @@ enum AgentGuide {
     ## Coordinates: every field name tells you its space
 
     **`canvas*` is CANVAS SPACE — what the user sees**, transform applied, the space you can \
-    point at.
-    **`stamp*` is a stroke's own ink size**, which a transform does NOT scale. Nothing is implicit;
-    if a name has neither prefix it is not a geometry field.
+    point at. A point's **`stampSize`** is a stroke's raw per-point ink size (PencilKit's own), \
+    which a transform does NOT scale.
 
     So `canvasPoints`, `canvasInkBounds`, `canvasPathBounds`, `canvasRect`, `canvasTranslate`, \
-    `canvasX`/`canvasY` — against `stampWidth` and a point's `stampSize`. Inside a `canvasPoints` \
-    array the points are plain `x`/`y`: the container already declared the space.
+    `canvasX`/`canvasY` — against a point's `stampSize`. Inside a `canvasPoints` array the points \
+    are plain `x`/`y`: the container already declared the space.
 
     `get_strokes` returns points with the transform ALREADY applied and \
     `reshape_strokes` inverts it for you, so a fetch → alter → put-back needs no matrix work. The \
     `localToCanvasTransform` array is informational — never something you apply yourself.
 
-    **Why `stampWidth` is not canvas-scaled:** it is the same quantity `restyle_strokes` sets, so \
-    reading it and writing it back is a no-op rather than something that multiplies the stroke by \
-    its own scale each time. And no honest canvas width exists — three strokes all reporting \
-    `stampWidth: 4` rendered thick, unchanged, and six times fatter, because thickness depends on \
-    a stroke's direction under the transform. **Use `canvasInkBounds` for true on-screen extent.**
+    ## Widths: Drawn and Tool, the Properties panel's own
+
+    Every stroke width you read or set is in canvas points, in the two quantities the user's \
+    Properties panel shows, so "make it 5 pt" means the same to you and to the user:
+
+    - **`drawnWidth`** — how wide the stroke DRAWS at its widest, pressure and all: the ink you \
+      see (5 matches a 5 pt grid). `draw_strokes` and `fill_region` take it; `restyle_*` sets it.
+    - **`toolWidth`** — how wide the stroke's TOOL SETTING draws at nominal pressure: what the \
+      user's palette dot or Tool field says. Setting it re-inks a stroke as if drawn with that \
+      setting, keeping its own pressure. `get_tool` reports the user's current one.
+
+    They are equal for anything drawn at even pressure — every stroke you author — as long as the \
+    tool's dial can reach that width (a Tool width is only ever one the dial can set). They differ \
+    for a user's pressure-drawn stroke: drawn lightly, a pen at Tool 4 may be Drawn 3.
+
+    Neither is scaled by a transform the stroke carries (a stroke scaled up by 3 draws three \
+    times wider than its drawnWidth): the widths are what `restyle_strokes` sets, so reading one \
+    and writing it back leaves the stroke as it was. **Use `canvasInkBounds` for true on-screen \
+    extent**, or `restore_stroke_widths` to take the scale off the ink.
 
     ## Points, and the one asymmetry that will bite you
 
@@ -91,15 +104,15 @@ enum AgentGuide {
 
     - **`monoline`** — opaque, uniform. The one for solid fills, flat colour, anything layered. \
       A pen whose width is constant IS a monoline and lists as one — every pen you author \
-      with a single `stampWidth` reads back as `monoline`, the name the user's Layers panel \
+      with a single `drawnWidth` reads back as `monoline`, the name the user's Layers panel \
       shows for it too.
     - **`marker`** — wide and TRANSLUCENT. Colours build where strokes overlap and whatever is \
       underneath shows through. Painting a solid area with it leaves the paper visible.
     - **`pen`** — tapers with force; the everyday line.
-    - **`pencil`** — textured, goes finest (minimum width 1.2 against 2.5 for the rest).
+    - **`pencil`** — textured.
 
-    Below its ink's minimum a stroke is effectively invisible, so a `stampWidth` under it is raised \
-    and the reply says so.
+    Each ink has a thinnest width it can draw (below it a stroke is effectively invisible) and a \
+    widest; a `drawnWidth` outside that is drawn at the nearest end and the reply says so.
 
     **Use `fill_region` for a solid area** — one call, and the device generates the passes. Do not \
     hand-roll scanlines: that is what it replaces. Concave shapes fill correctly, `spacingRatio` \
