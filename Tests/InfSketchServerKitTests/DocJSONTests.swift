@@ -57,6 +57,21 @@ import Testing
         #expect((entry["text"] as? [Any])?.count == 2)
     }
 
+    /// A text with a picked anchor must be recognised, so a plain edit of its characters goes to
+    /// the device (which keeps the anchor point); an absent or null anchor is automatic.
+    @Test func textHasAnchorReadsTheEntrysAnchorKey() throws {
+        var obj = try JSONSerialization.jsonObject(with: Self.fixture) as! [String: Any]
+        var texts = obj["placedTextsData"] as! [[String: Any]]
+        texts[1]["anchor"] = ["row": "bottom", "column": "right"]
+        texts[0]["anchor"] = NSNull()
+        obj["placedTextsData"] = texts
+        let bytes = try JSONSerialization.data(withJSONObject: obj)
+        #expect(DocJSON.textHasAnchor(in: bytes, textId: "AAAAAAAA-0000-0000-0000-000000000002"))
+        #expect(!DocJSON.textHasAnchor(in: bytes, textId: "AAAAAAAA-0000-0000-0000-000000000001"))
+        #expect(!DocJSON.textHasAnchor(in: Self.fixture, textId: "AAAAAAAA-0000-0000-0000-000000000002"))
+        #expect(!DocJSON.textHasAnchor(in: bytes, textId: "missing"))
+    }
+
     @Test func editTextMutatesStringAndPosition() throws {
         let out = try DocJSON.editText(in: Self.fixture,
                                        textId: "AAAAAAAA-0000-0000-0000-000000000002",

@@ -49,9 +49,10 @@ enum ToolReference {
               tools: ["list_docs", "list_open_docs", "create_doc", "fetch_doc", "replace_doc",
                       "delete_doc", "merge_docs", "set_paper", "undo_last_edit"]),
         Group(title: "Strokes",
-              blurb: "Geometry is canvas space in both directions. `stampWidth` is a stroke's own "
-                   + "ink size, which a transform does not scale — see `canvasInkBounds` for the "
-                   + "true on-screen extent.",
+              blurb: "Geometry is canvas space in both directions. Widths are the Properties panel's, "
+                   + "in canvas points: `drawnWidth` (what the stroke draws) and `toolWidth` (what its "
+                   + "tool setting draws at nominal pressure); a transform does not scale them — see "
+                   + "`canvasInkBounds` for the true on-screen extent.",
               tools: ["draw_strokes", "draw_dots", "fill_region", "list_strokes", "get_strokes",
                       "reshape_strokes", "restyle_strokes", "transform_strokes",
                       "restore_stroke_widths", "delete_strokes"]),
@@ -73,6 +74,7 @@ enum ToolReference {
               blurb: "Strokes, texts and images addressed by id, whatever their kind. Resolve a "
                    + "tag to ids with `find_elements`, then act with the id-taking tools.",
               tools: ["tag_elements", "find_elements", "list_tags", "transform_elements",
+                      "reset_element_transforms",
                       "reorder_elements", "set_pinned", "copy_elements"]),
         Group(title: "Selection",
               blurb: "These act on the LIVE rect-select session on a connected device, not on "
