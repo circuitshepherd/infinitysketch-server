@@ -76,6 +76,7 @@ actor Connection {
     private let broker: DeviceCommandBroker
     private let connectionId = UUID()
     private var registeredWithBroker = false
+    private var lastActivityReport: ContinuousClock.Instant?
 
     init(
         manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
@@ -101,8 +102,15 @@ actor Connection {
     func handle(_ frame: WSMessage) async {
         // Before every other gate, including hello: a peer that is talking is alive, whatever it
         // is saying and whether or not the message is even well-formed.
-        act(on: health.noteInbound(now: ContinuousClock.now))
+        let now = ContinuousClock.now
+        act(on: health.noteInbound(now: now))
         guard !closed else { return }
+        // Tell the broker this device is awake, so it is preferred over one that went quiet.
+        // At most once a second: a large push arrives as hundreds of chunk frames.
+        if registeredWithBroker, lastActivityReport.map({ now - $0 >= .seconds(1) }) ?? true {
+            lastActivityReport = now
+            await broker.noteActivity(connectionId: connectionId)
+        }
         let wire: WireFrame
         switch frame {
         case .close:

@@ -61,6 +61,8 @@ public actor DeviceCommandBroker {
         let deviceId: String?
         let capabilities: Set<String>
         let send: @Sendable (ServerMessage) -> Void
+        /// When the peer last sent anything (fed by `noteActivity`); registration counts.
+        var lastActivity: ContinuousClock.Instant
     }
 
     private struct PendingRequest {
@@ -116,8 +118,8 @@ public actor DeviceCommandBroker {
     private let createTimeout: Duration
     private let strokeOpTimeout: Duration
 
-    /// Ordered oldest → newest; the last capability-matching element is the
-    /// most-recently-registered connection, which request methods prefer.
+    /// Ordered oldest → newest by registration. Requests go to the capable connection that most
+    /// recently SPOKE, registration order breaking ties — see `pickConnection`.
     private var connections: [Connection] = []
     /// The document bytes most recently SENT to each connection, per docId — the base a
     /// stripped REQUEST is cut against (M4, spec 2026-08-03-request-blob-stripping-design.md).
@@ -149,8 +151,38 @@ public actor DeviceCommandBroker {
     ) {
         connections.removeAll { $0.id == connectionId }
         connections.append(Connection(id: connectionId, deviceId: deviceId,
-                                      capabilities: capabilities, send: send))
+                                      capabilities: capabilities, send: send,
+                                      lastActivity: ContinuousClock.now))
     }
+
+    /// The peer on this connection sent something. `WSAdapter` reports it (throttled), so a
+    /// device that went to sleep stops looking like the best one to ask.
+    public func noteActivity(connectionId: UUID) {
+        guard let index = connections.firstIndex(where: { $0.id == connectionId }) else { return }
+        connections[index].lastActivity = ContinuousClock.now
+    }
+
+    /// The capable connection that most recently SPOKE; among equals, the most recently
+    /// registered.
+    ///
+    /// "Most recently connected" alone chose an iPad that connected after a Mac and then went to
+    /// sleep: every agent call waited out the full timeout on the sleeping one while the Mac sat
+    /// idle and able (measured: `render_sketch` failed `deviceTimeout` after 20.3 s; review
+    /// finding 21). A live device answers the keepalive at least every ~30 s, so it stays ahead
+    /// of one that has gone quiet.
+    private func pickConnection(capability: String, deviceId: String?,
+                                excluding: Set<UUID> = []) -> Connection? {
+        connections.enumerated()
+            .filter { $0.element.capabilities.contains(capability)
+                && (deviceId == nil || $0.element.deviceId == deviceId)
+                && !excluding.contains($0.element.id) }
+            .max { ($0.element.lastActivity, $0.offset) < ($1.element.lastActivity, $1.offset) }?
+            .element
+    }
+
+    /// Ops that act on LIVE state on the device (a user's selection) and so must never be sent
+    /// twice: a device that was merely slow may still apply the first.
+    private static let neverRetriedCapabilities: Set<String> = ["controlSelection"]
 
     /// How many devices are connected, and the union of what they can do. Read only to make
     /// `noDeviceAvailable` say WHY (spec 2026-07-27-actionable-tool-errors-design.md): "no device
@@ -369,8 +401,8 @@ public actor DeviceCommandBroker {
     }
 
     /// Shared request path for `requestCreation`, `requestStrokeOp` and
-    /// `requestProvideContent`: capability-filtered most-recent connection
-    /// selection — narrowed to ONE named device when `deviceId` is non-nil
+    /// `requestProvideContent`: capability-filtered most-recently-active connection
+    /// selection (`pickConnection`), one failover on timeout for pure ops — narrowed to ONE named device when `deviceId` is non-nil
     /// (M2c-1: only a device that HAS a document can serve its content;
     /// passing nil keeps the original "any capable device" behaviour) — the
     /// shared per-docId in-flight guard, atomic actor-turn continuation
@@ -383,11 +415,34 @@ public actor DeviceCommandBroker {
         sentBytes: Data = Data(), takesDocumentLock: Bool = true,
         send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
-        guard let connection = connections.last(where: {
-            $0.capabilities.contains(capability) && (deviceId == nil || $0.deviceId == deviceId)
-        }) else {
+        guard let first = pickConnection(capability: capability, deviceId: deviceId) else {
             throw DeviceCommandError.noDeviceAvailable
         }
+        do {
+            return try await performRequest(
+                on: first, docId: docId, timeout: timeout, sentBytes: sentBytes,
+                takesDocumentLock: takesDocumentLock, send: send)
+        } catch DeviceCommandError.deviceTimeout
+            where deviceId == nil && !Self.neverRetriedCapabilities.contains(capability) {
+            // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
+            // device that answers late costs nothing but a discarded reply. A request addressed to
+            // one named device (a holder fetch) has no other device to ask.
+            guard let next = pickConnection(capability: capability, deviceId: nil,
+                                            excluding: [first.id]) else {
+                throw DeviceCommandError.deviceTimeout
+            }
+            ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)' timed out; retrying once on another device")
+            return try await performRequest(
+                on: next, docId: docId, timeout: timeout, sentBytes: sentBytes,
+                takesDocumentLock: takesDocumentLock, send: send)
+        }
+    }
+
+    private func performRequest(
+        on connection: Connection, docId: String, timeout: Duration,
+        sentBytes: Data, takesDocumentLock: Bool,
+        send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
+    ) async throws -> StrokeOpReply {
         if takesDocumentLock {
             guard !docIdsInFlight.contains(docId) else {
                 throw DeviceCommandError.requestInFlight

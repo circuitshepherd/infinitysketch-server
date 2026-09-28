@@ -147,6 +147,64 @@ private actor SentBox {
         #expect(try await result == Data("T".utf8))
     }
 
+    // MARK: - Device choice by activity, and one failover (review finding 21)
+
+    /// "Most recently CONNECTED" chose an iPad that connected later and then went to sleep over
+    /// a Mac that was live all along; every agent call waited out the timeout. The device that
+    /// last SPOKE is the better guess.
+    @Test func theMostRecentlyActiveConnectionWins() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox()
+        let sentB = SentBox()
+        let a = UUID()
+        await broker.register(connectionId: a, capabilities: ["createDoc"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["createDoc"]) { msg in Task { await sentB.set(msg) } }
+        await broker.noteActivity(connectionId: a)
+        async let result: Data = broker.requestCreation(docId: "D")
+        let request = try #require(await sentA.awaitMessage())
+        guard case .createDocRequest(let rid, "D") = request else { Issue.record("wrong msg"); return }
+        #expect(await sentB.awaitMessage() == nil)
+        await broker.handleReply(requestId: rid, bytes: Data("T".utf8), failureReason: nil)
+        #expect(try await result == Data("T".utf8))
+    }
+
+    /// A pure bytes-in/bytes-out op that times out on one device is tried once on the next.
+    @Test func aTimedOutOpIsRetriedOnceOnAnotherDevice() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(100))
+        let sentA = SentBox()
+        let sentB = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentB.set(msg) } }
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        // B (newest) is asked first and never answers; A gets the retry.
+        #expect(await sentB.awaitMessage() != nil)
+        var retried: ServerMessage?
+        for _ in 0..<100 where retried == nil {
+            retried = await sentA.all().first
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .strokeOpRequest(let rid, "D", _, _, _)? = retried else {
+            Issue.record("the op must be retried on the other device, got \(String(describing: retried))"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)
+        #expect(try await task.value.bytes == Data("ok".utf8))
+    }
+
+    /// Selection ops act on live state on the device: a device that was merely slow may still
+    /// apply one, so a retry elsewhere could apply it twice. Never retried.
+    @Test func aLiveSelectionOpIsNotRetried() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(100))
+        let sentA = SentBox()
+        let sentB = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                 capability: "controlSelection")
+        }
+        #expect(await sentA.all().isEmpty, "a live-state op must not be sent to a second device")
+    }
+
     @Test func retryAfterCompletionWorks() async throws {
         let broker = DeviceCommandBroker(createTimeout: .milliseconds(50))
         let sent = SentBox()
