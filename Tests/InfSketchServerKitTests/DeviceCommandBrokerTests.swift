@@ -422,14 +422,18 @@ private actor SentBox {
 
     /// The open device has been quiet longer than the keepalive interval while another capable
     /// device is awake: an op on bytes goes to the awake one rather than wait out a timeout.
+    ///
+    /// The window is seconds, not milliseconds: the awake device must still count as awake when
+    /// the request is routed, and on a 2-vCPU CI runner under the parallel suite the gap between
+    /// `noteActivity` and the routing passed 50 ms (2 failures in 5 runs under `--cpus 2`).
     @Test func anOpOnBytesSkipsASleepingOpenDevice() async throws {
-        let broker = DeviceCommandBroker(quietAfter: .milliseconds(50))
+        let broker = DeviceCommandBroker(quietAfter: .seconds(2))
         let sentOpen = SentBox(), sentAwake = SentBox()
         let open = UUID(), awake = UUID()
         await broker.register(connectionId: open, capabilities: ["authorStrokes"]) { msg in Task { await sentOpen.set(msg) } }
         await broker.register(connectionId: awake, capabilities: ["authorStrokes"]) { msg in Task { await sentAwake.set(msg) } }
         await broker.setSubscriberLookup { _ in [open] }
-        try await Task.sleep(for: .milliseconds(120))
+        try await Task.sleep(for: .milliseconds(2300))
         await broker.noteActivity(connectionId: awake)
         let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
         let request = try #require(await Self.awaitRequest(sentAwake), "the awake device must be asked")
