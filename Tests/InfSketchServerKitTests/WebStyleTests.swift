@@ -119,7 +119,7 @@ enum WebPageScan {
     /// Every surface that is supposed to carry the shared look, by name for failure messages.
     static let pages: [(name: String, html: String)] = [
         ("overview", WebUI.indexHTML(connectSection: connectSection)),
-        ("viewer", WebUI.docHTML(docId: "Doc & Co")),
+        ("viewer", WebUI.docHTML(docId: "Doc & Co", name: "Doc & Co")),
         ("join", JoinPage.html(host: "192.168.1.42:8080")),
     ]
 

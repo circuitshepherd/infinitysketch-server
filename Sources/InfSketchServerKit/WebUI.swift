@@ -470,11 +470,12 @@ public enum WebUI {
             .replacingOccurrences(of: "&", with: "\\u0026")
     }
 
-    /// The per-document live view. docId is embedded as script-safe JSON (safe for
-    /// any filename) and HTML-escaped for the title.
-    public static func docHTML(docId: String) -> String {
+    /// The per-document live view. `docId` is embedded as script-safe JSON (safe for any
+    /// filename) and is what the page talks to the server about; `name` is the document's
+    /// LABEL — shown in the `<title>` and the bar, HTML-escaped, and never sent to the script.
+    public static func docHTML(docId: String, name: String) -> String {
         let jsonId = Self.scriptSafeJSON(docId)
-        let htmlId = docId
+        let htmlName = name
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
@@ -484,7 +485,7 @@ public enum WebUI {
         <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>\#(htmlId) — infsketch</title>
+        <title>\#(htmlName) — infsketch</title>
         <style>
         \#(WebStyle.tokens)
           html, body { height: 100%; }
@@ -526,7 +527,7 @@ public enum WebUI {
         <body>
         <div id="bar">
           <a class="back" href="/" title="Back to the overview">&larr;</a>
-          <h1>\#(htmlId)</h1>
+          <h1>\#(htmlName)</h1>
           <span id="badge" class="badge">connecting…</span>
           <span class="spacer"></span>
           <div id="controls">

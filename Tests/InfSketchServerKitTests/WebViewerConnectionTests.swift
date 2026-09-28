@@ -69,7 +69,7 @@ import Testing
 
     /// A context with the harness loaded and the page's script run, as a browser would at load.
     private func loadPage(docId: String = "Doc") throws -> JSContext {
-        try load(WebUI.docHTML(docId: docId))
+        try load(WebUI.docHTML(docId: docId, name: docId))
     }
 
     private func load(_ html: String) throws -> JSContext {
@@ -204,7 +204,7 @@ import Testing
     /// with the whole script intact (finding 25: such a name left a page on which no code ran).
     @Test func aDocumentNamedLikeMarkupKeepsTheScriptIntact() throws {
         for name in ["<!--<script>", "</script><script>alert(1)</script>", "a & b > c"] {
-            let html = WebUI.docHTML(docId: name)
+            let html = WebUI.docHTML(docId: name, name: name)
             let start = try #require(html.range(of: "<script>"))
             let end = try #require(html.range(of: "</script>"))
             let script = String(html[start.upperBound..<end.lowerBound])

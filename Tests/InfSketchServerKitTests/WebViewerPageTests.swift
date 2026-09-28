@@ -6,7 +6,7 @@ import InfSketchWire
 /// target, the CSS that makes the stage own its gestures, and the exposed viewport.
 /// A rename fails here instead of silently in a browser.
 @Suite struct WebViewerPageTests {
-    let html = WebUI.docHTML(docId: "Doc & Co")
+    let html = WebUI.docHTML(docId: "Doc & Co", name: "Doc & Co")
 
     @Test func theStageOwnsItsGestures() {
         // touch-action: none is the mechanism the whole touch story rests on —

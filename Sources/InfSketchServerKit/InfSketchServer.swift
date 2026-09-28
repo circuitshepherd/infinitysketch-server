@@ -222,7 +222,7 @@ public final class InfSketchServer: Sendable {
         }
 
         await http.appendRoute("GET,HEAD /api/docs/*") { request in
-            // Path shape: /api/docs/<id>/frame
+            // Path shape: /api/docs/<ref>/frame
             let parts = request.path.split(separator: "/").map(String.init)
             guard parts.count == 4, parts[0] == "api", parts[1] == "docs", parts[3] == "frame" else {
                 return HTTPResponse(statusCode: .notFound)
@@ -233,7 +233,16 @@ public final class InfSketchServer: Sendable {
             // again here would double-decode names containing a literal
             // "%" (e.g. "50%off" round-trips through the wire as
             // "50%25off" and arrives at `parts[2]` as "50%off" already).
-            if let frame = await manager.latestFrame(docId: parts[2]) {
+            let ref = parts[2]
+            let docId: String
+            switch await manager.resolveDocRef(ref) {
+            case .id(let id): docId = id
+            case .unresolved: docId = ref
+            case .ambiguous(let candidates):
+                return self.ambiguousRefResponse(ref, candidates)
+            }
+
+            if let frame = await manager.latestFrame(docId: docId) {
                 var headers: [HTTPHeader: String] = [
                     .contentType: "image/png",
                     .cacheControl: "no-store",
@@ -252,7 +261,7 @@ public final class InfSketchServer: Sendable {
                 return self.headAware(request, headers: headers, body: frame.png)
             }
 
-            if let bytes = try? store.load(docId: parts[2]),
+            if let bytes = try? store.load(docId: docId),
                let png = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes) {
                 return self.headAware(request, headers: [
                     .contentType: "image/png",
@@ -264,7 +273,7 @@ public final class InfSketchServer: Sendable {
             // M2c-1: a metadata-only doc has no bytes here — serve the thumbnail its holder
             // advertised, from the live index (same URL/content type, so the app's preview
             // cache is unaffected).
-            guard let png = await manager.liveEntry(docId: parts[2])?.thumbnail else {
+            guard let png = await manager.liveEntry(docId: docId)?.thumbnail else {
                 return HTTPResponse(statusCode: .notFound)
             }
             return self.headAware(request, headers: [
@@ -307,7 +316,14 @@ public final class InfSketchServer: Sendable {
                 return HTTPResponse(statusCode: .notFound)
             }
             // See the /api/docs/* handler above: parts[1] is already decoded.
-            let docId = parts[1]
+            let ref = parts[1]
+            let docId: String
+            switch await manager.resolveDocRef(ref) {
+            case .id(let id): docId = id
+            case .unresolved: docId = ref
+            case .ambiguous(let candidates):
+                return self.ambiguousRefResponse(ref, candidates)
+            }
             // Only serve a viewer for a document that actually exists somewhere. Without this,
             // any path under /doc/ answered 200 with a working-looking page for a document that
             // was never there, so a typo or a stale link rendered an empty viewer that would sit
@@ -324,12 +340,13 @@ public final class InfSketchServer: Sendable {
             //   - a connected device's advertisement (M2c metadata-only: no bytes here at all,
             //     and the frame route serves the thumbnail its holder advertised).
             let hasSession = await manager.liveInfo()[manager.canonicalDocId(docId)] != nil
-            let advertised = await manager.liveEntry(docId: docId) != nil
-            let known = ((try? store.exists(docId: docId)) ?? false) || hasSession || advertised
+            let liveEntry = await manager.liveEntry(docId: docId)
+            let known = ((try? store.exists(docId: docId)) ?? false) || hasSession || (liveEntry != nil)
             guard known else { return HTTPResponse(statusCode: .notFound) }
+            let name = store.name(of: docId) ?? liveEntry?.name ?? docId
             return self.headAware(
                 request, headers: [.contentType: "text/html; charset=utf-8"],
-                body: Data(WebUI.docHTML(docId: docId).utf8))
+                body: Data(WebUI.docHTML(docId: docId, name: name).utf8))
         }
 
         await http.appendRoute(
@@ -391,5 +408,16 @@ public final class InfSketchServer: Sendable {
         var headers = headers
         headers[.contentLength] = "\(body.count)"
         return HTTPResponse(statusCode: statusCode, headers: headers, body: Data())
+    }
+
+    /// `/doc/<ref>` and `/api/docs/<ref>/frame` share this: a `ref` that names SEVERAL documents
+    /// (an ambiguous name — `SessionManager.resolveDocRef`) is a 409, never a guess at which one
+    /// was meant. Listed `id (name)` per line, newest-modified first (the order `resolveDocRef`
+    /// already sorted its candidates in).
+    private func ambiguousRefResponse(_ ref: String, _ candidates: [DocRefCandidate]) -> HTTPResponse {
+        let body = candidates.map { "\($0.id) (\($0.name))" }.joined(separator: "\n")
+        return HTTPResponse(
+            statusCode: .conflict, headers: [.contentType: "text/plain; charset=utf-8"],
+            body: Data(("\"\(ref)\" names several documents:\n" + body).utf8))
     }
 }
