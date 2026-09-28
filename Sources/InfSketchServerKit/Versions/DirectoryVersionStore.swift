@@ -51,23 +51,44 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         guard VersionDigest.hex(of: bytes) == hash else { throw VersionStoreError.hashMismatch }
         lock.lock(); defer { lock.unlock() }
         let dir = try docDir(docId)
-        var index = readIndex(dir) ?? VersionIndex()
+        // "No index yet" (a fresh document) and "an index exists but will not decode" must NOT be
+        // treated alike: `?? VersionIndex()` on the second one silently drops every device's holds,
+        // and the sweep below would then delete versions those devices still name — the "never
+        // forget a device implicitly" rule, broken by a decode failure rather than a device report.
+        var index: VersionIndex
+        var skipSweepThisCall = false
+        switch readIndexDistinguishingCorruption(dir) {
+        case .absent:
+            index = VersionIndex()
+        case .corrupt:
+            quarantineCorruptIndex(dir)
+            index = VersionIndex()
+            // The versions on disk right now may be named ONLY by the holds we just lost the
+            // ability to read — sweeping this same call, against the fresh holds-less index, would
+            // delete them in the same breath as discovering we can no longer see them.
+            skipSweepThisCall = true
+        case .ok(let existing):
+            index = existing
+        }
         try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId)
         index.current = hash
         index.recent.removeAll { $0 == hash }
         index.recent.append(hash)
         if index.recent.count > Self.recentCount { index.recent.removeFirst(index.recent.count - Self.recentCount) }
         try writeIndex(index, dir)
-        sweep(dir: dir, index: index)
+        if !skipSweepThisCall { sweep(dir: dir, index: index) }
     }
 
     public func ensureCurrent(docId: String, bytes: Data, hash: String) throws {
         let dir = try docDir(docId)
         lock.lock()
         let index = readIndex(dir)
-        let already = index?.current == hash && FileManager.default.fileExists(atPath: dir.appendingPathComponent(hash).path)
+        // Not just "does the file exist" — a `current` entry whose file exists but is damaged
+        // (a blob gone missing, a partial write) must still be repaired, the same as any other
+        // `record` would repair it; `loadLocked` is the one place that already knows how to tell.
+        let alreadyCurrentAndHealthy = index?.current == hash && loadLocked(dir: dir, hash: hash, docId: docId) != nil
         lock.unlock()
-        if !already { try record(docId: docId, bytes: bytes, hash: hash) }
+        if !alreadyCurrentAndHealthy { try record(docId: docId, bytes: bytes, hash: hash) }
     }
 
     public func contains(docId: String, hash: String) -> Bool {
@@ -167,12 +188,20 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
 
     /// Write `hash`'s version file and blobs if absent, or REPAIR them from `bytes` (already
     /// verified against `hash` by `record`) when the file exists but does not hold up: a blob gone
-    /// missing (disk error, a stray delete) or the version file itself damaged by a crash mid-write.
+    /// missing (disk error, a stray delete), the version file itself damaged by a crash mid-write,
+    /// or a manifest that still PARSES but has been tampered into naming the wrong shas.
     ///
-    /// A manifest that parsed BEFORE this call was already counted into `blobRefs` — at the write
-    /// that first produced it, or at the last startup scan — and rewriting it changes none of its
-    /// shas, since the manifest is a pure function of `bytes`; only a manifest that did NOT parse
-    /// before (absent file, or bytes too damaged to read at all) is counted here for the first time.
+    /// Ref-counting on repair: COUNT the correct (new) manifest's shas FIRST, then RELEASE whatever
+    /// the prior manifest named, if it parsed — in that order, never the reverse. A blob referenced
+    /// by both (the ordinary case: most of a version is untouched) is counted twice for a moment and
+    /// then released once, never zero — releasing first would let a shared, still-needed blob hit
+    /// zero and be deleted before the new manifest re-claims it. A prior manifest that did NOT parse
+    /// (absent file, or bytes too damaged to read at all) names nothing to release, so its shas are
+    /// simply counted as new — which OVER-counts by one if they were already counted at the write
+    /// that (before being damaged) first produced this same version: that is a known, accepted
+    /// residue of not being able to read what a corrupt file used to say, and the next process
+    /// restart's `rebuildBlobReferences` scan corrects it back to exactly one count per referencing
+    /// file, since it recomputes every count from what is actually on disk rather than accumulating.
     private func writeOrRepairVersion(dir: URL, bytes: Data, hash: String, docId: String) throws {
         let file = dir.appendingPathComponent(hash)
         let existedBefore = FileManager.default.fileExists(atPath: file.path)
@@ -195,30 +224,72 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             }
         }
         try version.encoded().write(to: file, options: .atomic)
-        if priorManifest == nil {
-            for sha in Set(version.manifest.values) { blobRefs[sha, default: 0] += 1 }
+        for sha in Set(version.manifest.values) { blobRefs[sha, default: 0] += 1 }
+        if let prior = priorManifest {
+            for sha in Set(prior.values) { releaseBlob(sha) }
         }
     }
 
+    /// `nil` for BOTH "no index file" and "an index file that will not decode" — the ordinary read,
+    /// used everywhere a caller only needs a good index or none. `record` needs the two told apart
+    /// (see `readIndexDistinguishingCorruption`) and is the one caller that does not go through this.
     func readIndex(_ dir: URL) -> VersionIndex? {
-        guard let data = try? Data(contentsOf: dir.appendingPathComponent(Self.holdsFileName)) else { return nil }
+        switch readIndexDistinguishingCorruption(dir) {
+        case .absent, .corrupt: return nil
+        case .ok(let index): return index
+        }
+    }
+
+    enum IndexRead {
+        case absent
+        case corrupt
+        case ok(VersionIndex)
+    }
+
+    /// Absent (a fresh document — a fresh index is the right, harmless answer) and corrupt (an
+    /// index that EXISTS but cannot be decoded — silently substituting a fresh one here would throw
+    /// away every device's holds) must not collapse into the same case; `record` is the one caller
+    /// that acts on the difference.
+    func readIndexDistinguishingCorruption(_ dir: URL) -> IndexRead {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(Self.holdsFileName)) else { return .absent }
         let decoder = JSONDecoder()
-        // `.secondsSince1970` round-trips a Date exactly, sub-second precision included — an ISO8601
-        // string (the default formatter has no fractional-second option) truncates to the second,
-        // silently rewriting `lastSeen` on every read.
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return try? decoder.decode(VersionIndex.self, from: data)
+        // `.deferredToDate` round-trips a `Date` exactly, sub-second precision included — measured:
+        // `.secondsSince1970` (a Double near 1.8e9, most of its mantissa spent on the whole-second
+        // part) lost sub-second precision on about half of random values, while `.deferredToDate`
+        // (`timeIntervalSinceReferenceDate`, a smaller-magnitude Double, roughly 2001-epoch) did not
+        // on any. `.iso8601`'s default formatter has no fractional-second option at all and would
+        // truncate to the second on every write.
+        decoder.dateDecodingStrategy = .deferredToDate
+        guard let index = try? decoder.decode(VersionIndex.self, from: data) else { return .corrupt }
+        return .ok(index)
+    }
+
+    /// `holds.json` exists but did not decode. Preserve the bytes under a new name and log it,
+    /// rather than let the document proceed as if it had never had any holds at all — a decode
+    /// failure must not be indistinguishable from "no device has ever reported in".
+    private func quarantineCorruptIndex(_ dir: URL) {
+        let file = dir.appendingPathComponent(Self.holdsFileName)
+        let stamp = Int(Date().timeIntervalSince1970 * 1_000_000)
+        let quarantined = dir.appendingPathComponent("\(Self.holdsFileName).corrupt-\(stamp)")
+        if (try? FileManager.default.moveItem(at: file, to: quarantined)) != nil {
+            ServerLog.error("'\(dir.lastPathComponent)': holds.json did not decode — preserved as " +
+                             "\(quarantined.lastPathComponent) rather than treated as empty")
+        } else {
+            ServerLog.error("'\(dir.lastPathComponent)': holds.json did not decode and could not be " +
+                             "moved aside")
+        }
     }
 
     func writeIndex(_ index: VersionIndex, _ dir: URL) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.dateEncodingStrategy = .deferredToDate
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(index).write(to: dir.appendingPathComponent(Self.holdsFileName), options: .atomic)
     }
 
-    /// What the retention policy keeps. Task 1.3 narrows this; until then everything recorded stays.
+    /// What the retention policy keeps: the CURRENT version, the last `recentCount` recorded, and
+    /// every hash any device's holds still name — the union, computed fresh from `index` every time.
     func kept(_ index: VersionIndex) -> Set<String> {
         var keep = Set(index.recent)
         if let current = index.current { keep.insert(current) }
@@ -228,6 +299,12 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
 
     /// Delete every version file of `dir` the policy does not keep, and every blob no kept version
     /// references any more. After writes only — never on a timer.
+    ///
+    /// A version file whose manifest does not even PARSE is still deleted here (it cannot be kept —
+    /// nothing names garbage as current, recent or held), but its blob references cannot be
+    /// released: this sweep has no way to know what it referenced. Those blobs become ORPHANS —
+    /// freed instead by the next process start's `rebuildBlobReferences` scan, which finds them
+    /// referenced by nothing and deletes them then.
     func sweep(dir: URL, index: VersionIndex) {
         let keep = kept(index)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
@@ -268,11 +345,13 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
                 }
             }
         }
-        // Orphans: a blob written just before a crash whose version file never made it to disk (or
-        // one abandoned by a version that became unparseable before it could be released properly).
-        // Nothing can ever reference it again, so free the space at the next start.
+        // Orphans: a blob written just before a crash whose version file never made it to disk, or
+        // one a `sweep` deleted the referencing (unparseable) version file of without being able to
+        // release (see `sweep`'s doc comment). Nothing can ever reference it again, so free the
+        // space at the next start. Only a well-formed name is even a candidate — anything else in
+        // `.blobs/` was never one of ours to begin with and is left alone.
         for name in (try? FileManager.default.contentsOfDirectory(atPath: blobsDir.path)) ?? []
-        where blobRefs[name] == nil {
+        where VersionHash.isWellFormed(name) && blobRefs[name] == nil {
             try? FileManager.default.removeItem(at: blobsDir.appendingPathComponent(name))
         }
     }

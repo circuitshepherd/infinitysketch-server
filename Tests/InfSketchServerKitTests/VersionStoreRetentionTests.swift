@@ -160,15 +160,26 @@ import InfSketchWire
 
     // MARK: - Controller-ruling hardening (Task 1.2 review), one test per ruling
 
-    /// Ruling 5: holds.json must round-trip a Date exactly, sub-second precision included — an
-    /// ISO8601 string without fractional seconds would silently truncate it on every write.
+    /// Ruling 5: holds.json must round-trip a Date exactly, sub-second precision included.
+    /// `.secondsSince1970` measurably does NOT — a `Date` near "now" spends most of a Double's
+    /// mantissa on the whole-second part (~1.8e9), which loses sub-second precision on roughly half
+    /// of arbitrary values (measured by the reviewer); a single hand-picked value can round-trip by
+    /// luck (as the first version of this test did, built from `Date(timeIntervalSince1970:)`, the
+    /// same quantity the broken strategy re-extracts), so this checks MANY sub-second values,
+    /// including the reviewer's own reference-date example, rather than one.
     @Test func holdsDatesRoundTripExactlyIncludingSubSecondPrecision() throws {
         let store = DirectoryVersionStore(directory: try VersionFixtures.temporaryDirectory())
         let v = VersionFixtures.document(marker: "v")
-        try store.record(docId: "doc", bytes: v, hash: VersionDigest.hex(of: v))
-        let when = Date(timeIntervalSince1970: 1_800_000_000.123456)
-        store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: VersionDigest.hex(of: v), now: when)
-        #expect(store.holds(docId: "doc")["ipad"]?.lastSeen == when)
+        let hash = VersionDigest.hex(of: v)
+        try store.record(docId: "doc", bytes: v, hash: hash)
+        var whens: [Date] = [Date(timeIntervalSinceReferenceDate: 780_000_000.123456789)]
+        for i in stride(from: 0, to: 1000, by: 1) {
+            whens.append(Date(timeIntervalSinceReferenceDate: 700_000_000 + Double(i) / 7.0))
+        }
+        for when in whens {
+            store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: hash, now: when)
+            #expect(store.holds(docId: "doc")["ipad"]?.lastSeen == when, "mismatch for \(when.timeIntervalSinceReferenceDate)")
+        }
     }
 
     /// Ruling 1 (load half): a manifest can be made to name anything as a blob's "sha" — a value
@@ -256,15 +267,113 @@ import InfSketchWire
     }
 
     /// Ruling 3 (init half): a blob written just before a crash, whose version file never made it
-    /// to disk, can never be referenced by anything — freed at the next start.
+    /// to disk, can never be referenced by anything — freed at the next start. A non-hex name in
+    /// `.blobs/` (never one of ours) is left alone even though it also has zero references.
     @Test func initDeletesOrphanBlobsWithZeroReferences() throws {
         let dir = try VersionFixtures.temporaryDirectory()
         let blobsDir = dir.appendingPathComponent(DirectoryVersionStore.blobsDirectoryName)
         try FileManager.default.createDirectory(at: blobsDir, withIntermediateDirectories: true)
         let orphan = String(repeating: "5", count: 64)
         try Data("half-written blob, never referenced".utf8).write(to: blobsDir.appendingPathComponent(orphan))
+        let stray = ".DS_Store"
+        try Data("not a blob at all".utf8).write(to: blobsDir.appendingPathComponent(stray))
         _ = DirectoryVersionStore(directory: dir)
         #expect(FileManager.default.fileExists(atPath: blobsDir.appendingPathComponent(orphan).path) == false)
+        #expect(FileManager.default.fileExists(atPath: blobsDir.appendingPathComponent(stray).path))
+    }
+
+    /// Fix round 1, ruling 2: the repair path's ref-count ordering. A version whose on-disk manifest
+    /// still PARSES but was tampered to name the wrong (or a since-deleted) sha must not lose track
+    /// of its REAL blob when it is repaired — counting the correct manifest's shas AFTER releasing
+    /// the wrong one would let a blob shared with a sibling dip to zero and be deleted the moment
+    /// that sibling is later swept, even though the repaired version still needs it.
+    @Test func repairAfterATamperedManifestKeepsASiblingsSharedBlobAlive() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let id = UUID()
+        let shared = VersionFixtures.image(seed: 60)
+        let v1 = VersionFixtures.document(marker: "v1", images: [(id, shared)])
+        let v2 = VersionFixtures.document(marker: "v2", images: [(id, shared)])
+        let hash1 = VersionDigest.hex(of: v1)
+        let hash2 = VersionDigest.hex(of: v2)
+        let v1File = dir.appendingPathComponent(".versions/doc/\(hash1)")
+        do {
+            let store = DirectoryVersionStore(directory: dir)
+            try store.record(docId: "doc", bytes: v1, hash: hash1)
+            store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: hash1, now: Date())
+            try store.record(docId: "doc", bytes: v2, hash: hash2)
+            // Tamper v1's on-disk manifest to a well-formed but WRONG sha — it still parses as a
+            // `StoredVersion`, so a restart's scan will count the wrong blob for it instead of the
+            // real, shared one.
+            let (original, _) = StoredVersion.make(from: v1, digest: VersionHash.digest(hex: hash1) ?? Data())
+            var wrong: [String: String] = [:]
+            for key in original.manifest.keys { wrong[key] = String(repeating: "e", count: 64) }
+            try StoredVersion(manifest: wrong, stripped: original.stripped).encoded().write(to: v1File, options: .atomic)
+        }
+        // Restart: the scan counts the WRONG sha for v1 and the real one only once, from v2.
+        let reopened = DirectoryVersionStore(directory: dir)
+        // Repair v1 by recording the same bytes again — this must restore the real blob's count
+        // rather than leaving it attributed to v2 alone.
+        try reopened.record(docId: "doc", bytes: v1, hash: hash1)
+        #expect(reopened.load(docId: "doc", hash: hash1) == v1, "repaired right after the restart")
+        // Push v2 out of the kept set (it is neither held nor current any more) so its reference to
+        // the shared blob is released by an ordinary sweep.
+        for i in 0..<10 {
+            let more = VersionFixtures.document(marker: "more\(i)")
+            try reopened.record(docId: "doc", bytes: more, hash: VersionDigest.hex(of: more))
+        }
+        #expect(reopened.contains(docId: "doc", hash: hash2) == false, "v2 fell out of the kept set")
+        // The under-count bug: if v1's real reference was never restored, releasing v2's reference
+        // alone drops the shared blob to zero and deletes it — even though v1 (still held) needs it.
+        #expect(reopened.load(docId: "doc", hash: hash1) == v1,
+                "v1 must still rebuild after v2's sibling reference to the same blob was released")
+    }
+
+    /// Fix round 1, ruling 3 (`ensureCurrent`): a `current` version whose file exists but is damaged
+    /// must still be repaired — `ensureCurrent`'s old "already current" shortcut only checked that
+    /// the file EXISTED, so a damaged current version was never repaired by this door.
+    @Test func ensureCurrentRepairsADamagedCurrentVersion() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        let bytes = VersionFixtures.document(marker: "v", images: [(UUID(), VersionFixtures.image(seed: 61))])
+        let hash = VersionDigest.hex(of: bytes)
+        try store.record(docId: "doc", bytes: bytes, hash: hash)
+        let versionFile = dir.appendingPathComponent(".versions/doc/\(hash)")
+        try Data("garbage, but a file exists at this path".utf8).write(to: versionFile, options: .atomic)
+        #expect(store.load(docId: "doc", hash: hash) == nil, "damaged before ensureCurrent repairs it")
+        try store.ensureCurrent(docId: "doc", bytes: bytes, hash: hash)
+        #expect(store.load(docId: "doc", hash: hash) == bytes, "ensureCurrent repaired the damaged current version")
+    }
+
+    /// Fix round 1, ruling 4 (global constraint "never forget a device implicitly"): `record` must
+    /// not treat an UNREADABLE holds.json the same as an ABSENT one. The old `readIndex(dir) ??
+    /// VersionIndex()` did exactly that, so a corrupted index silently dropped every device's holds
+    /// and the very next sweep deleted whatever version only a hold (not the recent-8 window) was
+    /// keeping alive.
+    @Test func recordDoesNotSweepAwayAHeldVersionWhenHoldsJSONIsUnreadable() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        let all = versions(12)
+        // Hold FIRST, while all[0] is still known, then write past it — the same shape as
+        // `aHeldVersionSurvivesAnyNumberOfWrites` — so it survives on the hold alone, exactly what
+        // the corruption below then makes unreadable.
+        try store.record(docId: "doc", bytes: all[0].bytes, hash: all[0].hash)
+        store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: all[0].hash, now: Date())
+        for v in all.dropFirst() { try store.record(docId: "doc", bytes: v.bytes, hash: v.hash) }
+        // all[0] has now fallen out of the recent-8 window; only the (about to be unreadable) hold
+        // keeps it.
+        let holdsFile = dir.appendingPathComponent(".versions/doc/\(DirectoryVersionStore.holdsFileName)")
+        try Data("not json".utf8).write(to: holdsFile, options: .atomic)
+        // The record that DISCOVERS the corruption must not itself sweep the document using a
+        // fresh, holds-less index — that would delete all[0] in the very call that lost the ability
+        // to see it was held.
+        let extra = VersionFixtures.document(marker: "extra")
+        try store.record(docId: "doc", bytes: extra, hash: VersionDigest.hex(of: extra))
+        #expect(store.load(docId: "doc", hash: all[0].hash) == all[0].bytes,
+                "a version an unreadable index still (invisibly) named as held must survive the call that discovers this")
+        // The unreadable file is preserved, not silently discarded.
+        let entries = try FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(".versions/doc").path)
+        #expect(entries.contains { $0.hasPrefix("\(DirectoryVersionStore.holdsFileName).corrupt-") },
+                "the unreadable holds.json must be quarantined, not deleted or silently overwritten")
     }
 
     /// Ruling 4: `docDir` must still refuse the exact strings "." and ".." even though
