@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import InfSketchServerKit
+@testable import InfSketchWire
 
 /// `DocumentIdentity` edits one top-level value at the byte level (round 5, item 6).
 @Suite struct DocumentIdentityTests {
@@ -30,5 +30,37 @@ import Testing
         #expect(DocumentIdentity.documentId(of: slice) == "A")
         #expect(String(decoding: DocumentIdentity.replacingDocumentId(in: slice, with: "B"), as: UTF8.self)
                 == #"{"documentId":"B","b":1}"#)
+    }
+
+    /// A legacy document (no id) gets one at the position the app's sorted encoder would have
+    /// written it — right after the thumbnail and the keys that sort before it — so the thumbnail
+    /// stays FIRST (the extension stops after one key) and the app's streaming id reader stops early.
+    @Test func settingAnIdInsertsItAtTheSortedPosition() throws {
+        let legacy = Data(#"{"aaa001_thumbnailData":"x","darkColorScheme":true,"drawingData":"AA==","z":1}"#.utf8)
+        let out = DocumentIdentity.settingDocumentId(in: legacy, to: "NEW")
+        #expect(String(decoding: out, as: UTF8.self)
+                == #"{"aaa001_thumbnailData":"x","darkColorScheme":true,"documentId":"NEW","drawingData":"AA==","z":1}"#)
+        #expect(DocumentIdentity.documentId(of: out) == "NEW")
+        #expect(try JSONSerialization.jsonObject(with: out) is [String: Any])
+    }
+
+    @Test func settingAnIdWhenEveryKeySortsBeforeItAppendsIt() {
+        let doc = Data(#"{"aaa001_thumbnailData":"x","b":1}"#.utf8)
+        #expect(String(decoding: DocumentIdentity.settingDocumentId(in: doc, to: "N"), as: UTF8.self)
+                == #"{"aaa001_thumbnailData":"x","b":1,"documentId":"N"}"#)
+        #expect(String(decoding: DocumentIdentity.settingDocumentId(in: Data("{}".utf8), to: "N"), as: UTF8.self)
+                == #"{"documentId":"N"}"#)
+    }
+
+    @Test func settingAnIdReplacesAnExistingOne() {
+        let doc = Data(#"{"aaa001_thumbnailData":"x","documentId":"OLD"}"#.utf8)
+        #expect(DocumentIdentity.documentId(of: DocumentIdentity.settingDocumentId(in: doc, to: "NEW")) == "NEW")
+    }
+
+    @Test func settingAnIdLeavesMalformedBytesAlone() {
+        for garbage in ["", "[]", "{", #"{"a":"#] {
+            let bytes = Data(garbage.utf8)
+            #expect(DocumentIdentity.settingDocumentId(in: bytes, to: "N") == bytes)
+        }
     }
 }
