@@ -285,7 +285,8 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute(
             "GET /ws",
-            to: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)))
+            to: OriginCheckedHTTPHandler(
+                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker))))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
         // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the
