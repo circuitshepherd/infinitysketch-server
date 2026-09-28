@@ -166,6 +166,24 @@ import Testing
         }
     }
 
+    /// The directory vanishing under a running server (a worktree deleted beneath its dev server)
+    /// makes the rotation fail. That must stop the telemetry, not the process: the failed rotation
+    /// used to set the byte count to `Int.max` and the very next line added to it — an overflow trap.
+    @Test func aFailedRotationStopsWritingInsteadOfTrapping() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("telemetry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("telemetry.jsonl")
+
+        let writer = try #require(TelemetryFileWriter(url: url, capBytes: 100))
+        writer.write(#"{"n":0}"#)
+        writer.flush()
+        try FileManager.default.removeItem(at: directory)
+        for i in 1..<10 { writer.write(#"{"n":\#(i),"pad":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#) }
+        writer.flush()
+        #expect(!FileManager.default.fileExists(atPath: url.path), "nothing may be written once rotation failed")
+    }
+
     /// A path that cannot be opened is a misconfiguration the operator must see — and it must not
     /// take the server down with it.
     @Test func anUnusablePathIsRefusedRatherThanCrashing() {

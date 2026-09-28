@@ -187,6 +187,9 @@ final class TelemetryFileWriter: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.circuitshepherd.infsketch.telemetry")
     private var handle: FileHandle
     private var written: Int
+    /// Set when a rotation could not open a fresh file. A flag rather than a sentinel byte count:
+    /// `Int.max` there made the next `written += …` an overflow trap that took the server down.
+    private var disabled = false
 
     /// Returns nil when the path cannot be opened — a directory that does not exist, or one that
     /// cannot be written to. The caller reports it; the server carries on without telemetry, which
@@ -209,7 +212,9 @@ final class TelemetryFileWriter: @unchecked Sendable {
     func write(_ line: String) {
         let bytes = Data((line + "\n").utf8)
         queue.async { [self] in
+            guard !disabled else { return }
             if written + bytes.count > capBytes { rotate() }
+            guard !disabled else { return }
             try? handle.write(contentsOf: bytes)
             written += bytes.count
         }
@@ -228,7 +233,7 @@ final class TelemetryFileWriter: @unchecked Sendable {
               let fresh = try? FileHandle(forWritingTo: url) else {
             // The directory went away underneath us. Keep the old handle closed and stop writing
             // rather than throwing on every row for the rest of the process's life.
-            written = Int.max
+            disabled = true
             return
         }
         handle = fresh
