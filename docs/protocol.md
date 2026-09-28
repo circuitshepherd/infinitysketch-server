@@ -51,10 +51,21 @@ clean, immediate error. Consequently **every wire addition bumps the version**, 
 `copyElements`, `reorderElements`, `transformElements`, `controlSelection`, `provideContent`) and
 transport features (`blobOmission`).
 
+## Document identity and names
+
+**`docId` IS the document's `documentId`** — a stable identity minted once and carried in the
+document's own bytes (`DocumentIdentity`, `InfSketchWire`), never a filename or a display string. A
+**name** is a separate, mutable label a person sees; two documents may share one. `subscribe`'s
+`name` labels a document it creates; `DocListEntry.name` and `DocAdvertisement.name` carry the
+current label in a listing or an advertisement (each defaults to the id when absent, so an older
+peer or a not-yet-named document still shows something sensible); `renameDoc` changes the label,
+never the id.
+
 ## Document sessions
 
-- `subscribe(docId, createIfMissing)` → `subscribed(docId, seq, snapshot)` or
-  `subscribeFailed`. The snapshot is the full document; there is no history replay.
+- `subscribe(docId, createIfMissing, name)` → `subscribed(docId, seq, snapshot)` or
+  `subscribeFailed`. The snapshot is the full document; there is no history replay. `name` labels a
+  document this subscribe CREATES; it is ignored when the document already exists.
 - Writes are `op(docId, opId, payload, expectation)`. An accepted op is broadcast to every
   subscriber as `event` with a per-session increasing `seq`; the writer's own op comes back as its
   ack. A refused op is `reject(docId, opId, reason, seq)`.
@@ -65,6 +76,9 @@ transport features (`blobOmission`).
 - `deleteDoc` removes the document (no expectation — the user asked for it gone); live subscribers
   are told via `docDeleted` so a device holding a copy stops syncing it rather than silently
   re-uploading it. Deleted files go to the store's `.trash/`, pruned after 30 days.
+- `renameDoc(docId, name)` changes a document's label (identity is untouched) and is answered on the
+  STATUS stream as `docRenamed(docId, name)` — sent to every status subscriber, the renaming device
+  included, so there is one place a device learns a document's current name.
 
 ## Blob omission (why pushes are small)
 
@@ -113,10 +127,11 @@ any op handler sees the spec. A text frame over 1 MiB drops the app's socket out
 
 ## Discovery, status, and live frames
 
-- `listDocs` → `docList` — the store's documents with size, modified date, seq, subscriber count.
-- `advertiseDocs` — a device announces documents it holds locally (metadata + thumbnail, no
-  content), kept in an in-memory index so other devices can browse and fetch them on demand; pruned
-  when the advertising device disconnects.
+- `listDocs` → `docList` — the store's documents (`DocListEntry`: id, name, size, modified date,
+  seq, subscriber count).
+- `advertiseDocs` — a device announces documents it holds locally (`DocAdvertisement`: id, name,
+  metadata + thumbnail, no content), kept in an in-memory index so other devices can browse and
+  fetch them on demand; pruned when the advertising device disconnects.
 - `subscribeStatus` → `statusEvent` pushes (doc updated / deleted / subscriber changes) — what the
   web overview and the app's browser refresh from.
 - `watchDoc` / `unwatchDoc` — a browser viewing a document's page makes the device render live

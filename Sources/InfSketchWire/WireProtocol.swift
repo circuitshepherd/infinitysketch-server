@@ -31,6 +31,9 @@ public enum WireProtocol {
     // deadline a device honours for live-state ops; and three things nothing ever used went away —
     // `subscribe.fromSeq` (always nil, always ignored), `resyncRequired` and `transferAbort` (never
     // sent by anyone).
+    //
+    // identity (2026-09-28, still v12 while unreleased): docId IS the documentId; names are labels
+    // (subscribe.name, advertisement/listing name, renameDoc/docRenamed).
     public static let version = 12
 }
 
@@ -165,6 +168,11 @@ public struct StatusPayload: Codable, Equatable, Sendable {
 /// /api/docs summary; DocSummary stays server-side for the HTTP route).
 public struct DocListEntry: Codable, Equatable, Sendable {
     public var id: String
+    /// The label a person sees for this document (Task 2.3: `DocumentLabels`). `id` IS the
+    /// document's `documentId` — its identity — while `name` is a label two documents may share.
+    /// Defaults to `id` when absent, so an older peer (or a listing built before a document was
+    /// ever named) still shows something sensible.
+    public var name: String
     public var sizeBytes: Int
     public var modifiedAt: Date
     public var seq: Int?
@@ -174,9 +182,10 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     /// every pre-M2b entry had content.
     public var hasContent: Bool
 
-    public init(id: String, sizeBytes: Int, modifiedAt: Date, seq: Int?, subscriberCount: Int?,
-                hasContent: Bool = true) {
+    public init(id: String, name: String? = nil, sizeBytes: Int, modifiedAt: Date, seq: Int?,
+                subscriberCount: Int?, hasContent: Bool = true) {
         self.id = id
+        self.name = name ?? id
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
         self.seq = seq
@@ -185,12 +194,13 @@ public struct DocListEntry: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, sizeBytes, modifiedAt, seq, subscriberCount, hasContent
+        case id, name, sizeBytes, modifiedAt, seq, subscriberCount, hasContent
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
         sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
         modifiedAt = try c.decode(Date.self, forKey: .modifiedAt)
         seq = try c.decodeIfPresent(Int.self, forKey: .seq)
@@ -209,20 +219,39 @@ public struct DocListEntry: Codable, Equatable, Sendable {
 /// All advertisers are equal: any of them may later be asked to hand over the content.
 public struct DocAdvertisement: Codable, Equatable, Sendable {
     public var docId: String
+    /// The label a person sees for this document. `docId` IS the document's `documentId` — its
+    /// identity — while `name` is a label. Defaults to `docId` when absent, so an older peer (or a
+    /// pre-identity device) still advertises something sensible.
+    public var name: String
     public var modifiedAt: Date
     public var sizeBytes: Int
     public var thumbnail: Data?
-    public init(docId: String, modifiedAt: Date, sizeBytes: Int, thumbnail: Data?) {
+    public init(docId: String, name: String? = nil, modifiedAt: Date, sizeBytes: Int, thumbnail: Data?) {
         self.docId = docId
+        self.name = name ?? docId
         self.modifiedAt = modifiedAt
         self.sizeBytes = sizeBytes
         self.thumbnail = thumbnail
+    }
+
+    private enum CodingKeys: String, CodingKey { case docId, name, modifiedAt, sizeBytes, thumbnail }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        docId = try c.decode(String.self, forKey: .docId)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? docId
+        modifiedAt = try c.decode(Date.self, forKey: .modifiedAt)
+        sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
+        thumbnail = try c.decodeIfPresent(Data.self, forKey: .thumbnail)
     }
 }
 
 public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String], deviceId: String?)
-    case subscribe(docId: String, createIfMissing: Bool)
+    /// `name` labels a document this subscribe CREATES (`createIfMissing`) — a docId is now the
+    /// document's `documentId`, so the human-readable name the device wants to see travels
+    /// alongside it. Ignored (and typically absent) when the document already exists: an existing
+    /// document's name is set with `renameDoc`, never overwritten by a later subscribe.
+    case subscribe(docId: String, createIfMissing: Bool, name: String? = nil)
     case unsubscribe(docId: String)
     /// Remove the document from the server's store outright.
     ///
@@ -231,6 +260,10 @@ public enum ClientMessage: Equatable, Sendable {
     /// request stale. The server keeps NO record of the deletion — a device that still holds a copy
     /// and later re-pushes it will simply re-create it, which is accepted behaviour.
     case deleteDoc(docId: String)
+    /// Changes a document's LABEL, never its `documentId` — identity does not move. Answered on the
+    /// STATUS stream (`docRenamed`), to every status subscriber including the renaming device
+    /// itself, so there is one place a device learns a document's current name.
+    case renameDoc(docId: String, name: String)
     case op(docId: String, opId: String, payload: OpPayload, expectation: WriteExpectation? = nil)
     case subscribeStatus
     case unsubscribeStatus
@@ -272,7 +305,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq
+        case type, protocolVersion, capabilities, deviceId, docId, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq, name
     }
 
     public init(from decoder: any Decoder) throws {
@@ -286,11 +319,16 @@ extension ClientMessage: Codable {
         case "subscribe":
             self = .subscribe(
                 docId: try c.decode(String.self, forKey: .docId),
-                createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false)
+                createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false,
+                name: try c.decodeIfPresent(String.self, forKey: .name))
         case "unsubscribe":
             self = .unsubscribe(docId: try c.decode(String.self, forKey: .docId))
         case "deleteDoc":
             self = .deleteDoc(docId: try c.decode(String.self, forKey: .docId))
+        case "renameDoc":
+            self = .renameDoc(
+                docId: try c.decode(String.self, forKey: .docId),
+                name: try c.decode(String.self, forKey: .name))
         case "op":
             self = .op(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -374,16 +412,21 @@ extension ClientMessage: Codable {
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(caps, forKey: .capabilities)
             try c.encodeIfPresent(deviceId, forKey: .deviceId)
-        case .subscribe(let docId, let createIfMissing):
+        case .subscribe(let docId, let createIfMissing, let name):
             try c.encode("subscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
             if createIfMissing { try c.encode(true, forKey: .createIfMissing) }
+            try c.encodeIfPresent(name, forKey: .name)
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
         case .deleteDoc(let docId):
             try c.encode("deleteDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
+        case .renameDoc(let docId, let name):
+            try c.encode("renameDoc", forKey: .type)
+            try c.encode(docId, forKey: .docId)
+            try c.encode(name, forKey: .name)
         case .op(let docId, let opId, let payload, let expectation):
             try c.encode("op", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -497,11 +540,15 @@ public enum ServerMessage: Equatable, Sendable {
     /// subscriber so a device holding the document can keep its copy as a LOCAL-ONLY document
     /// rather than silently re-uploading it moments later.
     case docDeleted(docId: String)
+    /// A document's LABEL changed (identity — `docId` — is untouched). Pushed on the STATUS stream
+    /// to every status subscriber, the renaming device included, so a device learns the current
+    /// name the same way whether it renamed the document itself or another device did.
+    case docRenamed(docId: String, name: String)
 }
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter, serverTimeMs
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter, serverTimeMs, name
     }
 
     public init(from decoder: any Decoder) throws {
@@ -574,6 +621,10 @@ extension ServerMessage: Codable {
                                     notAfter: try c.decodeIfPresent(Int.self, forKey: .notAfter))
         case "docDeleted":
             self = .docDeleted(docId: try c.decode(String.self, forKey: .docId))
+        case "docRenamed":
+            self = .docRenamed(
+                docId: try c.decode(String.self, forKey: .docId),
+                name: try c.decode(String.self, forKey: .name))
         case "subscribeFailed":
             self = .subscribeFailed(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -656,6 +707,10 @@ extension ServerMessage: Codable {
         case .docDeleted(let docId):
             try c.encode("docDeleted", forKey: .type)
             try c.encode(docId, forKey: .docId)
+        case .docRenamed(let docId, let name):
+            try c.encode("docRenamed", forKey: .type)
+            try c.encode(docId, forKey: .docId)
+            try c.encode(name, forKey: .name)
         case .subscribeFailed(let docId, let reason):
             try c.encode("subscribeFailed", forKey: .type)
             try c.encode(docId, forKey: .docId)

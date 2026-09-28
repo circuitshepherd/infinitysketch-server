@@ -261,7 +261,7 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, let createIfMissing):
+        case .subscribe(let docId, let createIfMissing, _):
             // Always a full snapshot.
             // Per-document, so it names its document: a docId-less `error` here failed EVERY
             // pending subscribe on the connection, other documents' opens included.
@@ -319,6 +319,14 @@ actor Connection {
                 // fire-and-forget), and a docId-less `error` would fail unrelated requests.
                 ServerLog.error("deleteDoc '\(docId)' failed: \(error)")
             }
+
+        case .renameDoc:
+            // Wire shape only (Task 2.2): the label store, the status broadcast and the
+            // `.subscribe(name:)` wiring land in Task 2.4 (`SessionManager.renameDoc`). Until then
+            // decode and do nothing rather than leave the switch (and so this whole module) unable
+            // to compile against the new case — `documentScope` above already orders a rename
+            // after that document's pending subscribe, ready for that wiring.
+            break
 
         case .op(let docId, let opId, let payload, let expectation):
             // `receivedAt` is stamped in `handle`, the moment the op is a whole message and before
@@ -681,9 +689,9 @@ extension ClientMessage {
     /// The document a message acts on, for the messages whose order per document matters.
     var documentScope: String? {
         switch self {
-        case .subscribe(let docId, _), .unsubscribe(let docId), .deleteDoc(let docId),
+        case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
              .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
-             .frame(let docId, _, _, _):
+             .frame(let docId, _, _, _), .renameDoc(let docId, _):
             return docId
         default:
             return nil
