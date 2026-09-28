@@ -65,6 +65,13 @@ public actor MCPAdapter {
     /// on `DocumentSession` — see the type's own doc comment for why agent scope has to hold by
     /// construction here rather than by a flag inside `submit`.
     private let history = AgentEditHistory()
+    /// Where a NEW document's id comes from. Injectable only so a test can force a collision —
+    /// the one way to see a create the store refuses (`AgentDocRefTests.aRejectedCreateLeavesNoLabel`).
+    private var mintDocumentId: @Sendable () -> String = DocumentIdentity.newId
+    /// Names a create is in the middle of claiming (`create_doc`, `replace_doc`'s create branch,
+    /// `merge_docs into:`). The name check and the write are seconds apart across a device round
+    /// trip, so without this two concurrent creates of one name would both pass the check.
+    private var namesBeingCreated: Set<String> = []
     private var debouncer = NotificationDebouncer()
     private var sessions: [String: Session] = [:]
     /// Per-(session, doc) cooldown timers. The adapter owns every one of
@@ -87,6 +94,10 @@ public actor MCPAdapter {
 
     /// Test hook: the debouncer's live docId → sessions map (value copy).
     var debouncerSubscriptions: [String: Set<String>] { debouncer.subscriptions }
+
+    func setDocumentIdMinterForTesting(_ mint: @escaping @Sendable () -> String) {
+        mintDocumentId = mint
+    }
 
     public init(
         manager: SessionManager,
@@ -706,7 +717,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object(
                     [
-                        "docId": .object(["type": "string", "description": "The document id to modify."]),
+                        "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                         "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
                         "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
@@ -760,7 +771,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object(
                     [
-                        "docId": .object(["type": "string", "description": "The document id to modify."]),
+                        "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                         "textId": .object(["type": "string", "description": "The id of the text entry to edit."]),
                         "text": .object([
                             "type": "string",
@@ -811,7 +822,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Element ids (stroke id, text id or image id). Any number.",
@@ -851,7 +862,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to query."]),
                     "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "The tags to resolve.",
@@ -882,7 +893,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to query."]),
                 ]),
                 "required": .array([.string("docId")]),
             ])
@@ -909,7 +920,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "strokeIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Stroke ids, as returned by list_strokes or draw_strokes.",
@@ -962,7 +973,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "textIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Placed-text ids, as returned by list_texts.",
@@ -1001,7 +1012,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to undo an edit in."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to undo an edit in."]),
                     "steps": .object([
                         "type": "integer",
                         "description": "How many of your own edits to take back, newest first. Default 1.",
@@ -1031,7 +1042,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "colorAppearance": colorAppearanceProperty,
                     "dots": .object([
                         "type": "array",
@@ -1115,7 +1126,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "colorAppearance": colorAppearanceProperty,
                     "canvasPoints": .object([
                         "type": "array",
@@ -1173,9 +1184,11 @@ public actor MCPAdapter {
         Tool(
             name: "list_docs",
             description: """
-                Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, \
-                newest-modified first. START HERE when you do not already have a docId — every \
-                other tool takes one, and this is the tool that tells you what they are.
+                Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, \
+                open}`, newest-modified first. START HERE when you do not already have a docId — \
+                every other tool takes one, and this is the tool that tells you what they are. \
+                `id` is the document; `name` is its label, which two documents may share. Every \
+                tool accepts the id, or the name when no other document has it.
 
                 `open` means a device has it on screen right now, so your writes land live on the \
                 user's canvas; use list_open_docs when you want the device and capability detail \
@@ -1183,7 +1196,8 @@ public actor MCPAdapter {
                 every content tool fetches those for you automatically, or call fetch_doc to pull \
                 one explicitly. An empty list means the server holds no documents at all.
 
-                REPLY: an ARRAY of `{id, sizeBytes, modifiedAt, hasContent, open}`, newest first.
+                REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest \
+                first.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1194,17 +1208,15 @@ public actor MCPAdapter {
             name: "list_open_docs",
             description: """
                 What is OPEN right now, and on what. Read-only, no device round trip, no docId \
-                needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, seq, \
-                subscribers}]}`.
+                needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, name, seq, \
+                subscribers}]}` — `docId` is the document's id, `name` its label.
 
-                CALL THIS INSTEAD OF GUESSING A docId FROM CONVERSATION. A document's `docId` is \
-                its filename stem, so the name a human says ("grok2 test") can differ from the \
-                live id ("Untitled 16 1 1") — and every tool aimed at the spoken name fails \
-                against a device that is working perfectly. A rename moves the id with the file, \
-                so what remains is an id quoted from earlier in the conversation, a document \
-                whose sync is off, and one skipped as a same-stem duplicate. `openDocs` is the \
-                truth: those are the ids the selection tools, and every write to an open \
-                document, will accept.
+                CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human \
+                says may be shared by several documents (a shared name is refused \
+                ambiguousName), or may be an older name the document no longer carries. \
+                `openDocs` is the truth: those are the documents on a user's screen, and their \
+                `docId`s are what the selection tools, and every write to an open document, \
+                will accept.
 
                 An empty `openDocs` with `devices.count == 0` means no device is connected at all \
                 (open the app with the mirror enabled, and check it points at THIS server's port). \
@@ -1229,7 +1241,7 @@ public actor MCPAdapter {
                 """,
             inputSchema: .object([
                 "type": "object",
-                "properties": .object(["docId": .object(["type": "string", "description": "The document id to query."])]),
+                "properties": .object(["docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to query."])]),
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
@@ -1239,7 +1251,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "textId": .object(["type": "string", "description": "The id of the text entry to remove."]),
                 ]),
                 "required": .array(["docId", "textId"].map(Value.string)),
@@ -1268,7 +1280,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "path": .object([
                         "type": "string",
                         "description": """
@@ -1310,7 +1322,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to delete."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to delete."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1325,7 +1337,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "imageId": .object(["type": "string", "description": "The id of the placed image to remove."]),
                 ]),
                 "required": .array(["docId", "imageId"].map(Value.string)),
@@ -1345,7 +1357,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
                         "description": "Ids of the placed texts/images to (un)pin — a non-empty list.",
@@ -1373,7 +1385,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "light": .object(["type": "string", "description": "Light-mode paper colour, #RRGGBB or #RRGGBBAA."]),
                     "dark": .object(["type": "string", "description": "Dark-mode paper colour, #RRGGBB or #RRGGBBAA."]),
                     "transparent": .object(["type": "boolean", "description": "Whether the background is transparent."]),
@@ -1384,14 +1396,16 @@ public actor MCPAdapter {
         Tool(
             name: "replace_doc",
             description: """
-                Replaces a document's raw bytes wholesale, creating it if it doesn't yet \
-                exist. The bytes are opaque to the server — the agent owns their validity, \
+                Replaces a document's raw bytes wholesale, keeping its id. When no document \
+                has that id or name, creates a NEW document with that name and its own id, \
+                replying with JSON {docId, name, seq}; a replace replies "replaced <id> at seq \
+                <n>". The bytes are opaque to the server — the agent owns their validity, \
                 the same trust any other writer on the network has. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to write."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to write."]),
                     "bytes": .object(["type": "string", "description": "Base64-encoded .infsketch document bytes."]),
                 ]),
                 "required": .array(["docId", "bytes"].map(Value.string)),
@@ -1403,15 +1417,19 @@ public actor MCPAdapter {
                 Creates a new document containing the InfinitySketch app's empty default \
                 content, authored by a connected InfinitySketch device. REQUIRES such a \
                 device to be connected to the server — fails with noDeviceAvailable if none \
-                is, deviceTimeout if it doesn't respond in time, and docExists if a document \
-                with this id already exists.
+                is, deviceTimeout if it doesn't respond in time. The document gets a fresh id; \
+                the name you give is its label. Replies with JSON {docId, name, seq}; docExists \
+                if a document already has this name.
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to create."]),
+                    "name": .object([
+                        "type": "string",
+                        "description": "The new document's name (a label; its id is minted and returned).",
+                    ]),
                 ]),
-                "required": .array(["docId"].map(Value.string)),
+                "required": .array(["name"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1448,7 +1466,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "colorAppearance": colorAppearanceProperty,
                     "strokes": .object([
                         "type": "array",
@@ -1487,7 +1505,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
                         "description": "The composite stroke ids to delete, as returned by list_strokes.",
@@ -1543,7 +1561,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to list strokes from."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list strokes from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1566,7 +1584,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to list placed texts from."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list placed texts from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1587,7 +1605,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to list placed images from."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list placed images from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1616,7 +1634,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to list grids from."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list grids from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -1640,7 +1658,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "type": .object([
                         "type": "string",
                         "enum": .array(["grid", "horizontal", "vertical", "isometric"].map(Value.string)),
@@ -1686,7 +1704,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "id": .object(["type": "string", "description": "The id of the grid to modify, as returned by add_grid/list_grids."]),
                     "type": .object([
                         "type": "string",
@@ -1728,7 +1746,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "id": .object(["type": "string", "description": "The id of the grid to remove, as returned by add_grid/list_grids."]),
                 ]),
                 "required": .array(["docId", "id"].map(Value.string)),
@@ -1749,7 +1767,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "orderedIds": .object([
                         "type": "array",
                         "description": "The grid ids (as returned by list_grids/add_grid), in the desired draw order — a full permutation of the document's current grid ids.",
@@ -1773,7 +1791,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "id": .object(["type": "string", "description": "The id of the grid to set the origin of, as returned by add_grid/list_grids."]),
                     "canvasX": .object(["type": "number", "description": "Canvas-space x the lattice should pass through."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y the lattice should pass through."]),
@@ -1829,7 +1847,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to render."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to render."]),
                     "include": .object([
                         "type": "string",
                         "enum": .array(["document", "strokes", "none"].map(Value.string)),
@@ -1981,7 +1999,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to read strokes from."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to read strokes from."]),
                     "ids": .object([
                         "type": "array",
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
@@ -2040,7 +2058,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to query."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to query."]),
                     "canvasPoints": .object([
                         "type": "array",
                         "description": "Canvas-space [x, y] points to find snap candidates for.",
@@ -2094,7 +2112,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
@@ -2185,7 +2203,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
                         "description": """
@@ -2231,7 +2249,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
                         "description": "Composite stroke ids, as returned by list_strokes or draw_strokes.",
@@ -2295,7 +2313,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "strokes": .object([
                         "type": "array",
                         "description": "One or more strokes to reshape by id.",
@@ -2366,7 +2384,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -2388,7 +2406,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "ops": .object([
                         "type": "array",
                         "description": "1 to 16 operations, composed left-to-right into one undo step.",
@@ -2427,7 +2445,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -2478,7 +2496,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "strokes": .object([
                         "type": "array",
                         "description": "Strokes to draw; same item shape as draw_strokes.",
@@ -2513,7 +2531,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "colorAppearance": colorAppearanceProperty,
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance."]),
                     "drawnWidth": .object(["type": "number", "description": "How wide every selected stroke should DRAW at its widest, in canvas points — the Properties panel's Drawn width."]),
@@ -2538,7 +2556,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -2557,7 +2575,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "strokeIds": .object([
                         "type": "array",
                         "description": "Stroke ids to select.",
@@ -2593,7 +2611,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "canvasX": .object(["type": "number", "description": "Canvas-space x. Not snapped."]),
                     "canvasY": .object(["type": "number", "description": "Canvas-space y. Not snapped."]),
                 ]),
@@ -2610,7 +2628,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -2642,7 +2660,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "ops": .object([
                         "type": "array",
                         "description": """
@@ -2703,7 +2721,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name)."]),
                     "ops": .object([
                         "type": "array",
                         "description": """
@@ -2725,8 +2743,9 @@ public actor MCPAdapter {
                 by their composite key, texts/images by id): every element of both docs \
                 survives, shared elements dedupe, and a same-key clash is broken by `prefer` \
                 (default "target"). `target` becomes the union; `source` is left untouched. \
-                With `into`, the union is written to a new document and both inputs are left \
-                untouched (docExists if `into` is taken). \
+                With `into`, the union is written to a NEW document of that name (with its own \
+                id) and both inputs are left untouched (docExists if a document already has \
+                that name). \
                 REQUIRES a connected device with the mergeDocs capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: <reason> if the device rejects \
@@ -2744,7 +2763,7 @@ public actor MCPAdapter {
                     ]),
                     "into": .object([
                         "type": "string",
-                        "description": "Optional: write the union to a NEW document with this id, leaving both source and target untouched. docExists if the name is already taken.",
+                        "description": "Optional: write the union to a NEW document with this name (it gets its own id), leaving both source and target untouched. docExists if a document already has this name.",
                     ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
@@ -2815,7 +2834,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to modify."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "strokeIds": .object([
                         "type": "array",
                         "description": "Stroke ids to reorder, from list_strokes/get_strokes.",
@@ -2854,7 +2873,7 @@ public actor MCPAdapter {
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
-                    "docId": .object(["type": "string", "description": "The document id to fetch."]),
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to fetch."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])),
@@ -2905,7 +2924,9 @@ public actor MCPAdapter {
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
-        let arguments = await canonicalisingDocIds(arguments)
+        let (resolved, refusal) = await resolvingDocRefs(arguments)
+        if let refusal { return refusal }
+        let arguments = resolved
         let result = try await dispatchCallTool(name: name, arguments: arguments)
         if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
            let docId = arguments?["docId"]?.stringValue {
@@ -2935,21 +2956,101 @@ public actor MCPAdapter {
         "restyle_selection",
     ]
 
-    /// Every argument that names a document, in the spelling the server keys it by.
-    ///
-    /// The store folds case, so `RAINFALL` finds `Rainfall` — but the sessions, the live index
-    /// and `AgentEditHistory` are keyed by one spelling. An agent writing in another case used to
-    /// open a second session on the same file, unseen by the app's, and the app's next push
-    /// overwrote the write it had just been told succeeded. Done once HERE so no tool can miss it.
-    static let docIdArgumentNames = ["docId", "source", "target", "into"]
+    /// Every argument that names an EXISTING document. (`merge_docs`' `into` is not one: it names
+    /// a document that does not exist yet, so it is a name and nothing resolves it.)
+    static let docIdArgumentNames = ["docId", "source", "target"]
 
-    private func canonicalisingDocIds(_ arguments: [String: Value]?) async -> [String: Value]? {
-        guard var arguments else { return nil }
+    /// Every argument that names a document, resolved to the document's id — an id, or a name no
+    /// other document carries (spec 2026-09-28 §4). Done once HERE so no tool can miss it.
+    ///
+    /// Resolution also yields the ONE spelling the server keys a document by: the store folds
+    /// case, but the sessions, the live index and `AgentEditHistory` do not, and an agent writing
+    /// in another case used to open a second session on the same file, unseen by the app's, whose
+    /// next push overwrote the write it had just been told succeeded.
+    ///
+    /// A name two documents share is refused `ambiguousName`, never guessed. An unresolved
+    /// reference is left as the caller wrote it (case-canonicalised): each tool answers
+    /// `unknownDoc` for it, or — `replace_doc` — creates a document with that name.
+    private func resolvingDocRefs(_ arguments: [String: Value]?) async
+        -> (arguments: [String: Value]?, refusal: CallTool.Result?) {
+        guard var arguments else { return (nil, nil) }
         for key in Self.docIdArgumentNames {
             guard case .string(let given)? = arguments[key] else { continue }
-            arguments[key] = .string(await manager.canonicalDocId(given))
+            switch await manager.resolveDocRef(given) {
+            case .id(let id):
+                arguments[key] = .string(id)
+            case .ambiguous(let candidates):
+                return (nil, Self.ambiguousNameResult(given, candidates))
+            case .unresolved:
+                arguments[key] = .string(await manager.canonicalDocId(given))
+            }
         }
-        return arguments
+        return (arguments, nil)
+    }
+
+    static func ambiguousNameResult(_ ref: String, _ candidates: [DocRefCandidate]) -> CallTool.Result {
+        let formatter = ISO8601DateFormatter()
+        let listed = candidates.map {
+            "\($0.id) (\"\($0.name)\", modified \(formatter.string(from: $0.modifiedAt)))"
+        }
+        return errorResult("ambiguousName: \"\(ref)\" names \(candidates.count) documents — pass one of these ids: "
+                           + listed.joined(separator: ", "))
+    }
+
+    /// The ids of every document already called exactly `name` — what the three create doors
+    /// (`create_doc`, `replace_doc` of a new name, `merge_docs into:`) refuse, because a second
+    /// document of that name would make every later reference to it ambiguous. Devices may still
+    /// create same-named documents; this is the agent door only.
+    private func documentIds(named name: String) async -> [String] {
+        ((try? await manager.listDocuments()) ?? [])
+            .filter { $0.name == name }
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .map(\.id)
+    }
+
+    /// `docExists: "<name>" is document <id>` (or `is documents <id>, <id>` for a shared name).
+    static func nameTakenResult(_ name: String, ids: [String]) -> CallTool.Result {
+        let noun = ids.count == 1 ? "document" : "documents"
+        return errorResult("docExists: \"\(name)\" is \(noun) \(ids.joined(separator: ", "))")
+    }
+
+    /// Claim `name` for a create: refused `creationInProgress` when another create is claiming it
+    /// right now, `docExists` when a document already has it; nil means the caller holds the
+    /// claim and must `releaseName` it.
+    private func claimNameForCreate(_ name: String) async -> CallTool.Result? {
+        // Inserted before the first await, so two concurrent claims cannot both pass.
+        guard namesBeingCreated.insert(name).inserted else { return Self.errorResult("creationInProgress") }
+        let taken = await documentIds(named: name)
+        if !taken.isEmpty {
+            namesBeingCreated.remove(name)
+            return Self.nameTakenResult(name, ids: taken)
+        }
+        return nil
+    }
+
+    private func releaseName(_ name: String) { namesBeingCreated.remove(name) }
+
+    /// Write a NEW document under a fresh id and, only once the store has ACCEPTED it, give it its
+    /// name: a refused create must leave no label behind (a label with no document would name a
+    /// document that does not exist, and could relabel one the minted id collided with).
+    /// `renameDoc` rather than a bare label so every device hears the name — the create's own
+    /// `docUpdated` went out before the label existed.
+    private func createNamedDocument(newId: String, name: String, bytes: Data,
+                                     reply: @escaping (String, Int) -> String) async -> CallTool.Result {
+        let result = await submitAndRespond(
+            docId: newId, createIfMissing: true,
+            fullDoc: DocumentIdentity.settingDocumentId(in: bytes, to: newId), expectation: .absent
+        ) { seq in reply(newId, seq) }
+        if result.isError != true {
+            do { try await manager.renameDoc(docId: newId, name: name) }
+            catch { await manager.labelDocument(docId: newId, name: name) }
+        }
+        return result
+    }
+
+    static func jsonText(_ object: [String: Any]) -> String {
+        (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+            .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
     }
 
     /// Refuse an argument the named tool does not declare.
@@ -2997,8 +3098,10 @@ public actor MCPAdapter {
 
         if text == "unknownDoc" {
             let named = (arguments?["docId"]?.stringValue).map { " named \"\($0)\"" } ?? ""
-            let ids = ((try? await manager.listDocuments()) ?? []).map(\.id).sorted()
-            return Self.errorResult("unknownDoc: no document\(named). \(Self.documentsClause(ids))")
+            let listed = ((try? await manager.listDocuments()) ?? [])
+                .sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+                .map { "\"\($0.name)\" (\($0.id))" }
+            return Self.errorResult("unknownDoc: no document\(named). \(Self.documentsClause(listed))")
         }
 
         if text == "noDeviceAvailable" {
@@ -3050,12 +3153,12 @@ public actor MCPAdapter {
         return result
     }
 
-    /// "Documents: a, b, c" — capped, because a store with dozens of documents should not answer
-    /// a mistyped name with a wall of text.
-    private static func documentsClause(_ ids: [String], limit: Int = 12) -> String {
-        guard !ids.isEmpty else { return "This server holds no documents." }
-        let shown = ids.prefix(limit).map { "\"\($0)\"" }.joined(separator: ", ")
-        let more = ids.count > limit ? " (+\(ids.count - limit) more)" : ""
+    /// "Documents: "a" (id), "b" (id)" — capped, because a store with dozens of documents should
+    /// not answer a mistyped name with a wall of text. `listed` is already rendered.
+    private static func documentsClause(_ listed: [String], limit: Int = 12) -> String {
+        guard !listed.isEmpty else { return "This server holds no documents." }
+        let shown = listed.prefix(limit).joined(separator: ", ")
+        let more = listed.count > limit ? " (+\(listed.count - limit) more)" : ""
         return "Documents: \(shown)\(more)"
     }
 
@@ -3697,6 +3800,15 @@ public actor MCPAdapter {
             // synthesize a `.matchBytes(V0)` token the agent never actually read, defeating the
             // `.absent` create-CAS above ("never silently overwrite a different doc of the same
             // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
+            // A reference no document carries (by id or by name): a NEW document named by it, with
+            // its own fresh id — the reference was never an id the agent could choose.
+            if case .unresolved = await manager.resolveDocRef(docId) {
+                if let refusal = await claimNameForCreate(docId) { return refusal }
+                defer { releaseName(docId) }
+                return await createNamedDocument(newId: mintDocumentId(), name: docId, bytes: bytes) { id, seq in
+                    Self.jsonText(["docId": id, "name": docId, "seq": seq])
+                }
+            }
             let currentBytes = await manager.currentBytes(docId: docId)
             // …but a metadata-only doc EXISTS: a connected device holds it. Creating it here from
             // the agent's bytes meant the user's own copy was unioned with them when opened — or,
@@ -3709,8 +3821,10 @@ public actor MCPAdapter {
             // The identity belongs to the DOCUMENT, not to the bytes (`DocumentIdentity`): a
             // replace keeps the current document's id, a create gets a fresh one — the agent's
             // bytes are often another document's raw read, and must not bring its id along.
-            let identity = currentBytes.flatMap(DocumentIdentity.documentId(of:)) ?? DocumentIdentity.newId()
-            let stored = DocumentIdentity.replacingDocumentId(in: bytes, with: identity)
+            // The store keys a document by its id, so a legacy stored document with no `documentId`
+            // in its bytes gains its key as one here.
+            let identity = currentBytes.flatMap(DocumentIdentity.documentId(of:)) ?? docId
+            let stored = DocumentIdentity.settingDocumentId(in: bytes, to: identity)
             return await submitAndRespond(
                 docId: docId, createIfMissing: true, fullDoc: stored,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
@@ -3732,20 +3846,20 @@ public actor MCPAdapter {
     /// a device, so an existing docId never reaches (or wakes) the device.
     private func callCreateDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
-            let docId = try Self.stringArg(arguments, "docId")
+            let name = try Self.nonEmptyStringArg(arguments, "name")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return Self.errorResult("invalidArgument: name is blank") }
+            // A name any document already has — one document or several — is refused BEFORE a
+            // device is woken: a second document of that name would make every later reference to
+            // it ambiguous (controller ruling F13).
+            if let refusal = await claimNameForCreate(name) { return refusal }
+            defer { releaseName(name) }
 
-            // A name a connected device advertises is taken too, though the server holds no
-            // bytes for it: the user's own document would otherwise be merged with this one the
-            // moment they opened it (review finding 23).
-            let resident = await manager.currentBytes(docId: docId) != nil
-            let advertised = await manager.liveEntry(docId: docId) != nil
-            if resident || advertised {
-                return Self.errorResult("docExists")
-            }
-
+            let newId = mintDocumentId()
             let bytes: Data
             do {
-                bytes = try await broker.requestCreation(docId: docId)
+                // The device authors the empty template for the new id (it only echoes the id).
+                bytes = try await broker.requestCreation(docId: newId)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 switch error {
                 case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
@@ -3763,16 +3877,10 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            // expectation: .absent — the fast-fail `docExists` check above is
-            // a pre-device-round-trip convenience only (never wake a device
-            // for a docId that's already taken); the ATOMIC guard against a
-            // racing create for the same docId is this `.absent` expectation,
-            // enforced in the same actor turn as the write itself
-            // (`DocumentSession.submit`, Task 2).
-            return await submitAndRespond(
-                docId: docId, createIfMissing: true, fullDoc: bytes, expectation: .absent
-            ) { seq in
-                "created \(docId) at seq \(seq)"
+            // The template carries no identity of its own: the server gives the new document one,
+            // and the `.absent` expectation inside `createNamedDocument` is the atomic guard.
+            return await createNamedDocument(newId: newId, name: name, bytes: bytes) { id, seq in
+                Self.jsonText(["docId": id, "name": name, "seq": seq])
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -5592,7 +5700,9 @@ public actor MCPAdapter {
             let source = try Self.nonEmptyStringArg(arguments, "source")
             let target = try Self.nonEmptyStringArg(arguments, "target")
             let into = try Self.optionalStringArg(arguments, "into")
-            guard source != target, into != source, into != target else {
+            // `source`/`target` are ids by now (`resolvingDocRefs`); `into` is a new document's
+            // NAME, refused below when a document already carries it.
+            guard source != target else {
                 return Self.errorResult("invalidArguments")
             }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
@@ -5604,10 +5714,9 @@ public actor MCPAdapter {
                 return Self.errorResult("targetNotFound")
             }
             if let into {
-                if await manager.currentBytes(docId: into) != nil {
-                    return Self.errorResult("docExists")
-                }
+                if let refusal = await claimNameForCreate(into) { return refusal }
             }
+            defer { if let into { releaseName(into) } }
 
             let spec: Data
             do {
@@ -5641,13 +5750,10 @@ public actor MCPAdapter {
             //  - `into` absent: unchanged — write in place into `target`
             //    under the byte-CAS every other write tool uses.
             if let into {
-                // A NEW document: the union carries `target`'s identity, which must not be shared
-                // with `target` itself (`DocumentIdentity`).
-                let stored = DocumentIdentity.replacingDocumentId(in: out.bytes, with: DocumentIdentity.newId())
-                return await submitAndRespond(
-                    docId: into, createIfMissing: true, fullDoc: stored, expectation: .absent
-                ) { seq in
-                    "merged \(source) and \(target) into \(into) at seq \(seq)"
+                // A NEW document with its own id: the union carries `target`'s identity, which
+                // must not be shared with `target` itself (`DocumentIdentity`).
+                return await createNamedDocument(newId: mintDocumentId(), name: into, bytes: out.bytes) { id, seq in
+                    "merged \(source) and \(target) into \(into) (\(id)) at seq \(seq)"
                 }
             } else {
                 // expectedBytes is targetBytes — the exact bytes relayed to
@@ -6243,6 +6349,7 @@ public actor MCPAdapter {
             .map { entry -> [String: Any] in
                 [
                     "id": entry.id,
+                    "name": entry.name,
                     "sizeBytes": entry.sizeBytes,
                     "modifiedAt": ISO8601DateFormatter().string(from: entry.modifiedAt),
                     "hasContent": entry.hasContent,
@@ -6258,10 +6365,13 @@ public actor MCPAdapter {
 
     private func callListOpenDocs() async -> CallTool.Result {
         let (deviceCount, capabilities) = await broker.connectionSummary()
+        let names = Dictionary(((try? await manager.listDocuments()) ?? []).map { ($0.id, $0.name) },
+                               uniquingKeysWith: { first, _ in first })
         let open = await manager.liveInfo()
             .filter { $0.value.subscriberCount > 0 }
             .map { (docId, info) in
-                ["docId": docId, "seq": info.seq, "subscribers": info.subscriberCount] as [String: Any]
+                ["docId": docId, "name": names[docId] ?? docId, "seq": info.seq,
+                 "subscribers": info.subscriberCount] as [String: Any]
             }
             .sorted { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
 

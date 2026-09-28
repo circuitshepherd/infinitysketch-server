@@ -99,7 +99,7 @@ struct ListOpenDocsTests {
         // The description has to carry the WHY: an agent reaching for a spoken name is exactly
         // who needs to find this tool.
         let description = try #require(tool.description)
-        #expect(description.contains("rename"))
+        #expect(description.contains("ambiguousName"))
         #expect(description.contains("docId"))
     }
 }

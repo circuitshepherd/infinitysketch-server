@@ -19,11 +19,11 @@ A `docId` is a filename stem. Writes are compare-and-swap guarded by bytes; a st
 
 | Tool | Summary |
 |---|---|
-| [`list_docs`](#list_docs) | Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. |
+| [`list_docs`](#list_docs) | Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. |
 | [`list_open_docs`](#list_open_docs) | What is OPEN right now, and on what. |
 | [`create_doc`](#create_doc) | Creates a new document containing the InfinitySketch app's empty default content, authored by a connected InfinitySketch device. |
 | [`fetch_doc`](#fetch_doc) | Ensures a document's content is available on the server, pulling it from a device that holds it if the server has only its metadata (a "content on another device" doc — see the… |
-| [`replace_doc`](#replace_doc) | Replaces a document's raw bytes wholesale, creating it if it doesn't yet exist. |
+| [`replace_doc`](#replace_doc) | Replaces a document's raw bytes wholesale, keeping its id. |
 | [`delete_doc`](#delete_doc) | Delete a document from the server. |
 | [`merge_docs`](#merge_docs) | Merges document `source` INTO document `target` by element identity (strokes by their composite key, texts/images by id): every element of both docs survives, shared elements… |
 | [`set_paper`](#set_paper) | Sets a document's paper appearance: `light` (the paper colour in light mode), `dark` (the paper colour in dark mode), and/or `transparent` (a transparent background).… |
@@ -131,19 +131,19 @@ Read-only. `render_sketch` also renders ephemeral candidate strokes that are nev
 
 ### `list_docs`
 
-Every document on the server: `{id, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are.
+Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are. `id` is the document; `name` is its label, which two documents may share. Every tool accepts the id, or the name when no other document has it.
 
 `open` means a device has it on screen right now, so your writes land live on the user's canvas; use list_open_docs when you want the device and capability detail as well. `hasContent: false` means the bytes live on a device rather than here — every content tool fetches those for you automatically, or call fetch_doc to pull one explicitly. An empty list means the server holds no documents at all.
 
-REPLY: an ARRAY of `{id, sizeBytes, modifiedAt, hasContent, open}`, newest first.
+REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest first.
 
 Takes no arguments.
 
 ### `list_open_docs`
 
-What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, seq, subscribers}]}`.
+What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, name, seq, subscribers}]}` — `docId` is the document's id, `name` its label.
 
-CALL THIS INSTEAD OF GUESSING A docId FROM CONVERSATION. A document's `docId` is its filename stem, so the name a human says ("grok2 test") can differ from the live id ("Untitled 16 1 1") — and every tool aimed at the spoken name fails against a device that is working perfectly. A rename moves the id with the file, so what remains is an id quoted from earlier in the conversation, a document whose sync is off, and one skipped as a same-stem duplicate. `openDocs` is the truth: those are the ids the selection tools, and every write to an open document, will accept.
+CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human says may be shared by several documents (a shared name is refused ambiguousName), or may be an older name the document no longer carries. `openDocs` is the truth: those are the documents on a user's screen, and their `docId`s are what the selection tools, and every write to an open document, will accept.
 
 An empty `openDocs` with `devices.count == 0` means no device is connected at all (open the app with the mirror enabled, and check it points at THIS server's port). An empty `openDocs` with a non-zero count means a device is connected but has no document open — ask the user to open one; no amount of retrying will help. `capabilities` is the union of what the connected devices can do, which is what every `noDeviceAvailable` is ultimately about.
 
@@ -151,11 +151,11 @@ Takes no arguments.
 
 ### `create_doc`
 
-Creates a new document containing the InfinitySketch app's empty default content, authored by a connected InfinitySketch device. REQUIRES such a device to be connected to the server — fails with noDeviceAvailable if none is, deviceTimeout if it doesn't respond in time, and docExists if a document with this id already exists.
+Creates a new document containing the InfinitySketch app's empty default content, authored by a connected InfinitySketch device. REQUIRES such a device to be connected to the server — fails with noDeviceAvailable if none is, deviceTimeout if it doesn't respond in time. The document gets a fresh id; the name you give is its label. Replies with JSON {docId, name, seq}; docExists if a document already has this name.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to create. |
+| `name` | string | yes | The new document's name (a label; its id is minted and returned). |
 
 ### `fetch_doc`
 
@@ -163,16 +163,16 @@ Ensures a document's content is available on the server, pulling it from a devic
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to fetch. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to fetch. |
 
 ### `replace_doc`
 
-Replaces a document's raw bytes wholesale, creating it if it doesn't yet exist. The bytes are opaque to the server — the agent owns their validity, the same trust any other writer on the network has. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Replaces a document's raw bytes wholesale, keeping its id. When no document has that id or name, creates a NEW document with that name and its own id, replying with JSON {docId, name, seq}; a replace replies "replaced <id> at seq <n>". The bytes are opaque to the server — the agent owns their validity, the same trust any other writer on the network has. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `bytes` | string | yes | Base64-encoded .infsketch document bytes. |
-| `docId` | string | yes | The document id to write. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to write. |
 
 ### `delete_doc`
 
@@ -180,17 +180,17 @@ Delete a document from the server. The document is moved to the server's .trash 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to delete. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to delete. |
 
 ### `merge_docs`
 
-Merges document `source` INTO document `target` by element identity (strokes by their composite key, texts/images by id): every element of both docs survives, shared elements dedupe, and a same-key clash is broken by `prefer` (default "target"). `target` becomes the union; `source` is left untouched. With `into`, the union is written to a new document and both inputs are left untouched (docExists if `into` is taken). REQUIRES a connected device with the mergeDocs capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: <reason> if the device rejects the merge. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Merges document `source` INTO document `target` by element identity (strokes by their composite key, texts/images by id): every element of both docs survives, shared elements dedupe, and a same-key clash is broken by `prefer` (default "target"). `target` becomes the union; `source` is left untouched. With `into`, the union is written to a NEW document of that name (with its own id) and both inputs are left untouched (docExists if a document already has that name). REQUIRES a connected device with the mergeDocs capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: <reason> if the device rejects the merge. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `source` | string | yes | The document to merge FROM (left unchanged). |
 | `target` | string | yes | The document to merge INTO (becomes the union). |
-| `into` | string | no | Optional: write the union to a NEW document with this id, leaving both source and target untouched. docExists if the name is already taken. |
+| `into` | string | no | Optional: write the union to a NEW document with this name (it gets its own id), leaving both source and target untouched. docExists if a document already has this name. |
 | `prefer` | string — `source`, `target` | no | Which side wins a same-key clash. Default target. |
 
 ### `set_paper`
@@ -199,7 +199,7 @@ Sets a document's paper appearance: `light` (the paper colour in light mode), `d
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `dark` | string | no | Dark-mode paper colour, #RRGGBB or #RRGGBBAA. |
 | `light` | string | no | Light-mode paper colour, #RRGGBB or #RRGGBBAA. |
 | `transparent` | boolean | no | Whether the background is transparent. |
@@ -216,7 +216,7 @@ A change made through the user's live selection (transform_selection, duplicate_
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to undo an edit in. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to undo an edit in. |
 | `steps` | integer | no | How many of your own edits to take back, newest first. Default 1. |
 
 ---
@@ -229,7 +229,7 @@ Draws one or more freehand strokes into a document, authored by a connected Infi
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `strokes` | array | yes | One or more strokes to draw. Passed through to the device verbatim; the item properties below are the exact field names the device decodes. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 
@@ -253,7 +253,7 @@ Do NOT fake a dot with a short wide stroke: round caps at each end of a segment 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `dots` | array | yes | The dots to draw. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 
@@ -283,7 +283,7 @@ TWO HONEST LIMITS. The document still carries every stroke, so a large fill is g
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `canvasPoints` | array | yes | The boundary, in canvas coordinates; at least 3 points. |
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `angleDeg` | number | no | Direction of the passes; 0 is horizontal. |
 | `border` | boolean | no | Trace the boundary, centred on it, at drawnWidth. Default true — it covers the scalloped edge the round pass-ends leave. Set FALSE when part of your boundary is CONSTRUCTION rather than a real edge: a mountain silhouette closed along a base line does not want that base line drawn across the picture. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance. |
@@ -305,7 +305,7 @@ REPLY: an ARRAY of `{id, canvasInkBounds, canvasPathBounds, color, inkType, draw
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to list strokes from. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list strokes from. |
 
 ### `get_strokes`
 
@@ -315,7 +315,7 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasPathBounds, localToCanvasTransform,
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to read strokes from. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to read strokes from. |
 | `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes. |
 | `maxPoints` | integer | no | YOUR OWN budget guard, not a server limit: fails with pointBudgetExceeded(<actual>) if the request's total point count exceeds this. Omit for no limit. |
 
@@ -325,7 +325,7 @@ Replaces strokes' geometry in place, keeping their identity (id), ink, z-order a
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `strokes` | array | yes | One or more strokes to reshape by id. |
 
 Each item of `strokes`:
@@ -342,7 +342,7 @@ Changes strokes' colour, width and/or ink in place; identity and geometry surviv
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
@@ -356,7 +356,7 @@ Moves, scales and/or rotates strokes in place. The strokes keep their identity (
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes. |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the ids' union bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
@@ -371,7 +371,7 @@ Takes the SCALE back off the ink of strokes that were scaled, leaving them exact
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes. Ids that carry no scale are accepted and reported back as unchanged. |
 
 ### `delete_strokes`
@@ -380,7 +380,7 @@ Deletes one or more strokes from a document by their composite stroke keys (as r
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | The composite stroke ids to delete, as returned by list_strokes. |
 
 ---
@@ -395,7 +395,7 @@ Appends a placed-text entry to a document: a new id, the document's current colo
 |---|---|---|---|
 | `canvasX` | number | yes | Canvas-space x of the text box's top-left corner. |
 | `canvasY` | number | yes | Canvas-space y of the text box's top-left corner. |
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `text` | string | yes | The text to place. Omit if using `spans`. |
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
@@ -426,7 +426,7 @@ Mutates an existing placed text by id: replace its string and/or move it, or res
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `textId` | string | yes | The id of the text entry to edit. |
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
@@ -458,7 +458,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `textId` | string | yes | The id of the text entry to remove. |
 
 ### `list_texts`
@@ -469,7 +469,7 @@ REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. Th
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to list placed texts from. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list placed texts from. |
 
 ### `list_fonts`
 
@@ -477,7 +477,7 @@ The font families installed on the connected device, sorted. Call this before se
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to query. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
 
 ---
 
@@ -491,7 +491,7 @@ Place an image into a document. `path` names an image FILE ON THE MACHINE THIS S
 |---|---|---|---|
 | `canvasX` | number | yes | Canvas-space x of the placement's top-left corner. |
 | `canvasY` | number | yes | Canvas-space y of the placement's top-left corner. |
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `path` | string | yes | Absolute path to a PNG/JPEG/GIF (or anything else the device can decode) on the server's own filesystem. A leading ~ is expanded; a relative path is refused rather than resolved against a working directory you cannot see. |
 | `canvasHeight` | number | no | Canvas-point height. Omit both for the image's natural pixel size; give one to preserve aspect ratio. |
 | `canvasWidth` | number | no | Canvas-point width. Omit both for the image's natural pixel size; give one to preserve aspect ratio. |
@@ -506,7 +506,7 @@ REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags}`. The box is `canv
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to list placed images from. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list placed images from. |
 
 ### `remove_image`
 
@@ -514,7 +514,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `imageId` | string | yes | The id of the placed image to remove. |
 
 ---
@@ -529,7 +529,7 @@ REPLY: an ARRAY of `{id, type, spacing, snap, rotation, offset, color, thickness
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to list grids from. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list grids from. |
 
 ### `add_grid`
 
@@ -537,7 +537,7 @@ Adds a new grid to a document, authored by a connected InfinitySketch device. Ev
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `color` | string | no | "#RRGGBBAA" or "#RRGGBB" hex. Defaults to a translucent blue. Literal: drawn identically in light and dark (grid colours never convert). |
 | `enabled` | boolean | no | Whether strokes snap to the grid. Defaults to true. |
 | `offset` | array | no | The lattice phase [x, y]. Defaults to [0, 0]. |
@@ -555,7 +555,7 @@ Modifies an existing grid's supplied fields only (present-only), authored by a c
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `id` | string | yes | The id of the grid to modify, as returned by add_grid/list_grids. |
 | `color` | string | no | "#RRGGBBAA" or "#RRGGBB" hex. Literal: drawn identically in light and dark (grid colours never convert). |
 | `enabled` | boolean | no | Whether strokes snap to the grid. |
@@ -574,7 +574,7 @@ Removes a grid from a document by its id, authored by a connected InfinitySketch
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `id` | string | yes | The id of the grid to remove, as returned by add_grid/list_grids. |
 
 ### `reorder_grids`
@@ -583,7 +583,7 @@ Sets the draw order (z-order) of a document's grids, authored by a connected Inf
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `orderedIds` | array | yes | The grid ids (as returned by list_grids/add_grid), in the desired draw order — a full permutation of the document's current grid ids. |
 
 ### `set_grid_origin`
@@ -594,7 +594,7 @@ Sets a grid's pivot to an EXACT canvas coordinate — the programmatic equivalen
 |---|---|---|---|
 | `canvasX` | number | yes | Canvas-space x the lattice should pass through. |
 | `canvasY` | number | yes | Canvas-space y the lattice should pass through. |
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `id` | string | yes | The id of the grid to set the origin of, as returned by add_grid/list_grids. |
 
 ### `snap_points`
@@ -610,7 +610,7 @@ REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candid
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `canvasPoints` | array | yes | Canvas-space [x, y] points to find snap candidates for. |
-| `docId` | string | yes | The document id to query. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
 | `gridIds` | array | no | Consider only these grids (ids from render_sketch's metadata). Default: all of them, including invisible and disabled ones. |
 | `maxCandidates` | integer | no | Per point; default 64. The cap drops the FARTHEST candidates. |
 
@@ -628,7 +628,7 @@ Many-to-many: an element carries any number of tags and a tag covers any number 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | Element ids (stroke id, text id or image id). Any number. |
 | `mode` | string — `add`, `remove`, `replace` | no | add (default) / remove / replace. replace with an empty tags clears. |
 | `tags` | array | no | The tags to add, remove, or replace with. |
@@ -645,7 +645,7 @@ REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to query. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
 | `tags` | array | yes | The tags to resolve. |
 
 ### `list_tags`
@@ -660,7 +660,7 @@ REPLY: an OBJECT mapping each tag to `{"elements": N, "grids": M}` — live elem
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to query. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
 
 ### `transform_elements`
 
@@ -672,7 +672,7 @@ ATOMIC: every id must resolve or nothing moves, so a set can never end up sheare
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
@@ -689,7 +689,7 @@ ATOMIC: every id must resolve or nothing is reset. When every named element is a
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
 | `textIds` | array | no | Placed-text ids, as returned by list_texts. |
 
@@ -699,7 +699,7 @@ Sets the z-order (draw order) of named strokes/texts/images within ONE document 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
@@ -711,7 +711,7 @@ Sets the `pinned` (background) flag on the named placed texts and/or images of a
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to modify. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `ids` | array | yes | Ids of the placed texts/images to (un)pin — a non-empty list. |
 | `pinned` | boolean | yes | true to pin, false to unpin. |
 
@@ -739,7 +739,7 @@ Select every stroke, placed text, and placed image in the document on a connecte
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 
 ### `select_elements`
 
@@ -747,7 +747,7 @@ Select specific elements by id on a connected device's live rect-select, replaci
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `imageIds` | array | no | Placed-image ids to select. |
 | `keepRect` | boolean | no | Keep the existing selection rectangle instead of resizing it to the chosen elements. Defaults to false. |
 | `strokeIds` | array | no | Stroke ids to select. |
@@ -759,7 +759,7 @@ Clear the user's live rect-select selection on a connected device, returning it 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 
 ### `get_selection`
 
@@ -777,7 +777,7 @@ THE REPLY'S KEYS, because guessing them wastes a round trip and fails SILENTLY (
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 
 ### `set_reference_point`
 
@@ -787,7 +787,7 @@ Place the reference point the user's live selection pivots/rotates/scales around
 |---|---|---|---|
 | `canvasX` | number | yes | Canvas-space x. Not snapped. |
 | `canvasY` | number | yes | Canvas-space y. Not snapped. |
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 
 ### `transform_selection`
 
@@ -795,7 +795,7 @@ Transform the user's live selection exactly as a manual rect-select transform wo
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `ops` | array | yes | 1 to 16 operations, composed left-to-right into one undo step. |
 | `expect` | string | no | signature from get_selection. |
 
@@ -815,7 +815,7 @@ Preview a proposed transform of the user's live selection WITHOUT committing any
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `ops` | array | yes | 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), same shape as transform_selection's ops. |
 | `canvasRect` | array | no | [x, y, w, h] in canvas coordinates. Omit for auto-fit. |
 | `duplicate` | boolean | no | Preview a stamp: render the originals plus a transformed copy together (requires ops). |
@@ -828,7 +828,7 @@ Duplicate the user's live selection on a connected device. With no `ops`: a prov
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `expect` | string | no | signature from get_selection. |
 | `ops` | array | no | 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), same shape as transform_selection's ops. Omit for a provisional in-place copy. |
 
@@ -838,7 +838,7 @@ Draw strokes into the user's LIVE rect-select selection AND select them, in one 
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `strokes` | array | yes | Strokes to draw; same item shape as draw_strokes. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 | `keepRect` | boolean | no | Keep the user's selection rectangle. Defaults to true. |
@@ -849,7 +849,7 @@ Restyle the strokes in the user's LIVE rect-select selection — `color` (#RRGGB
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 | `drawnWidth` | number | no | How wide every selected stroke should DRAW at its widest, in canvas points — the Properties panel's Drawn width. |
@@ -862,7 +862,7 @@ Delete everything in the user's LIVE rect-select selection, exactly as the toolb
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 
 ---
 
@@ -876,7 +876,7 @@ REPLY: a PNG image plus a metadata text block. With writeToFile: true there is N
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `docId` | string | yes | The document id to render. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to render. |
 | `appearance` | string — `light`, `dark` | no | Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each. |
 | `axes` | boolean | no | Overlay light tick marks and coordinate labels along the edges. Defaults to false (a render meant for visual judgement stays clean). |
 | `background` | string — `transparent`, `paper`, `paper+grid` | no | "transparent", "paper" (the document's background colour for the current appearance), or "paper+grid" (default — the grid is what agents align to). |
