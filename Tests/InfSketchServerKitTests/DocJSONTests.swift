@@ -572,4 +572,34 @@ import Testing
         #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data(#"{"a":1}"#.utf8)) == nil)
         #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8)) == nil)
     }
+
+    // MARK: - sorted output (2026-09-28 review, round 1, item 1c)
+
+    /// This was the one writer of `.infsketch` bytes that did NOT sort its top-level keys. A
+    /// document it writes can land back in `Documents/` (an agent's `replace_doc`/`add_text`/… on a
+    /// synced document), and the app's `SketchDocData.extractDocumentId(from:)` relies on sorted
+    /// order to stop early — an unsorted `documentId`, physically AFTER a key that sorts before it
+    /// (`drawingData` here), read as "no id" and let the app's launch migration mint and stamp a
+    /// SECOND id over the one already there, forking the document's identity.
+    @Test func serializedOutputSortsItsTopLevelKeys() throws {
+        let unsorted = Data(#"""
+        {
+          "documentId": "D",
+          "drawingData": "ZHVtbXk=",
+          "darkColorScheme": true,
+          "placedTextsData": []
+        }
+        """#.utf8)
+        let out = try DocJSON.setPinned(from: unsorted, ids: [], pinned: true)
+        let obj = try #require(try JSONSerialization.jsonObject(with: out) as? [String: Any])
+        // `JSONSerialization`'s dictionary loses order, so check the physical byte order back out —
+        // by finding each key's offset, walked in ALPHABETICAL order: if the bytes are sorted,
+        // those offsets must be non-decreasing.
+        let text = String(decoding: out, as: UTF8.self)
+        let offsets = obj.keys.sorted().map { key in
+            text.range(of: "\"\(key)\":")!.lowerBound
+        }
+        #expect(offsets == offsets.sorted(), "top-level keys must appear in the bytes in sorted order")
+        #expect(obj["documentId"] as? String == "D", "the edit must not touch an identity it doesn't own")
+    }
 }
