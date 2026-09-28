@@ -71,12 +71,16 @@ struct ConnectionHealth {
     /// `noteHello`.
     private let helloDeadline: Duration?
     private var helloArmedAt: ContinuousClock.Instant?
+    /// The interval the caller ticks at, or nil for no suspension detection. See `tick`.
+    private let tickInterval: Duration?
+    private var lastTickAt: ContinuousClock.Instant?
 
     init(
         byteBudget: Int, idleInterval: Duration, pingGrace: Duration,
         assumedMinimumDrainRate: Int, now: ContinuousClock.Instant,
-        helloDeadline: Duration? = nil
+        helloDeadline: Duration? = nil, tickInterval: Duration? = nil
     ) {
+        self.tickInterval = tickInterval
         self.byteBudget = byteBudget
         self.idleInterval = idleInterval
         self.pingGrace = pingGrace
@@ -128,8 +132,26 @@ struct ConnectionHealth {
         return .none
     }
 
+    /// A gap between two ticks this much longer than the interval means the process did not run
+    /// — the host slept, or it was stopped. The one-second floor keeps a millisecond test tick
+    /// from mistaking an ordinary scheduling hiccup for one.
+    private var suspensionGap: Duration? {
+        tickInterval.map { max($0 * 3, .seconds(1)) }
+    }
+
     mutating func tick(now: ContinuousClock.Instant) -> Action {
         if let dropped { return .drop(reason: dropped) }
+        // `ContinuousClock` counts time asleep, and on wake this tick runs BEFORE the peer's
+        // buffered pong is read — so a ping outstanding across a sleep dropped a peer that had
+        // answered (measured: 1008 within 2 ms of a SIGSTOP of 15–90 s). The peer could not have
+        // answered while we were not running, so every deadline restarts from now.
+        defer { lastTickAt = now }
+        if let gap = suspensionGap, let lastTickAt, now - lastTickAt > gap {
+            lastProofAt = now
+            if pingSentAt != nil { pingSentAt = now }
+            if helloArmedAt != nil { helloArmedAt = now }
+            return .none
+        }
         if let helloDeadline, let helloArmedAt, now - helloArmedAt > helloDeadline {
             dropped = .noHello
             return .drop(reason: .noHello)

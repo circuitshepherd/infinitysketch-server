@@ -94,7 +94,8 @@ actor Connection {
             pingGrace: config.keepalivePingGrace,
             assumedMinimumDrainRate: config.assumedMinimumDrainRate,
             now: ContinuousClock.now,
-            helloDeadline: config.helloDeadline)
+            helloDeadline: config.helloDeadline,
+            tickInterval: config.keepaliveTickInterval)
     }
 
     func handle(_ frame: WSMessage) async {
