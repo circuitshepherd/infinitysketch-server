@@ -39,6 +39,9 @@ import Foundation
 struct ConnectionHealth {
     enum DropReason: String, Equatable, Sendable {
         case unresponsive
+        /// Connected, never said hello within `helloDeadline`. Without this an idle socket costs
+        /// a file descriptor forever — enough of them and `accept` fails with EMFILE.
+        case noHello
     }
 
     enum Action: Equatable {
@@ -64,10 +67,15 @@ struct ConnectionHealth {
     /// Set when `.drop` is first returned. Every later input repeats it, so a pong racing the
     /// close cannot revive a connection the server has already given up on.
     private var dropped: DropReason?
+    /// nil = no deadline (the pure policy tests that predate it). Armed at init, cleared by
+    /// `noteHello`.
+    private let helloDeadline: Duration?
+    private var helloArmedAt: ContinuousClock.Instant?
 
     init(
         byteBudget: Int, idleInterval: Duration, pingGrace: Duration,
-        assumedMinimumDrainRate: Int, now: ContinuousClock.Instant
+        assumedMinimumDrainRate: Int, now: ContinuousClock.Instant,
+        helloDeadline: Duration? = nil
     ) {
         self.byteBudget = byteBudget
         self.idleInterval = idleInterval
@@ -77,6 +85,13 @@ struct ConnectionHealth {
         // connection, and 1 B/s only ever makes the deadline more generous.
         self.assumedMinimumDrainRate = max(1, assumedMinimumDrainRate)
         self.lastProofAt = now
+        self.helloDeadline = helloDeadline
+        self.helloArmedAt = helloDeadline == nil ? nil : now
+    }
+
+    /// The peer completed its handshake; the hello deadline no longer applies.
+    mutating func noteHello() {
+        helloArmedAt = nil
     }
 
     /// How long the outstanding ping may go unanswered. Integer-second granularity is deliberate:
@@ -115,6 +130,10 @@ struct ConnectionHealth {
 
     mutating func tick(now: ContinuousClock.Instant) -> Action {
         if let dropped { return .drop(reason: dropped) }
+        if let helloDeadline, let helloArmedAt, now - helloArmedAt > helloDeadline {
+            dropped = .noHello
+            return .drop(reason: .noHello)
+        }
         if let pingSentAt {
             guard now - pingSentAt > pingDeadlineAllowance else { return .none }
             dropped = .unresponsive

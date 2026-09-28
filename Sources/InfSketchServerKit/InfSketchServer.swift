@@ -35,6 +35,14 @@ public final class InfSketchServer: Sendable {
     /// against the same broker instance the running server's `WSAdapter` uses.
     let deviceCommandBroker: DeviceCommandBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
+    /// Set by `stop()` BEFORE the socket closes, so the accept failure that closing it produces
+    /// ends `run()` instead of being retried as descriptor exhaustion.
+    private let stopFlag = StopFlag()
+
+    private actor StopFlag {
+        private(set) var isSet = false
+        func set() { isSet = true }
+    }
 
     public convenience init(
         port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
@@ -84,9 +92,19 @@ public final class InfSketchServer: Sendable {
     }
 
     /// Configures routes and serves until stopped.
+    ///
+    /// An `accept` failure — EMFILE when descriptors run out — is not the end of the server: it
+    /// waits briefly and listens again (see `AcceptResilience`). Listening again drops the
+    /// connections the failed loop held, which is also what frees the descriptors.
     public func run() async throws {
         await configureRoutes()
-        try await http.run()
+        let stopFlag = self.stopFlag
+        try await AcceptResilience.run(
+            delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
+            shouldStop: { await stopFlag.isSet }
+        ) {
+            try await http.run()
+        }
     }
 
     /// Throws if the socket is not accepting within `timeout`. The default matches FlyingFox's own.
@@ -113,6 +131,7 @@ public final class InfSketchServer: Sendable {
     /// tests still passing. A sixteen-fold difference in the edit-test loop, for a second nobody
     /// was using.
     public func stop() async {
+        await stopFlag.set()
         await http.stop(timeout: 0)
         await mcpAdapter.shutdown()
     }

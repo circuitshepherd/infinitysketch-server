@@ -105,6 +105,30 @@ struct ConnectionKeepaliveTests {
         }
     }
 
+    /// A socket that connects and never says hello is closed at the hello deadline, even though
+    /// the idle keepalive is far away.
+    @Test func aConnectionThatNeverSaysHelloIsClosed() async throws {
+        let manager = try Self.makeManager()
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .seconds(300),
+            keepaliveTickInterval: .milliseconds(10), helloDeadline: .milliseconds(150))
+        let harness = try await Harness(manager: manager, config: config)
+        defer { harness.finish() }
+        #expect(await harness.wait { await $0.closed }, "a connection that never said hello must be closed")
+    }
+
+    @Test func aConnectionThatSaidHelloOutlivesTheHelloDeadline() async throws {
+        let manager = try Self.makeManager()
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .seconds(300),
+            keepaliveTickInterval: .milliseconds(10), helloDeadline: .milliseconds(100))
+        let harness = try await Harness(manager: manager, config: config)
+        defer { harness.finish() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+        let closed = await harness.wait(upTo: .milliseconds(500)) { await $0.closed }
+        #expect(!closed)
+    }
+
     /// A peer that never answers is pinged and then dropped. This is the half-open socket: it
     /// says hello, then goes silent forever while the connection stays open.
     @Test func aSilentPeerIsPingedThenDropped() async throws {

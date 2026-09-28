@@ -197,6 +197,30 @@ struct ConnectionHealthTests {
                 "1200 bytes buys only the flat grace, so this one drops at 10 s")
     }
 
+    // MARK: - hello deadline
+
+    /// A socket that never says hello holds a file descriptor for ever; enough of them end the
+    /// server with EMFILE on accept.
+    @Test func aConnectionWithoutHelloIsDroppedAtTheDeadline() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: .seconds(300), pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, helloDeadline: .seconds(10))
+        #expect(health.tick(now: t0.advanced(by: .seconds(9))) == .none)
+        // Talking is not saying hello: a pong-only peer is still refused.
+        #expect(health.noteInbound(now: t0.advanced(by: .seconds(9))) == .none)
+        #expect(health.tick(now: t0.advanced(by: .seconds(11))) == .drop(reason: .noHello))
+    }
+
+    @Test func helloDisarmsTheDeadline() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: .seconds(300), pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, helloDeadline: .seconds(10))
+        health.noteHello()
+        #expect(health.tick(now: t0.advanced(by: .seconds(60))) == .none)
+    }
+
     /// The idle timer must not fire on a busy-but-healthy connection.
     @Test func steadyInboundTrafficNeverPings() {
         var now = ContinuousClock.now
@@ -219,6 +243,7 @@ struct KeepaliveConfigTests {
         #expect(config.keepalivePingGrace == .seconds(10))
         #expect(config.keepaliveTickInterval == .seconds(5))
         #expect(config.assumedMinimumDrainRate == 1024 * 1024)
+        #expect(config.helloDeadline == .seconds(10))
     }
 
     @Test func theyAreOverridable() {

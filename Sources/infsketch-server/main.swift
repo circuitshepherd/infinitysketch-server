@@ -117,6 +117,11 @@ if let telemetryPath {
     }
 }
 
+// Before the socket exists: the macOS default soft limit of 256 descriptors was measured running
+// out at ~250 idle connections, which used to end the process.
+if let limit = AcceptResilience.raiseFileDescriptorLimit(), limit.new != limit.old {
+    ServerLog.verbose("[server] open-file limit raised from \(limit.old) to \(limit.new)")
+}
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory)
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 

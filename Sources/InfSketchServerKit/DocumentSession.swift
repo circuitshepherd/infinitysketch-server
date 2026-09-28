@@ -78,6 +78,10 @@ public struct SessionConfig: Sendable {
     /// treating it as stalled is the correct verdict; the point of the floor is only that the
     /// deadline must at least cover DELIVERING the question.
     public var assumedMinimumDrainRate: Int
+    /// A WebSocket connection that has not sent a valid `hello` this long after it opened is
+    /// closed. An idle socket otherwise holds a file descriptor for ever, and enough of them end
+    /// the server with EMFILE on `accept`. Observed at `keepaliveTickInterval` resolution.
+    public var helloDeadline: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -93,8 +97,10 @@ public struct SessionConfig: Sendable {
         keepalivePingGrace: Duration = .seconds(10),
         keepaliveTickInterval: Duration = .seconds(5),
         assumedMinimumDrainRate: Int = 1024 * 1024,
-        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)]
+        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)],
+        helloDeadline: Duration = .seconds(10)
     ) {
+        self.helloDeadline = helloDeadline
         self.relayRetryDelays = relayRetryDelays
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit

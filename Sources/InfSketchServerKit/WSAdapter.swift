@@ -90,7 +90,8 @@ actor Connection {
             idleInterval: config.keepaliveIdleInterval,
             pingGrace: config.keepalivePingGrace,
             assumedMinimumDrainRate: config.assumedMinimumDrainRate,
-            now: ContinuousClock.now)
+            now: ContinuousClock.now,
+            helloDeadline: config.helloDeadline)
     }
 
     func handle(_ frame: WSMessage) async {
@@ -137,6 +138,7 @@ actor Connection {
                 return
             }
             helloed = true
+            health.noteHello()
             self.deviceId = deviceId
             // Register with the broker whenever the connection advertises
             // any capability the broker brokers requests for — the broker
