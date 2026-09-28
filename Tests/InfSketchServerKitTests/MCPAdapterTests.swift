@@ -1848,6 +1848,27 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A name a connected device ADVERTISES is taken, even with no bytes on the server: creating
+    /// it here meant that when the user opened theirs, the agent's content was unioned in — or,
+    /// with a stale base on the device, the user's content deleted (review finding 23).
+    @Test func createDocOnAnAdvertisedNameErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Held", modifiedAt: Date(), sizeBytes: 10, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "create_doc", arguments: ["docId": "held"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("docExists"))
+        #expect(await device.receivedRequests.isEmpty)
+        await server.stop()
+    }
+
     /// Task 3: end-to-end proof that `create_doc`'s write genuinely uses
     /// `.absent` now, not just the fast `manager.currentBytes(docId:) != nil`
     /// pre-check above — this exercises the FULL lifecycle on a brand-new
@@ -6302,6 +6323,64 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Any delete forgets the document's agent history — not only `delete_doc`. An in-app delete
+    /// or a rename (the WS `deleteDoc`) left it, and a recycled name then merged the OLD
+    /// document's content into the new one on the next undo (review finding 23).
+    @Test func aDeleteByAnyRouteForgetsTheAgentHistory() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]])
+
+        try await server.manager.deleteDoc(docId: "d")   // the path an app delete or rename takes
+        _ = await server.manager.submitOpeningSession(
+            docId: "d", createIfMissing: true, opId: "recycled",
+            payload: OpPayload(type: "fullDoc", data: Data(#"{"aaa001_thumbnailData":"","new":1}"#.utf8)),
+            expectation: .absent, writer: "app")
+
+        let (content, isError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
+        await server.stop()
+    }
+
+    /// A multi-step undo that fails part-way says how many steps DID land, instead of reporting
+    /// only the failure while the document has already moved.
+    @Test func aMultiStepUndoThatFailsPartWayReportsWhatLanded() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let agentBytes = Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)
+        // No `mergeDocs`: a contended step cannot be reversed.
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(agentBytes),
+                                                  capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+        let stroke: [String: Value] = ["docId": "d", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]]
+        _ = try await client.callTool(name: "draw_strokes", arguments: stroke)          // before -> agent
+        // A user edit in between, through the app's own path (a subscription's push — never
+        // recorded), so the older agent edit can only be reversed by a merge.
+        let app = try await server.manager.subscribe(docId: "d")
+        _ = await server.manager.submit(
+            docId: "d", opId: "user", payload: OpPayload(type: "fullDoc", data: Data(#"{"aaa001_thumbnailData":"","m":"user"}"#.utf8)),
+            submitter: app.token)
+        _ = try await client.callTool(name: "draw_strokes", arguments: stroke)          // user -> agent
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d", "steps": 2])
+        #expect(isError == true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("noDeviceAvailable"), "the reason token stays first: \(text)")
+        #expect(text.contains("1 of 2"), "it must say one step landed: \(text)")
+        await server.stop()
+    }
+
     /// Repeated undo WALKS BACK — it does not ping-pong. The undo's own write is deliberately
     /// not recorded: recording it would make this second call reverse the FIRST UNDO instead of
     /// the edit before it, which contradicts one-undo-is-one-tool-call. Found by testing.
@@ -6861,12 +6940,11 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "replace_doc",
             arguments: ["docId": "Ghost", "bytes": .string(replacement.base64EncodedString())])
-        #expect(isError != true)
-        #expect(toolResultText(content).contains("replaced Ghost"))
-
-        // Created directly from the agent's bytes (.absent create path) — NOT the fetched content.
-        let raw = await server.manager.currentBytes(docId: "Ghost")
-        #expect(raw == replacement)
+        // A document a device holds EXISTS (review finding 23): creating it here would be unioned
+        // into — or, with a stale base, would delete — the user's own copy when they open it.
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("docExists"))
+        #expect(await server.manager.currentBytes(docId: "Ghost") == nil, "nothing written")
 
         await server.stop()
     }

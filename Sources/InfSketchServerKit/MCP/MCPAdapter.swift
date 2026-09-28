@@ -988,9 +988,10 @@ public actor MCPAdapter {
 
                 If the document changed after your write, it is MERGED rather than refused: your \
                 change is reversed and everything that happened since is kept. That path needs a \
-                connected device; an unchanged document does not. There is no redo — but an undo \
-                is itself a write, so undoing it again does the obvious thing. History is bounded \
-                and in memory, so a much older edit answers `nothingToUndo`.
+                connected device; an unchanged document does not. There is no redo: calling this \
+                again takes back the edit before that one, never the undo itself. History is \
+                bounded and in memory, so a much older edit answers `nothingToUndo`. If a \
+                multi-step undo fails part-way, the error says how many steps had already landed.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -3505,6 +3506,14 @@ public actor MCPAdapter {
     /// Unlike every other write tool this takes no CAS: the caller asked for the document to be
     /// gone, so a write that landed a moment earlier does not make the request stale. The bytes
     /// are recoverable from the server's .trash directory either way.
+    /// Registered with `SessionManager` so EVERY delete — an in-app delete, a rename (the WS
+    /// `deleteDoc` the app sends for the old name), `delete_doc` — forgets the document's agent
+    /// history. Only `delete_doc` did, so a recycled name inherited the old document's edits and
+    /// the next undo merged old content into the new document (review finding 23).
+    func forgetHistory(docId: String) async {
+        await history.forget(docId: docId)
+    }
+
     private func callDeleteDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -3647,6 +3656,14 @@ public actor MCPAdapter {
             // `.absent` create-CAS above ("never silently overwrite a different doc of the same
             // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
             let currentBytes = await manager.currentBytes(docId: docId)
+            // …but a metadata-only doc EXISTS: a connected device holds it. Creating it here from
+            // the agent's bytes meant the user's own copy was unioned with them when opened — or,
+            // with a stale base on the device, deleted (review finding 23). Reading it first
+            // (`fetch_doc`) makes it resident, and then this is an ordinary replace.
+            if currentBytes == nil, await manager.liveEntry(docId: docId) != nil {
+                return Self.errorResult(
+                    "docExists: a connected device holds \"\(docId)\"; read it with fetch_doc before replacing it")
+            }
             return await submitAndRespond(
                 docId: docId, createIfMissing: true, fullDoc: bytes,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
@@ -3670,7 +3687,12 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            if await manager.currentBytes(docId: docId) != nil {
+            // A name a connected device advertises is taken too, though the server holds no
+            // bytes for it: the user's own document would otherwise be merged with this one the
+            // moment they opened it (review finding 23).
+            let resident = await manager.currentBytes(docId: docId) != nil
+            let advertised = await manager.liveEntry(docId: docId) != nil
+            if resident || advertised {
                 return Self.errorResult("docExists")
             }
 
@@ -5812,6 +5834,17 @@ public actor MCPAdapter {
 
             var undone = 0
             var lastSeqText = ""
+            // A failure after some steps have LANDED must say so: the document has already moved,
+            // and a bare error reads as "nothing happened". The reason token stays first.
+            func failed(_ result: CallTool.Result) -> CallTool.Result {
+                guard undone > 0 else { return result }
+                let reason = result.content.compactMap { content -> String? in
+                    if case .text(let text, _, _) = content { return text }
+                    return nil
+                }.joined(separator: " ")
+                return Self.errorResult("\(reason) — \(undone) of \(steps) edit(s) were undone before this "
+                                        + "(document now at \(lastSeqText))")
+            }
             for _ in 0..<steps {
                 guard let entry = await history.mostRecent(docId: docId) else {
                     // Some steps may already have landed; say how far it got rather than
@@ -5820,7 +5853,7 @@ public actor MCPAdapter {
                     return Self.errorResult("nothingToUndo: no recorded edit for \"\(docId)\"")
                 }
                 guard let current = await manager.currentBytesOrFetch(docId: docId) else {
-                    return Self.errorResult("unknownDoc")
+                    return failed(Self.errorResult("unknownDoc"))
                 }
 
                 let restored: Data
@@ -5837,7 +5870,7 @@ public actor MCPAdapter {
                     switch await revertMerge(docId: docId, base: entry.after, mine: current,
                                              theirs: entry.before) {
                     case .merged(let merged): restored = merged
-                    case .failed(let result): return result
+                    case .failed(let result): return failed(result)
                     }
                 }
 
@@ -5845,7 +5878,7 @@ public actor MCPAdapter {
                     docId: docId, createIfMissing: false, fullDoc: restored,
                     expectation: .matchBytes(current), recordForUndo: false
                 ) { seq in "seq \(seq)" }
-                if result.isError == true { return result }
+                if result.isError == true { return failed(result) }
                 // Consumed only once the undo has actually landed, so a rejected write or an
                 // unreachable device leaves the history intact and the agent can try again.
                 await history.consumeMostRecent(docId: docId)

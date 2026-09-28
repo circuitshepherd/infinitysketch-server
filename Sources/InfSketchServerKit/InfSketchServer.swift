@@ -172,6 +172,11 @@ public final class InfSketchServer: Sendable {
         // A document with watchers and no subscriber gets its frame from any connected device
         // that can render — the relay `render_sketch` walks, so the picture is the one an agent
         // gets and the deployed app already serves it (spec 2026-08-29-watcher-frames-...).
+        // Every delete, however it arrives, forgets the agent's edit history for that document.
+        let mcpAdapter = self.mcpAdapter
+        await manager.setDocumentDeletedHandler { docId in
+            await mcpAdapter.forgetHistory(docId: docId)
+        }
         await manager.setFrameProvider { docId, bytes, px in
             let reply = try await broker.requestStrokeOp(
                 docId: docId, docBytes: bytes, spec: WatcherFrame.renderSpec(longSidePx: px),

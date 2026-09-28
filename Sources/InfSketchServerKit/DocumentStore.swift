@@ -268,8 +268,12 @@ public enum ThumbnailExtractor {
     }
 
     /// Reads the thumbnail PNG from .infsketch document bytes.
-    /// Returns nil for documents without a thumbnail or non-JSON bytes.
+    /// Returns nil for documents without a thumbnail — absent or EMPTY, which is how the app and
+    /// the server's own edits store "none" — or non-JSON bytes, so a caller falls through to its
+    /// next source rather than serving a zero-byte image.
     public static func thumbnailPNG(fromDocumentBytes bytes: Data) -> Data? {
-        (try? JSONDecoder().decode(ThumbnailHeader.self, from: bytes))?.aaa001_thumbnailData
+        guard let png = (try? JSONDecoder().decode(ThumbnailHeader.self, from: bytes))?.aaa001_thumbnailData,
+              !png.isEmpty else { return nil }
+        return png
     }
 }

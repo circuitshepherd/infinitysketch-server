@@ -133,6 +133,14 @@ public actor SessionManager {
         frameProvider = provider
     }
 
+    /// Told after every successful `deleteDoc`, whoever asked for it. The MCP layer forgets the
+    /// document's agent edit history here, so a recycled name cannot inherit it.
+    private var documentDeletedHandler: (@Sendable (String) async -> Void)?
+
+    public func setDocumentDeletedHandler(_ handler: @escaping @Sendable (String) async -> Void) {
+        documentDeletedHandler = handler
+    }
+
     /// A device that can render has connected: render whatever is watched and unopened. This is
     /// what a server restart produces every time — the page reconnects in 2 s and the device in
     /// 5, so the re-watch found no device and the page sat on the stored thumbnail until reloaded.
@@ -381,6 +389,7 @@ public actor SessionManager {
         // would tell status listeners nothing — a browser watching this channel would keep showing
         // the row until something else made it re-fetch.
         emitStatus(docId: docId, kind: "docDeleted", seq: nil, count: 0)
+        await documentDeletedHandler?(docId)
     }
 
     /// Register a viewer. Opens the session from the store if needed (no
