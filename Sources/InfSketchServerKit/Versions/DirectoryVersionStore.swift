@@ -34,9 +34,14 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     private var versionsDir: URL { root.appendingPathComponent(Self.versionsDirectoryName, isDirectory: true) }
     private var blobsDir: URL { root.appendingPathComponent(Self.blobsDirectoryName, isDirectory: true) }
 
+    /// The same docIds `DocumentStore.fileURL` accepts (no separator, no `..`) — a document and its
+    /// versions must be reachable by the same id — PLUS an explicit refusal of the bare "." that
+    /// `DocumentStore`'s own character check lets through undetected (it never names anything real
+    /// there, but here it would collide every document's version directory into one).
     private func docDir(_ docId: String) throws -> URL {
-        guard !docId.isEmpty, !docId.contains("/"), !docId.contains("\\"), !docId.contains(".."),
-              !docId.hasPrefix(".") else { throw VersionStoreError.invalidDocId }
+        guard !docId.isEmpty, docId != ".",
+              !docId.contains("/"), !docId.contains("\\"), !docId.contains("..")
+        else { throw VersionStoreError.invalidDocId }
         return versionsDir.appendingPathComponent(docId, isDirectory: true)
     }
 
@@ -47,7 +52,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let dir = try docDir(docId)
         var index = readIndex(dir) ?? VersionIndex()
-        try writeVersionIfAbsent(dir: dir, bytes: bytes, hash: hash)
+        try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId)
         index.current = hash
         index.recent.removeAll { $0 == hash }
         index.recent.append(hash)
@@ -74,9 +79,21 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     public func load(docId: String, hash: String) -> Data? {
         guard VersionHash.isWellFormed(hash), let dir = try? docDir(docId) else { return nil }
         lock.lock(); defer { lock.unlock() }
+        return loadLocked(dir: dir, hash: hash, docId: docId)
+    }
+
+    /// The body of `load`, callable while the lock is already held (from `record`'s self-repair) —
+    /// `NSLock` is not reentrant, so `load` itself cannot be called re-entrantly here.
+    private func loadLocked(dir: URL, hash: String, docId: String) -> Data? {
         guard let raw = try? Data(contentsOf: dir.appendingPathComponent(hash)) else { return nil }
         do {
             let version = try StoredVersion(encoded: raw)
+            // A manifest is data on disk, not something the write path controls at read time —
+            // never trust one of its values enough to hand it to the filesystem as a path component.
+            for sha in version.manifest.values where !VersionHash.isWellFormed(sha) {
+                ServerLog.error("version \(hash) of '\(docId)' names a malformed blob reference — unusable")
+                return nil
+            }
             let rebuilt = try version.rebuild { sha in
                 try? Data(contentsOf: self.blobsDir.appendingPathComponent(sha))
             }
@@ -91,11 +108,48 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         }
     }
 
-    // Task 1.3 fills in these four.
     @discardableResult
-    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool { false }
-    public func holds(docId: String) -> [String: DeviceHolds] { [:] }
-    public func removeAll(docId: String) {}
+    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool {
+        guard let dir = try? docDir(docId) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        // A document the store has never seen: nothing to hold, and no directory is created for it
+        // (a note written for a document the server deleted must not bring a folder back).
+        guard var index = readIndex(dir) else { return false }
+        let known = hash.map { VersionHash.isWellFormed($0)
+            && FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path) } ?? true
+        var holds = index.devices[deviceId] ?? DeviceHolds(lastSeen: now)
+        // An unknown version holds nothing — and the slot is still cleared: the device has moved on
+        // from what it held there (for `base`, its note names something else now).
+        holds[slot] = known ? hash : nil
+        holds.lastSeen = now
+        index.devices[deviceId] = holds
+        guard (try? writeIndex(index, dir)) != nil else { return false }
+        sweep(dir: dir, index: index)
+        return known && hash != nil
+    }
+
+    public func holds(docId: String) -> [String: DeviceHolds] {
+        guard let dir = try? docDir(docId) else { return [:] }
+        lock.lock(); defer { lock.unlock() }
+        return readIndex(dir)?.devices ?? [:]
+    }
+
+    public func removeAll(docId: String) {
+        guard let dir = try? docDir(docId) else { return }
+        lock.lock(); defer { lock.unlock() }
+        // The index goes FIRST: a kill part-way then leaves version files no index names (removed at
+        // the next start, Task 4.3), never an index naming files that are gone.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.holdsFileName))
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        where VersionHash.isWellFormed(name) {
+            if let raw = try? Data(contentsOf: dir.appendingPathComponent(name)),
+               let manifest = try? StoredVersion.manifest(ofEncoded: raw) {
+                for sha in Set(manifest.values) { releaseBlob(sha) }
+            }
+        }
+        try? FileManager.default.removeItem(at: dir)
+    }
+
     public func keptHashes(docId: String) -> Set<String> {
         guard let dir = try? docDir(docId) else { return [] }
         lock.lock(); defer { lock.unlock() }
@@ -111,34 +165,55 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
 
     // MARK: - internals (all called with the lock held)
 
-    private func writeVersionIfAbsent(dir: URL, bytes: Data, hash: String) throws {
+    /// Write `hash`'s version file and blobs if absent, or REPAIR them from `bytes` (already
+    /// verified against `hash` by `record`) when the file exists but does not hold up: a blob gone
+    /// missing (disk error, a stray delete) or the version file itself damaged by a crash mid-write.
+    ///
+    /// A manifest that parsed BEFORE this call was already counted into `blobRefs` — at the write
+    /// that first produced it, or at the last startup scan — and rewriting it changes none of its
+    /// shas, since the manifest is a pure function of `bytes`; only a manifest that did NOT parse
+    /// before (absent file, or bytes too damaged to read at all) is counted here for the first time.
+    private func writeOrRepairVersion(dir: URL, bytes: Data, hash: String, docId: String) throws {
         let file = dir.appendingPathComponent(hash)
-        guard !FileManager.default.fileExists(atPath: file.path) else { return }
+        let existedBefore = FileManager.default.fileExists(atPath: file.path)
+        let priorManifest = existedBefore
+            ? (try? Data(contentsOf: file)).flatMap { try? StoredVersion.manifest(ofEncoded: $0) }
+            : nil
+        if existedBefore, priorManifest != nil, loadLocked(dir: dir, hash: hash, docId: docId) != nil {
+            return  // present, parses, and rebuilds to exactly `hash` — nothing to repair
+        }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: blobsDir, withIntermediateDirectories: true)
         let (version, blobs) = StoredVersion.make(from: bytes, digest: VersionHash.digest(hex: hash) ?? Data())
-        // Blobs FIRST: a version file that exists must be rebuildable.
+        // Blobs FIRST: a version file that exists must be rebuildable. A brand-new version reuses an
+        // already-correct, content-addressed blob as is; a REPAIR overwrites unconditionally, since
+        // a damaged blob file under this same name is exactly what might need fixing.
         for (sha, run) in blobs {
             let blobFile = blobsDir.appendingPathComponent(sha)
-            if !FileManager.default.fileExists(atPath: blobFile.path) {
+            if existedBefore || !FileManager.default.fileExists(atPath: blobFile.path) {
                 try run.write(to: blobFile, options: .atomic)
             }
         }
         try version.encoded().write(to: file, options: .atomic)
-        for sha in Set(version.manifest.values) { blobRefs[sha, default: 0] += 1 }
+        if priorManifest == nil {
+            for sha in Set(version.manifest.values) { blobRefs[sha, default: 0] += 1 }
+        }
     }
 
     func readIndex(_ dir: URL) -> VersionIndex? {
         guard let data = try? Data(contentsOf: dir.appendingPathComponent(Self.holdsFileName)) else { return nil }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // `.secondsSince1970` round-trips a Date exactly, sub-second precision included — an ISO8601
+        // string (the default formatter has no fractional-second option) truncates to the second,
+        // silently rewriting `lastSeen` on every read.
+        decoder.dateDecodingStrategy = .secondsSince1970
         return try? decoder.decode(VersionIndex.self, from: data)
     }
 
     func writeIndex(_ index: VersionIndex, _ dir: URL) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .secondsSince1970
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(index).write(to: dir.appendingPathComponent(Self.holdsFileName), options: .atomic)
     }
@@ -165,7 +240,11 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         }
     }
 
+    /// Never used as a path component before it is CHECKED — a manifest is data on disk, and a
+    /// malformed "sha" in it (a stray `..`, or `""`, which `appendingPathComponent` treats as the
+    /// directory itself) must be inert rather than a deletion of something it does not name.
     func releaseBlob(_ sha: String) {
+        guard VersionHash.isWellFormed(sha) else { return }
         let remaining = (blobRefs[sha] ?? 1) - 1
         if remaining > 0 {
             blobRefs[sha] = remaining
@@ -184,8 +263,17 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             where VersionHash.isWellFormed(name) {
                 guard let raw = try? Data(contentsOf: dir.appendingPathComponent(name)),
                       let manifest = try? StoredVersion.manifest(ofEncoded: raw) else { continue }
-                for sha in Set(manifest.values) { blobRefs[sha, default: 0] += 1 }
+                for sha in Set(manifest.values) where VersionHash.isWellFormed(sha) {
+                    blobRefs[sha, default: 0] += 1
+                }
             }
+        }
+        // Orphans: a blob written just before a crash whose version file never made it to disk (or
+        // one abandoned by a version that became unparseable before it could be released properly).
+        // Nothing can ever reference it again, so free the space at the next start.
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: blobsDir.path)) ?? []
+        where blobRefs[name] == nil {
+            try? FileManager.default.removeItem(at: blobsDir.appendingPathComponent(name))
         }
     }
 }
