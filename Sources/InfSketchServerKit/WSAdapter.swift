@@ -215,6 +215,12 @@ actor Connection {
             // never subscribes to document events, but `infsketch-demo` does — and it would take a
             // binary `StrippedDocument` for a document and be unable to read it.
             acceptsStrippedDocuments = caps.contains("blobOmission")
+            // The reply FIRST, before this device can be handed a request: the app reads the first
+            // message after its hello as the handshake reply, so a relay render or an agent op
+            // that reached it first failed the handshake and cost the connection (review finding
+            // 14a — the mirror image of the rule the app keeps for itself). `emit` does not
+            // suspend, so nothing can slip in between.
+            emit(.helloAck(protocolVersion: WireProtocol.version))
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
@@ -228,7 +234,6 @@ actor Connection {
                 // and must find this one.
                 await manager.deviceAppeared(capabilities: caps)
             }
-            emit(.helloAck(protocolVersion: WireProtocol.version))
 
         case .pong:
             // The liveness credit was already taken in `handle` — any inbound frame counts, so

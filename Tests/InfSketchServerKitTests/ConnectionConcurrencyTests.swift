@@ -158,4 +158,71 @@ import InfSketchWire
         let event = messages.firstIndex { if case .event("remote", _, _, "o1", _) = $0 { true } else { false } }
         #expect(subscribed != nil && event != nil && subscribed! < event!)
     }
+
+    /// A store whose next `load` blocks until released — it holds the manager actor, which is
+    /// what makes the handshake's own `await` on the manager last long enough to observe.
+    final class HeldLoadStore: DocumentStore, @unchecked Sendable {
+        let inner: DirectoryDocumentStore
+        private let lock = NSLock()
+        private var holding = false
+        private let entered = DispatchSemaphore(value: 0)
+        private let released = DispatchSemaphore(value: 0)
+        init(_ inner: DirectoryDocumentStore) { self.inner = inner }
+        func holdNextLoad() { lock.lock(); holding = true; lock.unlock() }
+        func waitUntilEntered() { entered.wait() }
+        func release() { released.signal() }
+        func list() throws -> [StoredDocInfo] { try inner.list() }
+        func save(docId: String, bytes: Data) throws { try inner.save(docId: docId, bytes: bytes) }
+        func exists(docId: String) throws -> Bool { try inner.exists(docId: docId) }
+        func delete(docId: String) throws { try inner.delete(docId: docId) }
+        func storedDocId(matching docId: String) -> String? { inner.storedDocId(matching: docId) }
+        func load(docId: String) throws -> Data {
+            lock.lock(); let hold = holding; holding = false; lock.unlock()
+            if hold { entered.signal(); released.wait() }
+            return try inner.load(docId: docId)
+        }
+    }
+
+    /// The handshake reply goes out before anything that can send the device a request: the app
+    /// treats the first message after hello as the handshake reply, so a relay render or an agent
+    /// op arriving first failed its handshake and cost the connection (review finding 14a).
+    @Test func helloAckPrecedesAnyRequestADeviceCanReceive() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hello-order-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let inner = DirectoryDocumentStore(directory: dir)
+        try inner.save(docId: "d", bytes: Fixtures.docBytes)
+        let store = HeldLoadStore(inner)
+        let manager = SessionManager(store: store)
+        let broker = DeviceCommandBroker(strokeOpTimeout: .seconds(5))
+        let harness = try await Harness(manager: manager, broker: broker)
+        defer { harness.finish() }
+
+        // Busy the manager: the hello's announcement to it must now wait.
+        store.holdNextLoad()
+        let busy = Task { _ = try? await manager.subscribe(docId: "d") }
+        await Task.detached { store.waitUntilEntered() }.value
+
+        // An agent asking for a device the moment one exists.
+        let agent = Task {
+            while !Task.isCancelled {
+                do {
+                    _ = try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8),
+                                                         capability: "render")
+                    return
+                } catch DeviceCommandBroker.DeviceCommandError.noDeviceAvailable {
+                    try? await Task.sleep(for: .milliseconds(1))
+                } catch { return }
+            }
+        }
+        defer { agent.cancel() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: "dev"))
+        _ = await harness.wait(upTo: .seconds(2)) {
+            await $0.messages.contains { if case .strokeOpRequest = $0 { true } else { false } }
+        }
+        store.release()
+        _ = await busy.value
+        #expect(await harness.wait { await !$0.messages.isEmpty })
+        #expect(await harness.collector.messages.first == .helloAck(protocolVersion: WireProtocol.version))
+    }
 }
