@@ -72,6 +72,8 @@ public actor DeviceCommandBroker {
         /// just sent them, so it knows we have them — and this is what they are spliced back from.
         /// Empty bytes for requests that send no document.
         let sentDoc: SentDocument
+        /// Whether this request took `docIdsInFlight` and must release it.
+        let holdsDocumentLock: Bool
     }
 
     /// A document a connection was sent, beside the two derivations of it that BOTH directions of
@@ -194,6 +196,12 @@ public actor DeviceCommandBroker {
     /// `strokeOpReply` wire messages and the same per-docId in-flight guard;
     /// only the capability used to pick a connection differs.
     ///
+    /// `takesDocumentLock: false` is the watcher-frame relay's: it renders, writes nothing, and
+    /// fires after every accepted write to a watched closed document — holding the agents' lock
+    /// there made the agent's NEXT call on that document fail `opInProgress`, and the other way
+    /// round failed the relay (review finding 22). Every agent write is compare-and-swap guarded,
+    /// so a render running beside one needs no lock.
+    ///
     /// `specParts` are op-spec fields too big to sit IN the spec. The spec rides inline in the
     /// message's JSON text frame — `TransferSender` chunks only `bulkBytes`, which is `payload` —
     /// so a whole document base64'd into a spec produced a single frame of ~3.56x the document
@@ -202,12 +210,12 @@ public actor DeviceCommandBroker {
     /// spec before any op handler sees it (`OpSpecBundle`).
     public func requestStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes",
-        specParts: [OpSpecBundleWire.Field: Data] = [:]
+        specParts: [OpSpecBundleWire.Field: Data] = [:], takesDocumentLock: Bool = true
     ) async throws -> StrokeOpReply {
         do {
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                           capability: capability, specParts: specParts,
-                                          allowStripping: true)
+                                          allowStripping: true, takesDocumentLock: takesDocumentLock)
         } catch DeviceCommandError.deviceFailed(let reason)
             where reason.hasPrefix(BlobOmissionWire.cannotReconstructRequestReason) {
             // The device lost its copy (relaunch, eviction) or the ledger drifted past it — a
@@ -217,16 +225,16 @@ public actor DeviceCommandBroker {
             forgetSentDoc(docId: docId)
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                           capability: capability, specParts: specParts,
-                                          allowStripping: false)
+                                          allowStripping: false, takesDocumentLock: takesDocumentLock)
         }
     }
 
     private func sendStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String,
-        specParts: [OpSpecBundleWire.Field: Data], allowStripping: Bool
+        specParts: [OpSpecBundleWire.Field: Data], allowStripping: Bool, takesDocumentLock: Bool
     ) async throws -> StrokeOpReply {
         return try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
-                                        sentBytes: docBytes) { broker, connection, requestId in
+                                        sentBytes: docBytes, takesDocumentLock: takesDocumentLock) { broker, connection, requestId in
             // The strip decision needs the CHOSEN connection, so it lives here — the closure
             // runs isolated on the broker, which is what lets it read and update the ledger
             // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
@@ -372,7 +380,7 @@ public actor DeviceCommandBroker {
     /// this registration into existence.
     private func performRequest(
         docId: String, capability: String, timeout: Duration, deviceId: String? = nil,
-        sentBytes: Data = Data(),
+        sentBytes: Data = Data(), takesDocumentLock: Bool = true,
         send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
         guard let connection = connections.last(where: {
@@ -380,10 +388,12 @@ public actor DeviceCommandBroker {
         }) else {
             throw DeviceCommandError.noDeviceAvailable
         }
-        guard !docIdsInFlight.contains(docId) else {
-            throw DeviceCommandError.requestInFlight
+        if takesDocumentLock {
+            guard !docIdsInFlight.contains(docId) else {
+                throw DeviceCommandError.requestInFlight
+            }
+            docIdsInFlight.insert(docId)
         }
-        docIdsInFlight.insert(docId)
 
         let requestId = nextRequestId
         nextRequestId &+= 1
@@ -397,7 +407,8 @@ public actor DeviceCommandBroker {
             // to resume, never race it into existence.
             pending[requestId] = PendingRequest(
                 docId: docId, connectionId: connection.id, continuation: continuation,
-                sentDoc: SentDocument(docId: docId, bytes: sentBytes))
+                sentDoc: SentDocument(docId: docId, bytes: sentBytes),
+                holdsDocumentLock: takesDocumentLock)
 
             send(self, connection, requestId)
 
@@ -423,7 +434,7 @@ public actor DeviceCommandBroker {
     @discardableResult
     private func completePending(_ requestId: UInt32) -> PendingRequest? {
         guard let entry = pending.removeValue(forKey: requestId) else { return nil }
-        docIdsInFlight.remove(entry.docId)
+        if entry.holdsDocumentLock { docIdsInFlight.remove(entry.docId) }
         entry.timeoutTask?.cancel()
         return entry
     }

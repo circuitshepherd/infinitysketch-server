@@ -175,7 +175,7 @@ public final class InfSketchServer: Sendable {
         await manager.setFrameProvider { docId, bytes, px in
             let reply = try await broker.requestStrokeOp(
                 docId: docId, docBytes: bytes, spec: WatcherFrame.renderSpec(longSidePx: px),
-                capability: "render")
+                capability: "render", takesDocumentLock: false)
             return (png: reply.bytes, canvasRect: WatcherFrame.canvasRect(fromMetadata: reply.meta))
         }
 

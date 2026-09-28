@@ -17,6 +17,8 @@ private actor SentBox {
         messages.append(message)
     }
 
+    func all() -> [ServerMessage] { messages }
+
     /// Returns the first captured message, polling briefly if none has
     /// landed yet. `nil` if nothing arrives within the budget.
     func awaitMessage() async -> ServerMessage? {
@@ -273,6 +275,71 @@ private actor SentBox {
 
         await broker.handleReply(requestId: rid, bytes: Data("T".utf8), failureReason: nil)
         #expect(try await strokeResult.bytes == Data("T".utf8))
+    }
+
+    // MARK: - The frame relay does not take the agents' per-document lock (review finding 22)
+
+    /// Every accepted write to a watched, closed document starts a relay render. Holding the
+    /// agents' lock made the agent's very next call on that document fail `opInProgress`. The
+    /// relay only reads, and every agent write is compare-and-swap guarded, so it needs no lock.
+    @Test func aRelayRenderDoesNotBlockAnAgentOpOnTheSameDocument() async throws {
+        let broker = DeviceCommandBroker()
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["render", "authorStrokes"]) { msg in
+            Task { await sent.set(msg) }
+        }
+        let relay = Task {
+            try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                             capability: "render", takesDocumentLock: false)
+        }
+        let relayRequest = try #require(await sent.awaitMessage())
+        guard case .strokeOpRequest(let relayId, "D", _, _, _) = relayRequest else {
+            Issue.record("wrong msg: \(relayRequest)"); return
+        }
+        // The agent's op on the same document is sent, not refused.
+        let agent = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        var agentId: UInt32?
+        for _ in 0..<100 where agentId == nil {
+            for message in await sent.all() {
+                if case .strokeOpRequest(let id, "D", _, _, _) = message, id != relayId { agentId = id }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let id = try #require(agentId, "the agent's op must be sent while the relay render is in flight")
+        await broker.handleReply(requestId: id, bytes: Data("A".utf8), failureReason: nil)
+        await broker.handleReply(requestId: relayId, bytes: Data("R".utf8), failureReason: nil)
+        #expect(try await agent.value.bytes == Data("A".utf8))
+        #expect(try await relay.value.bytes == Data("R".utf8))
+    }
+
+    /// …and the other way round: an agent op in flight does not refuse the relay.
+    @Test func anAgentOpDoesNotBlockARelayRender() async throws {
+        let broker = DeviceCommandBroker()
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["render", "authorStrokes"]) { msg in
+            Task { await sent.set(msg) }
+        }
+        let agent = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        let agentRequest = try #require(await sent.awaitMessage())
+        guard case .strokeOpRequest(let agentId, "D", _, _, _) = agentRequest else {
+            Issue.record("wrong msg: \(agentRequest)"); return
+        }
+        let relay = Task {
+            try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                             capability: "render", takesDocumentLock: false)
+        }
+        var relayId: UInt32?
+        for _ in 0..<100 where relayId == nil {
+            for message in await sent.all() {
+                if case .strokeOpRequest(let id, "D", _, _, _) = message, id != agentId { relayId = id }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let id = try #require(relayId)
+        await broker.handleReply(requestId: id, bytes: Data("R".utf8), failureReason: nil)
+        await broker.handleReply(requestId: agentId, bytes: Data("A".utf8), failureReason: nil)
+        #expect(try await relay.value.bytes == Data("R".utf8))
+        #expect(try await agent.value.bytes == Data("A".utf8))
     }
 
     // MARK: - Per-kind timeout
