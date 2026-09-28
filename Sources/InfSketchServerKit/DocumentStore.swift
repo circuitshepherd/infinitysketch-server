@@ -41,6 +41,11 @@ public protocol DocumentStore: Sendable {
     /// A server-instance id that survives restarts, or nil when this store cannot keep one (the
     /// server then makes a random id per process). See `SessionManager.serverId`.
     func persistentServerId() -> String?
+    /// The name a person sees for `docId` — a LABEL, not an identity: two documents may carry the
+    /// same one. Nil when none is recorded (callers show the id).
+    func name(of docId: String) -> String?
+    /// Records `name` as `docId`'s label.
+    func setName(_ name: String, for docId: String) throws
 }
 
 extension DocumentStore {
@@ -52,6 +57,10 @@ extension DocumentStore {
 
     /// Stores with nowhere durable to keep it: a random id per server process.
     public func persistentServerId() -> String? { nil }
+
+    /// Stores that keep no labels: every document is shown by its id.
+    public func name(of docId: String) -> String? { nil }
+    public func setName(_ name: String, for docId: String) throws {}
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -62,11 +71,17 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// sides of a delete answer "how long do I have to change my mind?" the same way. Injected so
     /// tests can pin the boundary instead of waiting a month.
     private let trashRetention: TimeInterval
+    /// documentId → name (`.names.json`). A class instance, so this struct stays a value.
+    private let labels: DocumentLabels
 
     public init(directory: URL, trashRetention: TimeInterval = 30 * 24 * 60 * 60) {
         self.directory = directory
         self.trashRetention = trashRetention
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        labels = DocumentLabels(directory: directory)
+        // First, before anything reads the folder: a pre-identity (name-keyed) folder becomes
+        // id-keyed, once. An empty folder just gets the marker.
+        IdentityMigration.run(in: directory, labels: labels)
         // Sweep once here as well as after each delete, so a server that runs for weeks without
         // deleting anything still clears out what expired while it was up.
         pruneTrash()
@@ -120,7 +135,7 @@ public struct DirectoryDocumentStore: DocumentStore {
                 let id = url.deletingPathExtension().lastPathComponent
                 return StoredDocInfo(
                     docId: id,
-                    name: id,
+                    name: labels.name(of: id) ?? id,
                     sizeBytes: values.fileSize ?? 0,
                     modifiedAt: values.contentModificationDate ?? .distantPast)
             }
@@ -140,6 +155,14 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func exists(docId: String) throws -> Bool {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
+    }
+
+    public func name(of docId: String) -> String? {
+        labels.name(of: storedDocId(matching: docId) ?? docId)
+    }
+
+    public func setName(_ name: String, for docId: String) throws {
+        try labels.set(name, for: storedDocId(matching: docId) ?? docId)
     }
 
     public func storedDocId(matching docId: String) -> String? {
@@ -184,6 +207,7 @@ public struct DirectoryDocumentStore: DocumentStore {
         } catch {
             try FileManager.default.removeItem(at: url)
         }
+        labels.remove(stem)
         // Tidying, after the part the user actually asked for. Never allowed to fail the delete.
         pruneTrash()
     }
@@ -249,9 +273,10 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// here. This server is cross-platform on purpose, so the resolution is now the server's own
     /// and identical everywhere.
     ///
-    /// Case-insensitive was chosen over exact-match because it is what macOS users already
-    /// experience and what the app's own browser assumes (it dedupes documents by name stem, so
-    /// "Chart" and "chart" were never really two documents).
+    /// A docId is now the document's `documentId` (a UUID the app mints), not the name a person
+    /// sees — that is a label (`DocumentLabels`). Case folding stays: an agent may type a UUID in
+    /// lower case, and a folder written before the identity migration may still hold a document
+    /// the migration left under its old name.
     ///
     /// The scan only runs when the exact name MISSES, so the ordinary hit — every repeat call on a
     /// document, including the byte-CAS `exists` check on every write — still costs one
@@ -280,9 +305,9 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// called `RAINFALL`, where macOS and Linux both leave it called `Rainfall`.
     ///
     /// That is not cosmetic, which is why it is worth an enumeration. A docId IS this server's
-    /// document identity — the filename stem the app captured when it opened the document, and what
-    /// the mirror, the holder index and every agent tool key off — so a silent re-spelling leaves a
-    /// device keyed on `Rainfall` and a server holding `RAINFALL` disagreeing about which document
+    /// document identity — the document's `documentId`, which the file is named by, and what the
+    /// mirror, the holder index and every agent tool key off — so a silent re-spelling leaves a
+    /// device keyed on one spelling and a server holding another disagreeing about which document
     /// they are syncing, on one platform only.
     ///
     /// The cost is deliberately kept OFF the read path: a save writes the whole document, beside
