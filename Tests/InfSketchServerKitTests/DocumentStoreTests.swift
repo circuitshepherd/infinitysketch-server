@@ -130,3 +130,51 @@ private func makeTempStore() throws -> (DirectoryDocumentStore, URL) {
         #expect(try store.load(docId: "Kept") == Data("doc".utf8))
     }
 }
+
+/// Fix round 1 of task 2.5: an exact id reaches its document without listing the store.
+@Suite struct ExactDocIdFastPathTests {
+    @Test func storesExactlyComparesTheSpellingOnDisk() throws {
+        let (store, _) = try makeTempStore()
+        try store.save(docId: "Chart-1", bytes: Fixtures.docBytes)
+        #expect(store.storesExactly(docId: "Chart-1"))
+        // On a case-insensitive filesystem `fileExists` alone would say yes here.
+        #expect(store.storesExactly(docId: "chart-1") == false)
+        #expect(store.storesExactly(docId: "Missing") == false)
+        #expect(store.storesExactly(docId: "../x") == false)
+    }
+
+    /// Counts `list()` so the fast path is observable.
+    final class ListCountingStore: DocumentStore, @unchecked Sendable {
+        let inner: DirectoryDocumentStore
+        private let lock = NSLock()
+        private var _lists = 0
+        var lists: Int { lock.withLock { _lists } }
+        init(_ inner: DirectoryDocumentStore) { self.inner = inner }
+        func list() throws -> [StoredDocInfo] { lock.withLock { _lists += 1 }; return try inner.list() }
+        func load(docId: String) throws -> Data { try inner.load(docId: docId) }
+        func save(docId: String, bytes: Data) throws { try inner.save(docId: docId, bytes: bytes) }
+        func exists(docId: String) throws -> Bool { try inner.exists(docId: docId) }
+        func delete(docId: String) throws { try inner.delete(docId: docId) }
+        func storedDocId(matching docId: String) -> String? {
+            lock.withLock { _lists += 1 }; return inner.storedDocId(matching: docId)
+        }
+        func storesExactly(docId: String) -> Bool { inner.storesExactly(docId: docId) }
+        func persistentServerId() -> String? { inner.persistentServerId() }
+        func name(of docId: String) -> String? { inner.name(of: docId) }
+        func setName(_ name: String, for docId: String) throws { try inner.setName(name, for: docId) }
+    }
+
+    @Test func anExactStoredIdResolvesWithoutListing() async throws {
+        let (dirStore, _) = try makeTempStore()
+        try dirStore.save(docId: "ID-1", bytes: Fixtures.docBytes)
+        try dirStore.setName("Chart", for: "ID-1")
+        let store = ListCountingStore(dirStore)
+        let manager = SessionManager(store: store)
+        let before = store.lists
+        #expect(await manager.resolveDocRef("ID-1") == .id("ID-1"))
+        #expect(store.lists == before)
+        // A name still needs the listing, and still resolves.
+        #expect(await manager.resolveDocRef("Chart") == .id("ID-1"))
+        #expect(store.lists > before)
+    }
+}

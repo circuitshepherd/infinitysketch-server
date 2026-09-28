@@ -2924,10 +2924,10 @@ public actor MCPAdapter {
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
-        let (resolved, refusal) = await resolvingDocRefs(arguments)
+        let (resolved, unresolved, refusal) = await resolvingDocRefs(arguments)
         if let refusal { return refusal }
         let arguments = resolved
-        let result = try await dispatchCallTool(name: name, arguments: arguments)
+        let result = try await dispatchCallTool(name: name, arguments: arguments, unresolvedKeys: unresolved)
         if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
            let docId = arguments?["docId"]?.stringValue {
             await history.recordLiveSelectionChange(docId: docId)
@@ -2971,21 +2971,26 @@ public actor MCPAdapter {
     /// A name two documents share is refused `ambiguousName`, never guessed. An unresolved
     /// reference is left as the caller wrote it (case-canonicalised): each tool answers
     /// `unknownDoc` for it, or — `replace_doc` — creates a document with that name.
+    ///
+    /// `unresolved` names the argument keys nothing carried, so a tool that acts on that
+    /// (`replace_doc` creates) reads THIS resolution rather than resolving a second time.
     private func resolvingDocRefs(_ arguments: [String: Value]?) async
-        -> (arguments: [String: Value]?, refusal: CallTool.Result?) {
-        guard var arguments else { return (nil, nil) }
+        -> (arguments: [String: Value]?, unresolved: Set<String>, refusal: CallTool.Result?) {
+        guard var arguments else { return (nil, [], nil) }
+        var unresolved: Set<String> = []
         for key in Self.docIdArgumentNames {
             guard case .string(let given)? = arguments[key] else { continue }
             switch await manager.resolveDocRef(given) {
             case .id(let id):
                 arguments[key] = .string(id)
             case .ambiguous(let candidates):
-                return (nil, Self.ambiguousNameResult(given, candidates))
+                return (nil, [], Self.ambiguousNameResult(given, candidates))
             case .unresolved:
                 arguments[key] = .string(await manager.canonicalDocId(given))
+                unresolved.insert(key)
             }
         }
-        return (arguments, nil)
+        return (arguments, unresolved, nil)
     }
 
     static func ambiguousNameResult(_ ref: String, _ candidates: [DocRefCandidate]) -> CallTool.Result {
@@ -3014,13 +3019,34 @@ public actor MCPAdapter {
         return errorResult("docExists: \"\(name)\" is \(noun) \(ids.joined(separator: ", "))")
     }
 
-    /// Claim `name` for a create: refused `creationInProgress` when another create is claiming it
-    /// right now, `docExists` when a document already has it; nil means the caller holds the
-    /// claim and must `releaseName` it.
+    /// The ONE normalisation every create door applies to a new document's name before claiming
+    /// it: surrounding whitespace trimmed (the label store trims too, so an untrimmed check would
+    /// pass `" Chart"` and then label a second "Chart"), and a blank name refused.
+    /// Nil for a blank name; the caller answers `blankNameResult`.
+    static func newDocumentName(_ raw: String) -> String? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
+    static func blankNameResult(_ argument: String) -> CallTool.Result {
+        errorResult("invalidArguments: \(argument) is blank")
+    }
+
+    /// Claim a NORMALISED `name` (`newDocumentName`) for a create: refused `creationInProgress`
+    /// when another create is claiming it right now, and `docExists` whenever the name already
+    /// REACHES a document — its name, its name in another case, or its id in any case. The last is
+    /// not pedantry: an id wins over a name in resolution, so a new document named after another's
+    /// id could never be reached by its name — every reference would silently address the other
+    /// document. Nil means the caller holds the claim and must `releaseName` it.
     private func claimNameForCreate(_ name: String) async -> CallTool.Result? {
         // Inserted before the first await, so two concurrent claims cannot both pass.
         guard namesBeingCreated.insert(name).inserted else { return Self.errorResult("creationInProgress") }
-        let taken = await documentIds(named: name)
+        let taken: [String]
+        switch await manager.resolveDocRef(name) {
+        case .unresolved: taken = await documentIds(named: name)   // belt and braces; normally empty
+        case .id(let id): taken = [id]
+        case .ambiguous(let candidates): taken = candidates.map(\.id)
+        }
         if !taken.isEmpty {
             namesBeingCreated.remove(name)
             return Self.nameTakenResult(name, ids: taken)
@@ -3041,9 +3067,15 @@ public actor MCPAdapter {
             docId: newId, createIfMissing: true,
             fullDoc: DocumentIdentity.settingDocumentId(in: bytes, to: newId), expectation: .absent
         ) { seq in reply(newId, seq) }
-        if result.isError != true {
-            do { try await manager.renameDoc(docId: newId, name: name) }
-            catch { await manager.labelDocument(docId: newId, name: name) }
+        guard result.isError != true else { return result }
+        // The name was validated by `newDocumentName` before the claim, so a failure here is a
+        // real fault (the label file could not be written) — said, never swallowed: the document
+        // exists, and the agent must not believe it can reach it by this name.
+        do {
+            try await manager.renameDoc(docId: newId, name: name)
+        } catch {
+            return Self.errorResult("internalError: created document \(newId) but could not name it "
+                                    + "\"\(name)\" (\(error)); address it by its id")
         }
         return result
     }
@@ -3162,7 +3194,8 @@ public actor MCPAdapter {
         return "Documents: \(shown)\(more)"
     }
 
-    private func dispatchCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
+    private func dispatchCallTool(name: String, arguments: [String: Value]?,
+                                  unresolvedKeys: Set<String>) async throws -> CallTool.Result {
         switch name {
         case "transform_elements": return await callTransformElements(arguments)
         case "undo_last_edit": return await callUndoLastEdit(arguments)
@@ -3181,7 +3214,7 @@ public actor MCPAdapter {
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
         case "set_paper": return await callSetPaper(arguments)
-        case "replace_doc": return await callReplaceDoc(arguments)
+        case "replace_doc": return await callReplaceDoc(arguments, docIdResolved: !unresolvedKeys.contains("docId"))
         case "create_doc": return await callCreateDoc(arguments)
         case "draw_strokes": return await callDrawStrokes(arguments)
         case "delete_strokes": return await callDeleteStrokes(arguments)
@@ -3788,7 +3821,7 @@ public actor MCPAdapter {
     /// write. `createIfMissing: true` is harmless in the existing-doc branch
     /// too (it only matters when no session and no stored doc exist), so one
     /// call covers both branches.
-    private func callReplaceDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
+    private func callReplaceDoc(_ arguments: [String: Value]?, docIdResolved: Bool) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let bytes = try Self.base64DataArg(arguments, "bytes")
@@ -3802,11 +3835,12 @@ public actor MCPAdapter {
             // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
             // A reference no document carries (by id or by name): a NEW document named by it, with
             // its own fresh id — the reference was never an id the agent could choose.
-            if case .unresolved = await manager.resolveDocRef(docId) {
-                if let refusal = await claimNameForCreate(docId) { return refusal }
-                defer { releaseName(docId) }
-                return await createNamedDocument(newId: mintDocumentId(), name: docId, bytes: bytes) { id, seq in
-                    Self.jsonText(["docId": id, "name": docId, "seq": seq])
+            if !docIdResolved {
+                guard let name = Self.newDocumentName(docId) else { return Self.blankNameResult("docId") }
+                if let refusal = await claimNameForCreate(name) { return refusal }
+                defer { releaseName(name) }
+                return await createNamedDocument(newId: mintDocumentId(), name: name, bytes: bytes) { id, seq in
+                    Self.jsonText(["docId": id, "name": name, "seq": seq])
                 }
             }
             let currentBytes = await manager.currentBytes(docId: docId)
@@ -3846,9 +3880,9 @@ public actor MCPAdapter {
     /// a device, so an existing docId never reaches (or wakes) the device.
     private func callCreateDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
-            let name = try Self.nonEmptyStringArg(arguments, "name")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return Self.errorResult("invalidArgument: name is blank") }
+            guard let name = Self.newDocumentName(try Self.stringArg(arguments, "name")) else {
+                return Self.blankNameResult("name")
+            }
             // A name any document already has — one document or several — is refused BEFORE a
             // device is woken: a second document of that name would make every later reference to
             // it ambiguous (controller ruling F13).
@@ -5699,7 +5733,11 @@ public actor MCPAdapter {
         do {
             let source = try Self.nonEmptyStringArg(arguments, "source")
             let target = try Self.nonEmptyStringArg(arguments, "target")
-            let into = try Self.optionalStringArg(arguments, "into")
+            var into = try Self.optionalStringArg(arguments, "into")
+            if let raw = into {
+                guard let normalised = Self.newDocumentName(raw) else { return Self.blankNameResult("into") }
+                into = normalised
+            }
             // `source`/`target` are ids by now (`resolvingDocRefs`); `into` is a new document's
             // NAME, refused below when a document already carries it.
             guard source != target else {

@@ -38,6 +38,9 @@ public protocol DocumentStore: Sendable {
     /// when nothing is stored under it. What `SessionManager` canonicalises docIds to, so one
     /// document is one session however a caller spells it.
     func storedDocId(matching docId: String) -> String?
+    /// Whether a document is stored under EXACTLY this spelling. A fast check for the common case
+    /// (a caller passing an id it was given), cheaper than `list()` or `storedDocId(matching:)`.
+    func storesExactly(docId: String) -> Bool
     /// A server-instance id that survives restarts, or nil when this store cannot keep one (the
     /// server then makes a random id per process). See `SessionManager.serverId`.
     func persistentServerId() -> String?
@@ -54,6 +57,8 @@ extension DocumentStore {
     public func storedDocId(matching docId: String) -> String? {
         (try? exists(docId: docId)) == true ? docId : nil
     }
+
+    public func storesExactly(docId: String) -> Bool { storedDocId(matching: docId) == docId }
 
     /// Stores with nowhere durable to keep it: a random id per server process.
     public func persistentServerId() -> String? { nil }
@@ -163,6 +168,17 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func setName(_ name: String, for docId: String) throws {
         try labels.set(name, for: storedDocId(matching: docId) ?? docId)
+    }
+
+    /// `fileExists` alone is not enough: on a case-insensitive filesystem (APFS, NTFS) it finds
+    /// `Chart.infsketch` for `chart`, and the spelling is what a session is keyed by. The directory's
+    /// NAMES are compared instead — no attributes, no labels, unlike `list()`.
+    public func storesExactly(docId: String) -> Bool {
+        guard let url = try? fileURL(for: docId),
+              FileManager.default.fileExists(atPath: url.path),
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return false }
+        return names.contains(url.lastPathComponent)
     }
 
     public func storedDocId(matching docId: String) -> String? {

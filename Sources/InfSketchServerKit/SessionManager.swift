@@ -864,6 +864,9 @@ public actor SessionManager {
     }
 
     public func resolveDocRef(_ ref: String) async -> DocRefResolution {
+        // An id always wins over a name (`DocRefResolver`), so an EXACT id hit needs no listing —
+        // and that is every call from an agent holding an id, or on an open document.
+        if sessions[ref] != nil || store.storesExactly(docId: ref) { return .id(ref) }
         var candidates = ((try? await listDocuments()) ?? []).map {
             DocRefCandidate(id: $0.id, name: $0.name, modifiedAt: $0.modifiedAt)
         }

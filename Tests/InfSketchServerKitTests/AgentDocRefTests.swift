@@ -213,6 +213,103 @@ struct AgentDocRefTests {
         #expect(text(content) == "docExists: \"Taken\" is document C-3")
     }
 
+    // MARK: - Fix round 1: one name normalisation, and a name must not reach another document
+
+    /// `" Chart"` names nothing, but the label store trims — so without the shared normalisation
+    /// the create door checked `" Chart"` and labelled a second "Chart".
+    @Test func replaceDocWithAPaddedTakenNameIsRefused() async throws {
+        let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let (content, isError) = try await c.callTool(
+            name: "replace_doc",
+            arguments: ["docId": " Chart ", "bytes": .string(Fixtures.docBytes.base64EncodedString())])
+        #expect(isError == true)
+        #expect(text(content) == "docExists: \"Chart\" is document A-1")
+        #expect(try store.list().count == 1)
+    }
+
+    @Test func createDocTrimsItsName() async throws {
+        let (_, port, task, store) = try await startServer(labelled: [:])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+        let (content, isError) = try await c.callTool(name: "create_doc", arguments: ["name": "  Plan \n"])
+        #expect(isError != true)
+        #expect(json(content)?["name"] as? String == "Plan")
+        #expect(try store.list().map(\.name) == ["Plan"])
+    }
+
+    /// A blank name is refused at every create door, never stored as an empty label.
+    @Test func aBlankNameIsRefusedAtEveryCreateDoor() async throws {
+        let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart", "B-2": "Other"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (merge, mergeError) = try await c.callTool(
+            name: "merge_docs", arguments: ["source": "Chart", "target": "Other", "into": "  "])
+        #expect(mergeError == true)
+        #expect(text(merge) == "invalidArguments: into is blank")
+
+        let (create, createError) = try await c.callTool(name: "create_doc", arguments: ["name": " "])
+        #expect(createError == true)
+        #expect(text(create) == "invalidArguments: name is blank")
+
+        let (replace, replaceError) = try await c.callTool(
+            name: "replace_doc", arguments: ["docId": "\t", "bytes": .string(Fixtures.docBytes.base64EncodedString())])
+        #expect(replaceError == true)
+        #expect(text(replace) == "invalidArguments: docId is blank")
+
+        #expect(try store.list().count == 2)
+        #expect(await device.receivedRequests.isEmpty)
+    }
+
+    /// An id wins over a name in resolution, so a new document NAMED after another's id could
+    /// never be reached by that name. Refused — in any case, and for a case-folded NAME too.
+    @Test(arguments: ["A-1", "a-1", "chart", "CHART"])
+    func createDocRefusesANameThatAlreadyReachesADocument(_ name: String) async throws {
+        let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+        let (content, isError) = try await c.callTool(name: "create_doc", arguments: ["name": .string(name)])
+        #expect(isError == true)
+        #expect(text(content) == "docExists: \"\(name)\" is document A-1")
+        #expect(await device.receivedRequests.isEmpty)
+        #expect(try store.list().count == 1)
+    }
+
+    /// The regression the old `into != source` guard covered, now with LABELLED documents: `into`
+    /// equal to the source's ID (the source is called "Chart", not "A-1").
+    @Test(arguments: ["A-1", "b-2"])
+    func mergeIntoAnotherDocumentsIdIsRefused(_ into: String) async throws {
+        let (_, port, task, _) = try await startServer(labelled: ["A-1": "Chart", "B-2": "Other"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let (content, isError) = try await c.callTool(
+            name: "merge_docs", arguments: ["source": "A-1", "target": "B-2", "into": .string(into)])
+        #expect(isError == true)
+        #expect(text(content) == "docExists: \"\(into)\" is document \(into.uppercased())")
+    }
+
+    /// `replace_doc` of a name that is another document's id in another case REPLACES that
+    /// document (the reference reaches it) — it never creates a look-alike.
+    @Test func replaceDocOfAFoldedIdReplacesThatDocument() async throws {
+        let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let (content, isError) = try await c.callTool(
+            name: "replace_doc",
+            arguments: ["docId": "a-1", "bytes": .string(Fixtures.docBytes.base64EncodedString())])
+        #expect(isError != true)
+        #expect(text(content).hasPrefix("replaced A-1"))
+        #expect(try store.list().map(\.docId) == ["A-1"])
+    }
+
     @Test func anUnknownDocumentListsNamesAndIds() async throws {
         let (_, port, task, _) = try await startServer(labelled: ["A-1": "Chart"])
         defer { task.cancel() }
