@@ -346,9 +346,49 @@ import InfSketchWire
     @Test func selfConsistentHugeDescriptorOpensWithoutTrapping() throws {
         // A consistent but absurd totalBytes must not trap on reserveCapacity;
         // it simply opens a transfer that will never complete.
+        // (An uncapped reassembler: the size cap would refuse this before reserveCapacity.)
         let d = TransferDescriptor(transferId: 0, totalBytes: Int.max - 7, chunkSize: 8)
-        var r = TransferReassembler<ServerMessage>()
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: .max)
         let opened = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
         #expect(opened == nil)
+    }
+
+    // MARK: bounds (review finding 17)
+
+    /// One peer declaring a huge transfer grew the server by hundreds of MB before anything cut
+    /// it. The declared size is known up front, so it is refused up front.
+    @Test func aDescriptorOverTheCapIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 1025, chunkSize: 512)
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: 1024)
+        #expect(throws: TransferWireError.transferTooLarge(totalBytes: 1025, limit: 1024)) {
+            _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        }
+    }
+
+    @Test func aDescriptorAtTheCapOpens() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 1024, chunkSize: 512)
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: 1024)
+        #expect(try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText())) == nil)
+    }
+
+    @Test func theDefaultCapIs512MB() {
+        #expect(TransferReassembler<ServerMessage>.defaultMaxTotalBytes == 512 * 1024 * 1024)
+    }
+
+    /// While transfers are not accepted (the server, before hello) neither a descriptor nor a chunk
+    /// may open or feed one; an ordinary message still passes.
+    @Test func transfersAreRefusedUntilAccepted() throws {
+        var r = TransferReassembler<ServerMessage>()
+        r.acceptsTransfers = false
+        #expect(try r.consume(.text(try ServerMessage.helloAck(protocolVersion: 1).jsonText())) == .helloAck(protocolVersion: 1))
+        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
+        #expect(throws: TransferWireError.transferBeforeHandshake) {
+            _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        }
+        var r2 = TransferReassembler<ServerMessage>()
+        r2.acceptsTransfers = false
+        #expect(throws: TransferWireError.transferBeforeHandshake) {
+            _ = try r2.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data([1]))))
+        }
     }
 }

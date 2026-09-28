@@ -51,6 +51,11 @@ public enum TransferWireError: Error, Equatable {
     case wrongTransferId(expected: UInt32, got: UInt32)
     case controlWithoutTransfer
     case invalidDescriptor
+    /// A descriptor declared more bytes than the receiver accepts in one transfer.
+    case transferTooLarge(totalBytes: Int, limit: Int)
+    /// A descriptor or chunk arrived while the receiver does not accept transfers (the server,
+    /// before `hello`).
+    case transferBeforeHandshake
 }
 
 /// Binary chunk message framing:
@@ -152,8 +157,22 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
         var isComplete: Bool { Int(nextIndex) == descriptor.chunkCount }
     }
     private var pending: Pending?
+    /// The largest `totalBytes` a descriptor may declare. The size is known the moment a transfer
+    /// is announced, so an absurd one is refused before a single chunk is buffered — one peer
+    /// declaring gigabytes otherwise grew the server by hundreds of MB (measured).
+    public let maxTotalBytes: Int
+    /// False refuses any transfer outright. The server keeps it false until `hello`: nothing an
+    /// unauthenticated peer says needs a chunked transfer, and before this a pre-hello peer
+    /// streamed 400 MB into one.
+    public var acceptsTransfers = true
 
-    public init() {}
+    /// 512 MB: far above any real document (the bundled examples are 2–6 MB), far below a memory
+    /// problem.
+    public static var defaultMaxTotalBytes: Int { 512 * 1024 * 1024 }
+
+    public init(maxTotalBytes: Int = Self.defaultMaxTotalBytes) {
+        self.maxTotalBytes = maxTotalBytes
+    }
 
     public mutating func consume(_ frame: WireFrame) throws -> Message? {
         switch frame {
@@ -183,8 +202,12 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
             }
         }
         if let descriptor = message.openingDescriptor {
+            guard acceptsTransfers else { throw TransferWireError.transferBeforeHandshake }
             guard pending == nil else { throw TransferWireError.transferAlreadyInFlight }
             guard descriptor.isSelfConsistent else { throw TransferWireError.invalidDescriptor }
+            guard descriptor.totalBytes <= maxTotalBytes else {
+                throw TransferWireError.transferTooLarge(totalBytes: descriptor.totalBytes, limit: maxTotalBytes)
+            }
             var buffer = Data()
             // Pre-size is only an optimization hint; Data grows amortized
             // beyond this clamp, so a self-consistent but absurd totalBytes
@@ -198,6 +221,7 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
     }
 
     private mutating func consumeBinary(_ data: Data) throws -> Message? {
+        guard acceptsTransfers else { throw TransferWireError.transferBeforeHandshake }
         let chunk = try ChunkFraming.decode(data)
         // Read only the cheap value fields through the optional — never bind a
         // second copy of `pending` (which owns the accumulated `Data` buffer).

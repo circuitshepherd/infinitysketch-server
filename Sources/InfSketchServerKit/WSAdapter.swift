@@ -53,7 +53,7 @@ actor Connection {
     private let manager: SessionManager
     private let output: AsyncStream<WSMessage>.Continuation
     private var sender: TransferSender<ServerMessage>
-    private var reassembler = TransferReassembler<ClientMessage>()
+    private var reassembler: TransferReassembler<ClientMessage>
     /// Whether this connection advertised `blobOmission` in its hello, i.e. whether a broadcast to
     /// it may leave out image blobs it already has.
     private var acceptsStrippedDocuments = false
@@ -84,6 +84,9 @@ actor Connection {
         self.manager = manager
         self.output = output
         self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
+        var reassembler = TransferReassembler<ClientMessage>(maxTotalBytes: config.maxTransferBytes)
+        reassembler.acceptsTransfers = false   // until hello
+        self.reassembler = reassembler
         self.broker = broker
         self.health = ConnectionHealth(
             byteBudget: config.outboundByteBudget,
@@ -110,8 +113,7 @@ actor Connection {
             wire = .binary(data)
         }
         let message: ClientMessage?
-        // TODO(hardening): frames reach the reassembler before the hello gate —
-        // when auth lands, gate or bound pre-hello transfer bytes.
+        // Transfers are refused before hello and capped in size by the reassembler itself.
         do {
             message = try reassembler.consume(wire)
         } catch let error as TransferWireError {
@@ -139,6 +141,7 @@ actor Connection {
             }
             helloed = true
             health.noteHello()
+            reassembler.acceptsTransfers = true
             self.deviceId = deviceId
             // Register with the broker whenever the connection advertises
             // any capability the broker brokers requests for — the broker

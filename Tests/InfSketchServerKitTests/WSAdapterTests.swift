@@ -360,6 +360,25 @@ private struct ServerMessageReader {
         #expect(await manager.liveInfo()["d"]?.seq == 1)
     }
 
+    /// Before hello nothing may open a transfer: a pre-hello peer streamed 400 MB into one.
+    @Test func aTransferBeforeHelloIsFatal() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        let d = TransferDescriptor(transferId: 0, totalBytes: 100, chunkSize: 8)
+        try harness.send(.op(docId: "d", opId: "early",
+                             payload: OpPayload(type: "fullDoc", bulk: .transfer(d))))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
+    }
+
+    @Test func aChunkBeforeHelloIsFatal() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        harness.sendBinary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8)))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
+    }
+
     @Test func unknownBinaryKindIsFatal() async throws {
         var (harness, reader, _) = try await subscribedHarness()
         harness.sendBinary(Data([0x7F]) + Data(count: 8))

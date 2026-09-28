@@ -82,6 +82,9 @@ public struct SessionConfig: Sendable {
     /// closed. An idle socket otherwise holds a file descriptor for ever, and enough of them end
     /// the server with EMFILE on `accept`. Observed at `keepaliveTickInterval` resolution.
     public var helloDeadline: Duration
+    /// The largest document or payload one inbound chunked transfer may declare. See
+    /// `TransferReassembler.maxTotalBytes`.
+    public var maxTransferBytes: Int
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -98,8 +101,10 @@ public struct SessionConfig: Sendable {
         keepaliveTickInterval: Duration = .seconds(5),
         assumedMinimumDrainRate: Int = 1024 * 1024,
         relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)],
-        helloDeadline: Duration = .seconds(10)
+        helloDeadline: Duration = .seconds(10),
+        maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes
     ) {
+        self.maxTransferBytes = maxTransferBytes
         self.helloDeadline = helloDeadline
         self.relayRetryDelays = relayRetryDelays
         self.gracePeriod = gracePeriod
