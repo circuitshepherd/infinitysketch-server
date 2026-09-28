@@ -38,6 +38,9 @@ public protocol DocumentStore: Sendable {
     /// when nothing is stored under it. What `SessionManager` canonicalises docIds to, so one
     /// document is one session however a caller spells it.
     func storedDocId(matching docId: String) -> String?
+    /// A server-instance id that survives restarts, or nil when this store cannot keep one (the
+    /// server then makes a random id per process). See `SessionManager.serverId`.
+    func persistentServerId() -> String?
 }
 
 extension DocumentStore {
@@ -46,6 +49,9 @@ extension DocumentStore {
     public func storedDocId(matching docId: String) -> String? {
         (try? exists(docId: docId)) == true ? docId : nil
     }
+
+    /// Stores with nowhere durable to keep it: a random id per server process.
+    public func persistentServerId() -> String? { nil }
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -71,6 +77,29 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// `<name>.sb-<hash>-<random>` beside the document on Darwin — and nothing ever removed one.
     /// At startup nothing of ours is writing, so any such file is an abandoned half-write. It can
     /// never surface as a document (`list()` filters on the extension); this only reclaims space.
+    /// The file holding this documents directory's server id. A dot-file, and without the
+    /// document extension, so `list()` can never report it as a document.
+    public static let serverIdFileName = ".server-id"
+
+    /// Read once per server start (`SessionManager.init`). Created on first use; a file that
+    /// cannot be read or written degrades to nil — a random id for this run — rather than failing
+    /// the server over bookkeeping.
+    public func persistentServerId() -> String? {
+        let url = directory.appendingPathComponent(Self.serverIdFileName)
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            let id = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty { return id }
+        }
+        let id = UUID().uuidString
+        do {
+            try Data((id + "\n").utf8).write(to: url, options: .atomic)
+            return id
+        } catch {
+            ServerLog.error("could not persist the server id at \(url.path): \(error)")
+            return nil
+        }
+    }
+
     private func sweepAtomicWriteLeftovers() {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
         for name in names where name.contains(".\(Self.fileExtension).sb-") {

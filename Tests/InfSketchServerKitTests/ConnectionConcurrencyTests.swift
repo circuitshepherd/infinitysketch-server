@@ -223,6 +223,6 @@ import InfSketchWire
         store.release()
         _ = await busy.value
         #expect(await harness.wait { await !$0.messages.isEmpty })
-        #expect(await harness.collector.messages.first == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(await harness.collector.messages.first))
     }
 }

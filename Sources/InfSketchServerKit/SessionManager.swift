@@ -62,9 +62,16 @@ public actor SessionManager {
     /// instead of each hitting a holder (the broker would reject the second with requestInFlight).
     private var inFlightFetches: [String: Task<Data, Error>] = [:]
 
+    /// This server INSTANCE's identity, sent in every `helloAck`. Persistent for a store that can
+    /// keep it (a documents directory keeps it in a file beside the documents), otherwise random
+    /// per process — an in-memory store's documents do not outlive the process either, so a new id
+    /// each run is the honest answer.
+    public nonisolated let serverId: String
+
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
         self.config = config
+        self.serverId = store.persistentServerId() ?? UUID().uuidString
     }
 
     // MARK: - docId letter case
@@ -450,10 +457,15 @@ public actor SessionManager {
     }
 
     /// Returns false when the doc has no live session (frame dropped).
-    public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?) async -> Bool {
+    /// `atSeq` is the seq of the bytes the device rendered, when it says so — the frame is then
+    /// stamped with it rather than with whatever seq is current on arrival (review finding 25: a
+    /// render that finished after a write was labelled as showing that write). Nil keeps the
+    /// arrival seq, which is all an older sender could offer.
+    public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?,
+                            atSeq: Int? = nil) async -> Bool {
         let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else { return false }
-        await session.submitFrame(bytes: bytes, canvasRect: canvasRect)
+        await session.submitFrame(bytes: bytes, canvasRect: canvasRect, atSeq: atSeq)
         return true
     }
 

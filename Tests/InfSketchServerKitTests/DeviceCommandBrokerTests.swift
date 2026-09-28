@@ -122,10 +122,11 @@ private actor SentBox {
         // a pending entry for `unregister` to fail. The fixed sleep did not
         // prove it: on a starved runner `requestCreation` had not yet run, so
         // `unregister` found nothing to fail and the request then threw
-        // `noDeviceAvailable` instead of `deviceTimeout`.
+        // `noDeviceAvailable` instead of `deviceDisconnected` (a clean close is not a
+        // timeout: v12 names it for what it is).
         _ = await sent.awaitMessage()
         await broker.unregister(connectionId: connectionId)
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceDisconnected) {
             _ = try await task.value
         }
     }

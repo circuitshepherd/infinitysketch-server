@@ -75,7 +75,7 @@ import InfSketchWire
     }
     @Test func bulklessMessageStaysSingleTextFrame() throws {
         var sender = TransferSender<ServerMessage>(inlineLimit: 0, chunkSize: 8)
-        let frames = try sender.frames(for: .helloAck(protocolVersion: 1))
+        let frames = try sender.frames(for: .helloAck(protocolVersion: 1, serverId: "s"))
         #expect(frames.count == 1)
     }
     @Test func largePayloadExpandsToDescriptorChunksEnd() throws {
@@ -380,7 +380,7 @@ import InfSketchWire
     @Test func transfersAreRefusedUntilAccepted() throws {
         var r = TransferReassembler<ServerMessage>()
         r.acceptsTransfers = false
-        #expect(try r.consume(.text(try ServerMessage.helloAck(protocolVersion: 1).jsonText())) == .helloAck(protocolVersion: 1))
+        #expect(try r.consume(.text(try ServerMessage.helloAck(protocolVersion: 1, serverId: "s").jsonText())) == .helloAck(protocolVersion: 1, serverId: "s"))
         let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
         #expect(throws: TransferWireError.transferBeforeHandshake) {
             _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))

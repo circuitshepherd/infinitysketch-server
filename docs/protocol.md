@@ -17,10 +17,21 @@ live in `InfSketchWire` (`TransferSender`, `TransferReassembler`); both directio
 ## Handshake and versioning
 
 The first message must be `hello(protocolVersion, capabilities, deviceId)`; the server answers
-`helloAck` or refuses. **Nothing else may be sent before `helloAck`** — a request sent early draws
-`error(helloRequired)` and costs the connection.
+`helloAck(protocolVersion, serverId)` or refuses with `error(unsupportedVersion:<server version>)`.
+**Nothing else may be sent before `helloAck`** — a request sent early draws
+`error(helloRequired)` and costs the connection. `serverId` names the server INSTANCE: persistent
+per documents directory (`.server-id` beside the documents), random per process for an injected
+store — a device keys what it last agreed with a server by it.
 
-The version check is **exact equality** (`WireProtocol.version`, currently 7), and that is
+A docId-less `error` is reserved for failures of the CONNECTION (`helloRequired`,
+`unsupportedVersion`, `malformedMessage`, `transferViolation`, and `listFailed` for a `listDocs`
+the store could not answer). Everything about one document names it: an op on a document the
+connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a second subscribe is
+`subscribeFailed(docId, "alreadySubscribed")`, deleting an absent document answers
+`docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
+browser page sends still answer with `error` — only pages watch.)
+
+The version check is **exact equality** (`WireProtocol.version`, currently 12), and that is
 deliberate: both decoders throw on an unknown message `type` rather than ignoring it, so an older
 peer does not degrade gracefully — it would die on the first message it cannot decode, arbitrarily
 long after connecting, with no diagnosable cause. Refusing at the handshake converts that into a
@@ -63,7 +74,13 @@ device that advertised the capability: `strokeOpRequest(requestId, docId, payloa
 the current document bytes plus an op-spec JSON; the device computes and answers `strokeOpReply`
 (and `createDocRequest`/`createDocReply` for new documents, which need the app's template). Replies
 are pure functions on the bytes — the document need not be open on the device and nothing touches
-its disk. The broker (`DeviceCommandBroker`) enforces per-kind timeouts.
+its disk. The broker (`DeviceCommandBroker`) enforces per-kind timeouts; a request whose device
+disconnects fails `deviceDisconnected` (and, for a pure op, is retried once on another device).
+
+Only `payload` is chunked, so nothing bulky may sit in `spec`: bulk op-spec fields, and since v12
+the WHOLE spec once it passes `OpSpecBundleWire.inlineSpecLimit` (64 KiB), travel inside the
+payload as an `OpSpecBundle` (`payloadKind: "opBundle"`), and the device splices them back before
+any op handler sees the spec. A text frame over 1 MiB drops the app's socket outright.
 
 ## Discovery, status, and live frames
 
@@ -74,7 +91,8 @@ its disk. The broker (`DeviceCommandBroker`) enforces per-kind timeouts.
 - `subscribeStatus` → `statusEvent` pushes (doc updated / deleted / subscriber changes) — what the
   web overview and the app's browser refresh from.
 - `watchDoc` / `unwatchDoc` — a browser viewing a document's page makes the device render live
-  frames (`frame`, ephemeral PNG, no seq, no persistence); `watchers` tells the device someone is
+  frames (`frame`, ephemeral PNG, no persistence; an optional `seq` names the document seq the
+  device rendered, which the server stamps the frame with instead of the arrival seq); `watchers` tells the device someone is
   looking, `frameAvailable` tells watchers a new frame exists.
 
 ## Keepalive and backpressure

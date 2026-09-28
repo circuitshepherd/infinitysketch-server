@@ -21,7 +21,14 @@ public enum WireProtocol {
     // The message SHAPE is unchanged, so nothing here would reject an older peer — but an older
     // app would read an `opBundle` payload as a document and hand an op garbage, so the exact
     // equality gate is what forces app and server to deploy together.
-    public static let version = 11
+    // v12: `helloAck` names the server INSTANCE (`serverId`, persistent per documents directory), so a
+    // device can tell one server from another at the same address; an op on a document the
+    // connection is not subscribed to is answered with a `reject` carrying its opId (it was a
+    // docId-less `error` that no push waiter ever heard, so a push sent into a refetch's
+    // unsubscribe→subscribe window waited forever); `alreadySubscribed` became a `subscribeFailed`;
+    // an oversized op-spec rides the chunked payload as an `OpSpecBundle` `spec` part; and a
+    // device's `frame` may say which seq it rendered.
+    public static let version = 12
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -233,7 +240,10 @@ public enum ClientMessage: Equatable, Sendable {
     /// lets a browser hold a canvas region still while the document's own bounds
     /// move underneath it; without it the frame's pixels silently change meaning.
     /// `nil` when the document draws nothing, so nothing is covered.
-    case frame(docId: String, payload: BulkPayload, canvasRect: [Double]?)
+    /// `seq` is the seq of the document bytes the frame was rendered FROM, when the device knows
+    /// it; the server then stamps the frame with it instead of the seq current on arrival, which a
+    /// render that finished after a write would otherwise claim.
+    case frame(docId: String, payload: BulkPayload, canvasRect: [Double]?, seq: Int? = nil)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
     /// `meta` (additive) rides small JSON inline — never chunked — alongside
     /// the (possibly chunked) PNG `payload`; see the `render` op (Task 4).
@@ -251,7 +261,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect
+        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq
     }
 
     public init(from decoder: any Decoder) throws {
@@ -304,7 +314,8 @@ extension ClientMessage: Codable {
                 payload = .inline(try c.decode(Data.self, forKey: .data))
             }
             self = .frame(docId: try c.decode(String.self, forKey: .docId), payload: payload,
-                          canvasRect: try c.decodeIfPresent([Double].self, forKey: .canvasRect))
+                          canvasRect: try c.decodeIfPresent([Double].self, forKey: .canvasRect),
+                          seq: try c.decodeIfPresent(Int.self, forKey: .seq))
         case "advertiseDocs":
             let payload: BulkPayload
             if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
@@ -396,7 +407,7 @@ extension ClientMessage: Codable {
         case .unwatchDoc(let docId):
             try c.encode("unwatchDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
-        case .frame(let docId, let payload, let canvasRect):
+        case .frame(let docId, let payload, let canvasRect, let seq):
             try c.encode("frame", forKey: .type)
             try c.encode(docId, forKey: .docId)
             switch payload {
@@ -404,6 +415,7 @@ extension ClientMessage: Codable {
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
             try c.encodeIfPresent(canvasRect, forKey: .canvasRect)
+            try c.encodeIfPresent(seq, forKey: .seq)
         case .advertiseDocs(let payload):
             try c.encode("advertiseDocs", forKey: .type)
             switch payload {
@@ -438,7 +450,11 @@ extension ClientMessage: Codable {
 }
 
 public enum ServerMessage: Equatable, Sendable {
-    case helloAck(protocolVersion: Int)
+    /// `serverId` names the server INSTANCE — stable for as long as its documents directory is
+    /// (persisted beside the documents), different for a different server at the same address. It
+    /// is what a device keys "what this server and I last agreed on" by: a lineage agreed with one
+    /// server is not a lineage with another.
+    case helloAck(protocolVersion: Int, serverId: String)
     case subscribed(docId: String, seq: Int, snapshot: BulkPayload)
     case event(docId: String, seq: Int, kind: String, opId: String, payload: OpPayload)
     case reject(docId: String, opId: String, reason: String, seq: Int)
@@ -471,14 +487,15 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .type) {
         case "helloAck":
-            self = .helloAck(protocolVersion: try c.decode(Int.self, forKey: .protocolVersion))
+            self = .helloAck(protocolVersion: try c.decode(Int.self, forKey: .protocolVersion),
+                             serverId: try c.decode(String.self, forKey: .serverId))
         case "subscribed":
             let snapshot: BulkPayload
             if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
@@ -562,9 +579,10 @@ extension ServerMessage: Codable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .helloAck(let v):
+        case .helloAck(let v, let serverId):
             try c.encode("helloAck", forKey: .type)
             try c.encode(v, forKey: .protocolVersion)
+            try c.encode(serverId, forKey: .serverId)
         case .subscribed(let docId, let seq, let snapshot):
             try c.encode("subscribed", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -664,7 +682,7 @@ extension ClientMessage: TransferCarrying {
     public var bulkBytes: Data? {
         switch self {
         case .op(_, _, let payload, _): return payload.bulk.inlineData
-        case .frame(_, let payload, _): return payload.inlineData
+        case .frame(_, let payload, _, _): return payload.inlineData
         case .advertiseDocs(let payload): return payload.inlineData
         case .createDocReply(_, _, let payload, _): return payload?.inlineData
         case .strokeOpReply(_, _, let payload, _, _, _): return payload?.inlineData
@@ -677,11 +695,12 @@ extension ClientMessage: TransferCarrying {
             return .op(docId: docId, opId: opId,
                        payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)),
                        expectation: expectation)
-        case .frame(let docId, _, let canvasRect):
-            // canvasRect rides through the swap for the same reason `meta` does below:
-            // chunking changes how the bytes travel, never what they are. Dropping it
+        case .frame(let docId, _, let canvasRect, let seq):
+            // canvasRect (and seq) ride through the swap for the same reason `meta` does below:
+            // chunking changes how the bytes travel, never what they are. Dropping either
             // here would be silent — the viewer's fallback is simply the old behaviour.
-            return .frame(docId: docId, payload: .transfer(descriptor), canvasRect: canvasRect)
+            return .frame(docId: docId, payload: .transfer(descriptor), canvasRect: canvasRect,
+                          seq: seq)
         case .advertiseDocs:
             return .advertiseDocs(payload: .transfer(descriptor))
         case .createDocReply(let requestId, let docId, _, let failureReason):
@@ -705,7 +724,7 @@ extension ClientMessage: TransferCarrying {
         case .op(_, _, let payload, _):
             if case .transfer(let d) = payload.bulk { return d }
             return nil
-        case .frame(_, .transfer(let d), _):
+        case .frame(_, .transfer(let d), _, _):
             return d
         case .advertiseDocs(.transfer(let d)):
             return d
@@ -723,8 +742,8 @@ extension ClientMessage: TransferCarrying {
         case .op(let docId, let opId, let payload, let expectation):
             return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes),
                        expectation: expectation)
-        case .frame(let docId, _, let canvasRect):
-            return .frame(docId: docId, payload: .inline(bytes), canvasRect: canvasRect)
+        case .frame(let docId, _, let canvasRect, let seq):
+            return .frame(docId: docId, payload: .inline(bytes), canvasRect: canvasRect, seq: seq)
         case .advertiseDocs:
             return .advertiseDocs(payload: .inline(bytes))
         case .createDocReply(let requestId, let docId, _, let failureReason):

@@ -32,6 +32,11 @@ public actor DeviceCommandBroker {
         case noDeviceAvailable
         case requestInFlight
         case deviceTimeout
+        /// The device's connection closed while the request was outstanding. Distinct from
+        /// `deviceTimeout` because the causes and the cures differ: a device that went away is
+        /// not slow, and a socket the device dropped (an oversized frame, the app backgrounded)
+        /// used to be reported as a timeout that nobody could explain.
+        case deviceDisconnected
         case deviceFailed(String)
     }
 
@@ -193,14 +198,14 @@ public actor DeviceCommandBroker {
     }
 
     /// WSAdapter calls on connection close. Fails that connection's pending
-    /// requests immediately with .deviceTimeout.
+    /// requests immediately with .deviceDisconnected.
     public func unregister(connectionId: UUID) {
         connections.removeAll { $0.id == connectionId }
         lastSentDocs[connectionId] = nil
         let affected = pending.filter { $0.value.connectionId == connectionId }.map(\.key)
         for requestId in affected {
             guard let entry = completePending(requestId) else { continue }
-            entry.continuation.resume(throwing: DeviceCommandError.deviceTimeout)
+            entry.continuation.resume(throwing: DeviceCommandError.deviceDisconnected)
         }
     }
 
@@ -278,13 +283,23 @@ public actor DeviceCommandBroker {
             // A strict WRAPPER around whatever the document payload already was, so the blob
             // omission above is unchanged and simply travels inside — the device unwraps this,
             // then resolves `primary` by its own kind exactly as before.
-            if !specParts.isEmpty {
+            // The spec itself goes the same way once it is too big to sit inline: the text frame
+            // is never chunked, and a spec of a few thousand full-attribute points (a large
+            // `reshape_strokes`) passed the 1 MiB the app's socket receives — which drops the
+            // connection instead of refusing the message.
+            var parts = specParts
+            var inlineSpec = spec
+            if spec.count > OpSpecBundleWire.inlineSpecLimit {
+                parts[.spec] = spec
+                inlineSpec = Data("{}".utf8)
+            }
+            if !parts.isEmpty {
                 let bundle = OpSpecBundle(primary: payload.bytes, primaryKind: payload.kind,
-                                          parts: specParts)
+                                          parts: parts)
                 payload = (bundle.encoded(), OpSpecBundleWire.kind)
             }
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
-                                             payload: .inline(payload.bytes), spec: spec,
+                                             payload: .inline(payload.bytes), spec: inlineSpec,
                                              payloadKind: payload.kind))
         }
     }
@@ -422,16 +437,17 @@ public actor DeviceCommandBroker {
             return try await performRequest(
                 on: first, docId: docId, timeout: timeout, sentBytes: sentBytes,
                 takesDocumentLock: takesDocumentLock, send: send)
-        } catch DeviceCommandError.deviceTimeout
-            where deviceId == nil && !Self.neverRetriedCapabilities.contains(capability) {
+        } catch let error as DeviceCommandError
+            where (error == .deviceTimeout || error == .deviceDisconnected)
+                && deviceId == nil && !Self.neverRetriedCapabilities.contains(capability) {
             // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
-            // device that answers late costs nothing but a discarded reply. A request addressed to
-            // one named device (a holder fetch) has no other device to ask.
+            // device that answers late (or went away) costs nothing but a discarded reply. A
+            // request addressed to one named device (a holder fetch) has no other device to ask.
             guard let next = pickConnection(capability: capability, deviceId: nil,
                                             excluding: [first.id]) else {
-                throw DeviceCommandError.deviceTimeout
+                throw error
             }
-            ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)' timed out; retrying once on another device")
+            ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)' failed (\(error)); retrying once on another device")
             return try await performRequest(
                 on: next, docId: docId, timeout: timeout, sentBytes: sentBytes,
                 takesDocumentLock: takesDocumentLock, send: send)

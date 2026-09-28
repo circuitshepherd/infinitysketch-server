@@ -3708,6 +3708,7 @@ public actor MCPAdapter {
                 // `.requestInFlight`.
                 case .requestInFlight: return Self.errorResult("creationInProgress")
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
+                case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
                 }
             } catch {
@@ -5734,6 +5735,7 @@ public actor MCPAdapter {
         case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
         case .requestInFlight: return Self.errorResult("opInProgress")
         case .deviceTimeout: return Self.errorResult("deviceTimeout")
+        case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
         case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
         }
     }

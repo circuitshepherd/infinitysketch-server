@@ -306,7 +306,7 @@ private actor FakeCreateDocDevice {
         ws.resume()
         try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
+        guard isCurrentHelloAck(ack) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }
@@ -405,7 +405,7 @@ private actor FakeStrokeOpDevice {
         ws.resume()
         try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: Array(capabilities), deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
+        guard isCurrentHelloAck(ack) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         if let subscribeTo {

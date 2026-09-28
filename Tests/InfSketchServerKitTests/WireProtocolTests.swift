@@ -26,7 +26,10 @@ import InfSketchWire
         /// `spec` and into the chunked payload as an `OpSpecBundle`. The message shape did not
         /// change, so nothing would reject a stale peer — it would read the bundle as a document
         /// and hand an op garbage, which is precisely why the version had to move.
-        #expect(WireProtocol.version == 11)
+        /// v12 (2026-09-28): `helloAck.serverId`, `frame.seq`, the `spec` bundle part, and per-document
+        /// answers (`reject notSubscribed`, `subscribeFailed alreadySubscribed`) where a docId-less
+        /// `error` used to fail every pending request on the connection.
+        #expect(WireProtocol.version == 12)
     }
 
     @Test func clientMessagesRoundTrip() throws {
@@ -47,7 +50,7 @@ import InfSketchWire
 
     @Test func serverMessagesRoundTrip() throws {
         let messages: [ServerMessage] = [
-            .helloAck(protocolVersion: 1),
+            .helloAck(protocolVersion: 1, serverId: "s"),
             .subscribed(docId: "a", seq: 0, snapshot: .inline(Data([9]))),
             .event(docId: "a", seq: 1, kind: "op", opId: "c1-1",
                    payload: OpPayload(type: "fullDoc", data: Data([1]))),
@@ -177,7 +180,7 @@ import InfSketchWire
         let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])), canvasRect: nil)
         let decoded = try ClientMessage(jsonText: f.jsonText())
         #expect(decoded == f)
-        guard case .frame(_, _, let rect) = decoded else { return #expect(Bool(false)) }
+        guard case .frame(_, _, let rect, _) = decoded else { return #expect(Bool(false)) }
         #expect(rect == nil)
     }
     @Test func frameMessageRoundTripsAsDescriptor() throws {

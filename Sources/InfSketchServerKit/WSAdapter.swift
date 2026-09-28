@@ -179,7 +179,10 @@ actor Connection {
         switch message {
         case .hello(let version, let capabilities, let deviceId):
             guard version == WireProtocol.version else {
-                emit(.error(reason: "unsupportedVersion"))
+                // Names the server's own version after the colon, so a device can tell the person
+                // which side is behind — a mismatch that shows only a gray dot looks exactly like
+                // "offline" (review finding 14). Older servers sent the bare word; the app reads both.
+                emit(.error(reason: "unsupportedVersion:\(WireProtocol.version)"))
                 await close()
                 return
             }
@@ -228,7 +231,7 @@ actor Connection {
             // that reached it first failed the handshake and cost the connection (review finding
             // 14a — the mirror image of the rule the app keeps for itself). `emit` does not
             // suspend, so nothing can slip in between.
-            emit(.helloAck(protocolVersion: WireProtocol.version))
+            emit(.helloAck(protocolVersion: WireProtocol.version, serverId: manager.serverId))
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
@@ -255,8 +258,10 @@ actor Connection {
 
         case .subscribe(let docId, _, let createIfMissing):
             // v0: fromSeq ignored — always a full snapshot.
+            // Per-document, so it names its document: a docId-less `error` here failed EVERY
+            // pending subscribe on the connection, other documents' opens included.
             guard docSubscriptions[docId] == nil else {
-                return emit(.error(reason: "alreadySubscribed"))
+                return emit(.subscribeFailed(docId: docId, reason: "alreadySubscribed"))
             }
             do {
                 let result = try await manager.subscribe(
@@ -296,8 +301,17 @@ actor Connection {
             do {
                 try await manager.deleteDoc(docId: docId)
                 emit(.docDeleted(docId: docId))
+            } catch DocumentStoreError.notFound {
+                // Deleting what is not there leaves the goal state holding: answer as if it had
+                // just been deleted. Idempotent, like the app's own "delete while offline" — and
+                // a docId-less `error` here would have failed every pending subscribe on the
+                // connection.
+                emit(.docDeleted(docId: docId))
             } catch {
-                emit(.error(reason: "unknownDoc"))
+                // A store failure, not an absence: the document may well still be there, so it is
+                // not reported deleted. Nothing waits on this reply (the app's delete is
+                // fire-and-forget), and a docId-less `error` would fail unrelated requests.
+                ServerLog.error("deleteDoc '\(docId)' failed: \(error)")
             }
 
         case .op(let docId, let opId, let payload, let expectation):
@@ -305,8 +319,13 @@ actor Connection {
             // anything can queue — including behind this document's own pending subscribe: the gap
             // between that and the session actor picking it up is the QUEUE, and it is only
             // knowable from outside the actor. Free when telemetry is off — a clock read.
+            // A `reject` naming the op, not a docId-less `error`: the app waits for the answer to
+            // every push it sends, and an error with no opId answered nobody — a push sent into a
+            // refetch's unsubscribe→subscribe window waited for as long as the connection lived,
+            // wedging that document's pushes and, for a close push, its whole lifecycle chain
+            // (review finding 10). Seq 0: there is no subscription to report one from.
             guard docSubscriptions[docId] != nil else {
-                return emit(.error(reason: "notSubscribed"))
+                return emit(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
             }
             // WS submitters take their ack from the broadcast echo (which
             // carries the assigned seq), so only a rejection needs
@@ -371,15 +390,20 @@ actor Connection {
                 await manager.unwatch(docId: docId, token: watch.token)
             }
 
-        case .frame(let docId, let payload, let canvasRect):
+        case .frame(let docId, let payload, let canvasRect, let seq):
+            // A frame is a fire-and-forget hint nobody waits on, so one that lands after the
+            // device unsubscribed (a render finishing across a close) is simply dropped. As an
+            // `error` it failed every pending subscribe on the connection.
             guard docSubscriptions[docId] != nil else {
-                return emit(.error(reason: "notSubscribed"))
+                ServerLog.verbose("[frame] ignored a frame for '\(docId)': not subscribed on this connection")
+                return
             }
             guard case .inline(let bytes) = payload else {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
-            if await manager.submitFrame(docId: docId, bytes: bytes, canvasRect: canvasRect) == false {
-                emit(.error(reason: "unknownDoc"))
+            if await manager.submitFrame(docId: docId, bytes: bytes, canvasRect: canvasRect,
+                                         atSeq: seq) == false {
+                ServerLog.verbose("[frame] ignored a frame for '\(docId)': no session")
             }
 
         case .createDocReply(let requestId, _, let payload, let failureReason):
@@ -652,7 +676,7 @@ extension ClientMessage {
         switch self {
         case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
              .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
-             .frame(let docId, _, _):
+             .frame(let docId, _, _, _):
             return docId
         default:
             return nil
