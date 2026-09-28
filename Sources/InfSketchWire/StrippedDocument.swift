@@ -159,6 +159,14 @@ public struct BlobRunIndex: Sendable, Equatable {
         runs = DocumentBlobs.escapedRuns(in: document)
     }
 
+    /// An index over blobs the caller already holds OUTSIDE any document — the server's version
+    /// store keeps each image once in `.blobs/` and rebuilds a stored version from them. Only as
+    /// good as the caller's bytes: `restore` still splices exactly what is here, and the caller
+    /// still verifies the rebuild against its digest.
+    public init(runs: [UUID: [BlobField: Data]]) {
+        self.runs = runs
+    }
+
     public var isEmpty: Bool { runs.isEmpty }
 }
 
