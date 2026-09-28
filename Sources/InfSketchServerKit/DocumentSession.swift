@@ -305,6 +305,13 @@ actor DocumentSession {
         if let px = framePx, px > 0 {
             watcherFramePx[token] = min(px, Self.maxWatcherFramePx)
         }
+        // A new watcher learns at once that a frame is there to fetch. Without this nudge a
+        // page that reconnected (a laptop waking with the tab in front, a server restart) kept
+        // its pre-disconnect picture until the next edit: the cached frame is current, so the
+        // device renders nothing and no other nudge ever comes (review finding 24).
+        if let frame = latestFrame {
+            continuation.yield(.frameAvailable(docId: docId, seq: frame.seq))
+        }
         notifyWatcherCount()
         return WatchResult(events: stream, token: token)
     }
