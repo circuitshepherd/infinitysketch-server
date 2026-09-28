@@ -114,4 +114,17 @@ import InfSketchWire
         #expect(store.name(of: "ID-5") == "Recovered")
         #expect(store.name(of: "id-5") == "Recovered")
     }
+
+    /// Deleting an ADVERTISED-ONLY document drops its label too: a label outranks every later
+    /// advertisement, so a leftover one would name a re-created document with the deleted one's name.
+    @Test func deletingAnAdvertisedOnlyDocumentDropsItsLabel() async throws {
+        let (manager, store) = try manager()
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ID-9", name: "Plan", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        try await manager.renameDoc(docId: "ID-9", name: "Budget")
+        #expect(store.name(of: "ID-9") == "Budget")
+        try await manager.deleteDoc(docId: "ID-9")
+        #expect(store.name(of: "ID-9") == nil)
+    }
 }

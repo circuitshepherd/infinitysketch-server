@@ -449,6 +449,11 @@ public actor SessionManager {
             try await session.deleteFromStore()
         } else if hadContent {
             try store.delete(docId: docId)
+        } else {
+            // Advertised only: no bytes to trash, but a `renameDoc` label may be stored — and a
+            // label outranks every later advertisement, so left behind it would name whatever is
+            // next advertised under this id with the deleted document's name.
+            store.removeName(for: docId)
         }
         ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(holders)")
 

@@ -49,6 +49,9 @@ public protocol DocumentStore: Sendable {
     func name(of docId: String) -> String?
     /// Records `name` as `docId`'s label.
     func setName(_ name: String, for docId: String) throws
+    /// Forgets `docId`'s label (a document deleted without stored bytes — `delete` drops the label
+    /// of a stored one itself).
+    func removeName(for docId: String)
 }
 
 extension DocumentStore {
@@ -66,6 +69,7 @@ extension DocumentStore {
     /// Stores that keep no labels: every document is shown by its id.
     public func name(of docId: String) -> String? { nil }
     public func setName(_ name: String, for docId: String) throws {}
+    public func removeName(for docId: String) {}
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -170,6 +174,11 @@ public struct DirectoryDocumentStore: DocumentStore {
         try labels.set(name, for: storedDocId(matching: docId) ?? docId)
     }
 
+    public func removeName(for docId: String) {
+        let wanted = docId.lowercased()
+        for key in labels.all().keys where key.lowercased() == wanted { labels.remove(key) }
+    }
+
     /// `fileExists` alone is not enough: on a case-insensitive filesystem (APFS, NTFS) it finds
     /// `Chart.infsketch` for `chart`, and the spelling is what a session is keyed by. The directory's
     /// NAMES are compared instead — no attributes, no labels, unlike `list()`.
@@ -216,10 +225,18 @@ public struct DirectoryDocumentStore: DocumentStore {
         let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let stamped = "\(Self.trashedStem(docId: stem, name: labels.name(of: stem)))__\(Self.trashStamp())"
-            try FileManager.default.moveItem(
-                at: url,
-                to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))
+            let stamp = Self.trashStamp()
+            let named = "\(Self.trashedStem(docId: stem, name: labels.name(of: stem)))__\(stamp)"
+            do {
+                try FileManager.default.moveItem(
+                    at: url, to: trashDir.appendingPathComponent(named).appendingPathExtension(Self.fileExtension))
+            } catch {
+                // The readable name is the only part a file system can refuse (a length or
+                // character rule we did not foresee): retry with the bare id before the outright
+                // removal below — which destroys the document — is ever reached.
+                try FileManager.default.moveItem(
+                    at: url, to: trashDir.appendingPathComponent("\(stem)__\(stamp)").appendingPathExtension(Self.fileExtension))
+            }
         } catch {
             try FileManager.default.removeItem(at: url)
         }
@@ -232,22 +249,40 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// document has no label or is labelled by its own id. The label is dropped with the document,
     /// and a docId (a UUID) says nothing to a person looking for what they deleted — so the name
     /// travels in the file name, readable in any file browser. Characters no file system accepts
-    /// become `_`, and a very long name is cut.
+    /// become `_`, and a long name is cut to `trashNameByteLimit` bytes.
+    /// The readable name's budget in UTF-8 BYTES. File-name limits are bytes (255 on ext4 and
+    /// APFS), and a Character can be many of them: 100 emoji are 400 bytes, and a too-long name
+    /// makes the move fail. 150 leaves room for a legacy id, ` ()`, the stamp and the extension.
+    static let trashNameByteLimit = 150
+
     static func trashedStem(docId: String, name: String?) -> String {
         guard let name else { return docId }
-        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters)
+        // Control characters (Cc) only — not `CharacterSet.controlCharacters`, which also holds the
+        // format characters (Cf) such as the zero-width joiner inside every family emoji.
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|")
         var readable = String(String.UnicodeScalarView(name.unicodeScalars.map {
-            forbidden.contains($0) ? "_" : $0
+            forbidden.contains($0) || $0.properties.generalCategory == .control ? "_" : $0
         })).trimmingCharacters(in: .whitespaces)
         while readable.hasPrefix(".") { readable.removeFirst() }
-        if readable.count > 100 { readable = String(readable.prefix(100)) }
+        if readable.utf8.count > trashNameByteLimit {
+            // Cut on a Character boundary: whole grapheme clusters only, never half an emoji.
+            var cut = ""
+            for character in readable {
+                guard cut.utf8.count + String(character).utf8.count <= trashNameByteLimit else { break }
+                cut.append(character)
+            }
+            readable = cut.trimmingCharacters(in: .whitespaces)
+        }
         guard !readable.isEmpty, readable != docId else { return docId }
         return "\(docId) (\(readable))"
     }
 
     /// What a trashed file's basename says: the document's id, its name when the file carries one,
     /// and when it was deleted. Read from the RIGHT like `trashDate`: the stamp after the last
-    /// `__`, then `<docId> (<name>)` split at the FIRST ` (` — an id never contains one, a name may.
+    /// `__`, then `<docId> (<name>)` split at the FIRST ` (` — a minted id (a UUID) never contains
+    /// one, a name may. A LEGACY id (a pre-identity file name the migration left in place, e.g. one
+    /// that could not carry an id) can: such an entry splits inside its id, and the name read back
+    /// is wrong. Only the file name is affected — the document inside is whole.
     /// A file trashed before names were kept parses with `name` nil.
     static func trashedDocument(fromTrashedBasename basename: String)
         -> (docId: String, name: String?, deletedAt: Date)? {

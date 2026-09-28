@@ -191,4 +191,34 @@ struct TrashPruningTests {
 
         #expect(!trashNames(dir).contains { $0.hasPrefix("ID-1 (Ancient)__") })
     }
+
+    /// A file name is limited in BYTES (255 on ext4 and APFS), not Characters: 100 emoji are 400
+    /// bytes. The move into the trash must still succeed — its fallback used to REMOVE the document.
+    @Test(arguments: [
+        String(repeating: "😀", count: 100),
+        String(repeating: "設計図の最終版", count: 12),
+    ])
+    func aLongMultibyteNameStillLandsInTheTrash(name: String) throws {
+        let (store, dir) = try makeStore()
+        try store.save(docId: "ID-8", bytes: Data("x".utf8))
+        try store.setName(name, for: "ID-8")
+
+        try store.delete(docId: "ID-8")
+
+        let names = trashNames(dir)
+        #expect(names.count == 1, "the document must be in the trash, not removed: \(names)")
+        let trashed = try #require(names.first)
+        #expect(trashed.utf8.count <= 255)
+        let parsed = DirectoryDocumentStore.trashedDocument(
+            fromTrashedBasename: (trashed as NSString).deletingPathExtension)
+        #expect(parsed?.docId == "ID-8")
+        #expect(parsed?.name.map { name.hasPrefix($0) } == true, "a prefix of the name, cut on a Character")
+    }
+
+    /// The readable part is bounded by UTF-8 bytes and cut on a Character boundary.
+    @Test func theReadableNameIsBoundedInBytes() {
+        let stem = DirectoryDocumentStore.trashedStem(docId: "ID", name: String(repeating: "👨‍👩‍👧", count: 40))
+        #expect(stem.utf8.count <= "ID ()".utf8.count + DirectoryDocumentStore.trashNameByteLimit)
+        #expect(stem.hasSuffix("👨‍👩‍👧)"))
+    }
 }
