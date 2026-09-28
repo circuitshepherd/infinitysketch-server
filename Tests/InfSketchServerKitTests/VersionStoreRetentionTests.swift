@@ -402,4 +402,111 @@ import InfSketchWire
             }
         }
     }
+
+    // MARK: - Fix round 2 (re-review finding 4): the quarantine must protect EVERY version of the
+    // document for as long as it sits there, not only the one call that discovered the corruption.
+
+    /// A tiny locked box for capturing `ServerLog.error` lines — the sink is process-global
+    /// (`ServerLogTests`' own note), so this checks by `contains`, never by exact equality.
+    private final class LogCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [String] = []
+        func append(_ line: String) { lock.lock(); storage.append(line); lock.unlock() }
+        var lines: [String] { lock.lock(); defer { lock.unlock() }; return storage }
+    }
+
+    /// (a) The quarantine must survive far more than the ONE call that discovers it: 20 further
+    /// writes and a `setHold` must sweep NOTHING for this document while the quarantine file sits
+    /// there — not merely skip the sweep of the call that found the corruption (fix round 1's
+    /// narrower behaviour, which the re-review found insufficient: the very next call would read
+    /// the fresh, devices-empty index as `.ok` and sweep normally against it).
+    @Test func quarantineProtectsEveryVersionUntilExplicitlyLifted() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        let all = versions(12)
+        try store.record(docId: "doc", bytes: all[0].bytes, hash: all[0].hash)
+        store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: all[0].hash, now: Date())
+        for v in all.dropFirst() { try store.record(docId: "doc", bytes: v.bytes, hash: v.hash) }
+        let docDir = dir.appendingPathComponent(".versions/doc")
+        let beforeCorruption = Set(try FileManager.default.contentsOfDirectory(atPath: docDir.path)
+            .filter { VersionHash.isWellFormed($0) })
+        try Data("not json".utf8).write(to: docDir.appendingPathComponent(DirectoryVersionStore.holdsFileName),
+                                         options: .atomic)
+        // The first record after corruption discovers and quarantines it.
+        let extra0 = VersionFixtures.document(marker: "extra0")
+        try store.record(docId: "doc", bytes: extra0, hash: VersionDigest.hex(of: extra0))
+        // 20 further writes, far past the recent-8 window, plus a setHold — none of these may sweep
+        // anything away while the quarantine file sits there.
+        for i in 0..<20 {
+            let v = VersionFixtures.document(marker: "post\(i)")
+            try store.record(docId: "doc", bytes: v, hash: VersionDigest.hex(of: v))
+        }
+        store.setHold(docId: "doc", deviceId: "iphone", slot: .pushed, hash: nil, now: Date())
+        #expect(store.load(docId: "doc", hash: all[0].hash) == all[0].bytes,
+                "the version the lost hold named must still load after many further writes and a setHold")
+        let afterMany = Set(try FileManager.default.contentsOfDirectory(atPath: docDir.path)
+            .filter { VersionHash.isWellFormed($0) })
+        #expect(beforeCorruption.isSubset(of: afterMany),
+                "no version present before the corruption was discovered may be deleted while quarantined")
+        #expect(afterMany.count == beforeCorruption.count + 21,
+                "every one of the 21 post-corruption writes must ALSO still be present — nothing was ever swept")
+    }
+
+    /// (b) `setHold` may be the very first call to reach a corrupted index (no `record` in between)
+    /// — it must quarantine and log exactly as `record` does, not silently answer as if nothing
+    /// were held.
+    @Test func corruptionDiscoveredThroughSetHoldIsQuarantinedAndLogged() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        let v = VersionFixtures.document(marker: "v")
+        let hash = VersionDigest.hex(of: v)
+        try store.record(docId: "doc", bytes: v, hash: hash)
+        let docDir = dir.appendingPathComponent(".versions/doc")
+        try Data("not json".utf8).write(to: docDir.appendingPathComponent(DirectoryVersionStore.holdsFileName),
+                                         options: .atomic)
+
+        let originalSink = ServerLog.errorSink
+        let captured = LogCapture()
+        ServerLog.errorSink = { captured.append($0) }
+        defer { ServerLog.errorSink = originalSink }
+
+        // record() is never called again — setHold is the first (and only) call to see this.
+        _ = store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: hash, now: Date())
+
+        let entries = try FileManager.default.contentsOfDirectory(atPath: docDir.path)
+        #expect(entries.contains { $0.hasPrefix("\(DirectoryVersionStore.holdsFileName).corrupt-") },
+                "setHold must quarantine an unreadable index itself, not merely fail silently")
+        #expect(captured.lines.contains { $0.contains("holds.json did not decode") },
+                "setHold must log the corruption the same way record does")
+    }
+
+    /// (c) The protection ends only by an explicit action — never by time or by writes. Once the
+    /// quarantine file is gone, the very next write sweeps normally again.
+    @Test func removingTheQuarantineFileRestoresNormalRetentionOnTheNextWrite() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        let all = versions(12)
+        try store.record(docId: "doc", bytes: all[0].bytes, hash: all[0].hash)
+        store.setHold(docId: "doc", deviceId: "ipad", slot: .base, hash: all[0].hash, now: Date())
+        for v in all.dropFirst() { try store.record(docId: "doc", bytes: v.bytes, hash: v.hash) }
+        let docDir = dir.appendingPathComponent(".versions/doc")
+        try Data("not json".utf8).write(to: docDir.appendingPathComponent(DirectoryVersionStore.holdsFileName),
+                                         options: .atomic)
+        let extra = VersionFixtures.document(marker: "extra")
+        try store.record(docId: "doc", bytes: extra, hash: VersionDigest.hex(of: extra))
+        #expect(store.contains(docId: "doc", hash: all[0].hash), "still protected while quarantined")
+
+        let quarantineFiles = try FileManager.default.contentsOfDirectory(atPath: docDir.path)
+            .filter { $0.hasPrefix("\(DirectoryVersionStore.holdsFileName).corrupt-") }
+        #expect(quarantineFiles.count == 1)
+        for name in quarantineFiles { try FileManager.default.removeItem(at: docDir.appendingPathComponent(name)) }
+
+        // The very next write: all[0] is named nowhere in the fresh index started at quarantine
+        // time (no devices, and it long ago fell out of `recent`/`current`), so an ordinary sweep
+        // removes it now that retention is no longer suspended.
+        let after = VersionFixtures.document(marker: "after")
+        try store.record(docId: "doc", bytes: after, hash: VersionDigest.hex(of: after))
+        #expect(store.contains(docId: "doc", hash: all[0].hash) == false,
+                "normal retention must resume on the very next write once the quarantine file is gone")
+    }
 }
