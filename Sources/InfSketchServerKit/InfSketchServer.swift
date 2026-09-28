@@ -1,5 +1,6 @@
 import Foundation
 import FlyingFox
+import FlyingSocks
 
 public struct DocSummary: Codable, Equatable, Sendable {
     public var id: String
@@ -77,7 +78,19 @@ public final class InfSketchServer: Sendable {
         // The logger is passed EXPLICITLY, never defaulted: FlyingFox's default prints to stdout on
         // every non-Apple platform, which made the quiet console Apple-only by accident. See
         // `ServerLogHTTPLogging`.
-        self.http = HTTPServer(port: port, logger: ServerLogHTTPLogging())
+        //
+        // The pool is wrapped so a peer that stops reading loses its SOCKET, not only its
+        // subscriptions — see `WriteStallTimeoutPool`. The address mirrors FlyingFox's own
+        // `init(port:)`, which cannot take a pool.
+        #if canImport(WinSDK)
+        let address = sockaddr_in.inet(port: port)
+        #else
+        let address = sockaddr_in6.inet6(port: port)
+        #endif
+        self.http = HTTPServer(config: HTTPServer.Configuration(
+            address: address,
+            pool: WriteStallTimeoutPool(inner: HTTPServer.defaultPool(), timeout: config.writeStallTimeout),
+            logger: ServerLogHTTPLogging()))
         self.config = config
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(

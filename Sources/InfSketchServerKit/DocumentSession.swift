@@ -85,6 +85,10 @@ public struct SessionConfig: Sendable {
     /// The largest document or payload one inbound chunked transfer may declare. See
     /// `TransferReassembler.maxTotalBytes`.
     public var maxTransferBytes: Int
+    /// A socket write that has seen no drain for this long fails, which closes the connection.
+    /// See `WriteStallTimeoutPool`: it is the only way a peer that stopped reading actually loses
+    /// its socket rather than just its subscriptions.
+    public var writeStallTimeout: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -102,8 +106,10 @@ public struct SessionConfig: Sendable {
         assumedMinimumDrainRate: Int = 1024 * 1024,
         relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)],
         helloDeadline: Duration = .seconds(10),
-        maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes
+        maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes,
+        writeStallTimeout: Duration = .seconds(30)
     ) {
+        self.writeStallTimeout = writeStallTimeout
         self.maxTransferBytes = maxTransferBytes
         self.helloDeadline = helloDeadline
         self.relayRetryDelays = relayRetryDelays
