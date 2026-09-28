@@ -216,6 +216,10 @@ actor DocumentSession {
 
     var subscriberCount: Int { subscribers.count }
 
+    /// Set by `deleteFromStore`. A deleted session writes nothing more: every save of this
+    /// document goes through this actor, so after this turn nothing can bring the file back.
+    private var deleted = false
+
     /// The document's current in-memory bytes — always in sync with the
     /// store's on-disk copy, since `submit` writes through before updating
     /// this. Read-only accessor for callers (e.g. MCP tools) that just need
@@ -250,6 +254,7 @@ actor DocumentSession {
     /// through the ordinary path — see `SessionManager.currentBytesOrFetch` for what the app's
     /// create-push does once this content is durable, and for the two narrow consequences.
     func adoptIfEmpty(bytes newBytes: Data) -> Data {
+        guard !deleted else { return bytes }
         guard bytes.isEmpty else { return bytes }          // a real write landed; it persisted itself
         if let durable = try? store.load(docId: docId), !durable.isEmpty {
             bytes = durable                                 // a store-only promotion beat us
@@ -382,6 +387,11 @@ actor DocumentSession {
                 submitter: UUID? = nil,
                 receivedAt: ContinuousClock.Instant? = nil,
                 writer: String? = nil) -> SubmitOutcome {
+        // The document was deleted while this write was on its way: saving it would re-create
+        // the file the user just deleted.
+        guard !deleted else {
+            return .rejected(.reject(docId: docId, opId: opId, reason: "unknownDoc", seq: seq))
+        }
         // Telemetry, off by default and only assembled when the flag is on (`SyncTelemetry`). The
         // clock reads stay unconditional: `ContinuousClock.now` is nanoseconds against a write that
         // costs tens of milliseconds, and a branch per phase would be more code than it saves.
@@ -579,6 +589,21 @@ actor DocumentSession {
     /// Their copy is not touched — a subscriber holding the document keeps it and turns it into a
     /// LOCAL-ONLY document. Without this push a device with the doc open would keep mirroring and
     /// re-create it on the server within seconds, which looks like the delete silently failing.
+    /// Delete the document from the store IN THIS ACTOR, then tell everyone.
+    ///
+    /// The manager used to delete the file on its own actor while this one might be mid-`submit`:
+    /// two actors run at once, so a save already in flight could land after the delete and
+    /// re-create the file (review finding 19 — the "single writer per docId" comment above
+    /// `store.save` did not hold for deletion). Here the delete is serialised after any save,
+    /// and `deleted` refuses every later one.
+    func deleteFromStore() throws {
+        deleted = true
+        if (try? store.exists(docId: docId)) == true {
+            try store.delete(docId: docId)
+        }
+        announceDeleted()
+    }
+
     func announceDeleted() {
         broadcast(.docDeleted(docId: docId))
         for (_, continuation) in subscribers { continuation.finish() }

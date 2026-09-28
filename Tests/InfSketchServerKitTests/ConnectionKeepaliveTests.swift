@@ -129,6 +129,32 @@ struct ConnectionKeepaliveTests {
         #expect(!closed)
     }
 
+    /// A connection that closes while its subscribe is still fetching the document from a holder
+    /// must not leave the subscription behind: it used to be stored after the close, never
+    /// released, and the session could never tear down (review finding 12).
+    @Test func aSubscribeThatCompletesAfterTheCloseIsReleased() async throws {
+        let manager = try Self.makeManager()
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "remote", modifiedAt: Date(), sizeBytes: 2, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "holder")
+        let closedFlag = Collector()
+        await manager.setContentProvider { _, _ in
+            // Hold the fetch until the connection has been dropped.
+            while !(await closedFlag.closed) { try await Task.sleep(for: .milliseconds(10)) }
+            return Data("{}".utf8)
+        }
+        let harness = try await Harness(manager: manager, config: Self.fastConfig())
+        defer { harness.finish() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+        try harness.send(.subscribe(docId: "remote", fromSeq: nil, createIfMissing: false))
+        #expect(await harness.wait { await $0.closed }, "the silent peer is dropped")
+        await closedFlag.markClosed()
+        let released = await harness.wait {
+            _ in await manager.liveInfo()["remote"].map { $0.subscriberCount == 0 } ?? false
+        }
+        #expect(released, "the late subscription must be released, not stored")
+    }
+
     /// A peer that never answers is pinged and then dropped. This is the half-open socket: it
     /// says hello, then goes silent forever while the connection stays open.
     @Test func aSilentPeerIsPingedThenDropped() async throws {

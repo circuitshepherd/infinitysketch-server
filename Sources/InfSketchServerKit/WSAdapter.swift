@@ -214,6 +214,14 @@ actor Connection {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
                     acceptsStrippedDocuments: acceptsStrippedDocuments)
+                // The subscribe can take tens of seconds (a holder fetch), and this actor is
+                // reentrant: the connection may have closed meanwhile. `close()` has already
+                // released every subscription it knew of, so storing this one would leak it —
+                // the session could then never tear down.
+                guard !closed, docSubscriptions[docId] == nil else {
+                    await manager.unsubscribe(docId: docId, token: result.token)
+                    return
+                }
                 emit(result.snapshot.addressed(to: docId))
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {
@@ -269,6 +277,10 @@ actor Connection {
         case .subscribeStatus:
             guard statusSubscription == nil else { return }
             let (events, token) = await manager.subscribeStatus()
+            guard !closed, statusSubscription == nil else {   // see `subscribe`
+                await manager.unsubscribeStatus(token)
+                return
+            }
             statusSubscription = (token, pump(events, docId: nil, token: token))
 
         case .unsubscribeStatus:
@@ -296,6 +308,10 @@ actor Connection {
             }
             do {
                 let result = try await manager.watch(docId: docId, framePx: framePx)
+                guard !closed, watchSubscriptions[docId] == nil else {   // see `subscribe`
+                    await manager.unwatch(docId: docId, token: result.token)
+                    return
+                }
                 watchSubscriptions[docId] = (result.token, pumpWatch(result.events, docId: docId, token: result.token))
             } catch {
                 emit(.error(reason: "unknownDoc"))

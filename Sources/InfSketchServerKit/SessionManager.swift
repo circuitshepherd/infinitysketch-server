@@ -39,9 +39,13 @@ public actor SessionManager {
     private let store: any DocumentStore
     private let config: SessionConfig
     private var sessions: [String: DocumentSession] = [:]
-    private var tokenDocs: [UUID: String] = [:]
+    /// token → the docId and the SESSION it subscribed to. By session, not docId alone: a delete
+    /// ends one session and a later open makes another under the same docId, and a release that
+    /// arrives afterwards belongs to the first — charging it to the second tore that down under
+    /// a live subscriber (review finding 19).
+    private var tokenDocs: [UUID: (docId: String, session: DocumentSession)] = [:]
     private var counts: [String: Int] = [:]
-    private var tokenWatchDocs: [UUID: String] = [:]
+    private var tokenWatchDocs: [UUID: (docId: String, session: DocumentSession)] = [:]
     private var watcherCounts: [String: Int] = [:]
     private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
@@ -287,7 +291,14 @@ public actor SessionManager {
             }
         }
         let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments)
-        tokenDocs[result.token] = docId
+        // Reentrancy: a delete may have ended this session while we awaited it. Registering the
+        // token then counted a subscriber no release would ever uncount, so the next session of
+        // this docId could never tear down. The document is gone: say so.
+        guard sessions[docId] === session else {
+            await session.unsubscribe(result.token)
+            throw DocumentStoreError.notFound
+        }
+        tokenDocs[result.token] = (docId, session)
         let newCount = counts[docId, default: 0] + 1
         counts[docId] = newCount
         if case .subscribed(_, let seq, _) = result.snapshot {
@@ -296,14 +307,24 @@ public actor SessionManager {
         return result
     }
 
+    /// The token decides which document and session this was; `docId` is the caller's spelling
+    /// and is only checked to name the same document.
     public func unsubscribe(docId: String, token: UUID) async {
-        let docId = canonicalDocId(docId)
-        guard tokenDocs.removeValue(forKey: token) == docId,
-              let session = sessions[docId] else { return }
+        guard let entry = tokenDocs[token],
+              entry.docId.lowercased() == docId.lowercased() else { return }
+        tokenDocs.removeValue(forKey: token)
+        let docId = entry.docId
+        let session = entry.session
+        // A session a delete already ended has no count here any more; its successor's count is
+        // not this subscriber's.
+        let isCurrent = sessions[docId] === session
+        if isCurrent { counts[docId] = max(0, (counts[docId] ?? 1) - 1) }
         await session.unsubscribe(token)
-        counts[docId] = max(0, (counts[docId] ?? 1) - 1)
+        guard isCurrent else { return }
+        let seq = await session.seq
+        guard sessions[docId] === session else { return }
         let remaining = counts[docId] ?? 0
-        emitStatus(docId: docId, kind: "subscriberCount", seq: await session.seq, count: remaining)
+        emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: remaining)
         if remaining == 0 && (watcherCounts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
         } else if remaining == 0 {
@@ -330,22 +351,31 @@ public actor SessionManager {
         let hadAdvertisement = liveIndexEntry(docId) != nil
         guard hadContent || hadAdvertisement else { throw DocumentStoreError.notFound }
 
-        if hadContent { try store.delete(docId: docId) }
-        ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(liveIndex[docId]?.holders.sorted() ?? [])")
-
+        // With a live session the delete happens INSIDE it, serialised after any save it is
+        // making — deleting from here raced that save, which could land last and re-create the
+        // file (review finding 19). Everything keyed by this docId is cleared in THIS turn,
+        // before the await: a subscribe that opens a fresh session meanwhile owns the keys after
+        // it, and clearing them later would wipe that session's counts.
+        let wanted = docId.lowercased()
         // Drop the advertisement so the deleting device's own browser does not keep showing the
         // document as a remote row until the next advertisement refresh. A device that still holds
         // it re-advertises on its next push, which is the accepted resurrection path.
-        let wanted = docId.lowercased()
+        let holders = liveIndexEntry(docId)?.holders.sorted() ?? []
         for key in liveIndex.keys where key.lowercased() == wanted { liveIndex.removeValue(forKey: key) }
-
-        if let session = sessions.removeValue(forKey: docId) {
-            await session.announceDeleted()
+        let session = sessions.removeValue(forKey: docId)
+        if session != nil {
             counts.removeValue(forKey: docId)
             watcherCounts.removeValue(forKey: docId)
             graceTasks.removeValue(forKey: docId)?.task.cancel()
             emitStatus(docId: docId, kind: "sessionClosed", seq: nil, count: 0)
         }
+        if let session {
+            try await session.deleteFromStore()
+        } else if hadContent {
+            try store.delete(docId: docId)
+        }
+        ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(holders)")
+
         // Unconditionally, and NOT folded into the branch above: a document with no live session
         // is the ordinary case for an agent `delete_doc`, and emitting only `sessionClosed` there
         // would tell status listeners nothing — a browser watching this channel would keep showing
@@ -385,18 +415,26 @@ public actor SessionManager {
             }
         }
         let result = await session.watch(framePx: framePx)
-        tokenWatchDocs[result.token] = docId
+        guard sessions[docId] === session else {   // deleted meanwhile — see `subscribe`
+            await session.unwatch(result.token)
+            throw DocumentStoreError.notFound
+        }
+        tokenWatchDocs[result.token] = (docId, session)
         watcherCounts[docId, default: 0] += 1
         await relayFrameIfNeeded(docId: docId)
         return result
     }
 
     public func unwatch(docId: String, token: UUID) async {
-        let docId = canonicalDocId(docId)
-        guard tokenWatchDocs.removeValue(forKey: token) == docId,
-              let session = sessions[docId] else { return }
+        guard let entry = tokenWatchDocs[token],
+              entry.docId.lowercased() == docId.lowercased() else { return }
+        tokenWatchDocs.removeValue(forKey: token)
+        let docId = entry.docId
+        let session = entry.session
+        let isCurrent = sessions[docId] === session   // see `unsubscribe`
+        if isCurrent { watcherCounts[docId] = max(0, (watcherCounts[docId] ?? 1) - 1) }
         await session.unwatch(token)
-        watcherCounts[docId] = max(0, (watcherCounts[docId] ?? 1) - 1)
+        guard isCurrent, sessions[docId] === session else { return }
         if (watcherCounts[docId] ?? 0) == 0 && (counts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
         }
