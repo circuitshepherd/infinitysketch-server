@@ -274,7 +274,7 @@ public enum WebUI {
           if (versionRefused) statusEl.textContent = "server was updated — reload the page";
           return;
         }
-        if (m.type === "statusEvent") scheduleRefresh();
+        if (m.type === "statusEvent" || m.type === "docRenamed") scheduleRefresh();
       };
       ws.onclose = () => {
         if (!versionRefused) statusEl.textContent = "disconnected — retrying…";

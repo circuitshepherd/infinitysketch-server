@@ -259,7 +259,8 @@ public actor SessionManager {
     /// said so keeps receiving whole documents.
     public func subscribe(docId: String, createIfMissing: Bool = false,
                           acceptsStrippedDocuments: Bool = false,
-                          connectionId: UUID? = nil) async throws -> SubscribeResult {
+                          connectionId: UUID? = nil,
+                          name: String? = nil) async throws -> SubscribeResult {
         var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
@@ -326,6 +327,11 @@ public actor SessionManager {
                 sessions[docId] = opened
                 emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
             }
+        }
+        // A creating subscribe carries the document's name: label it, unless it already has one —
+        // a name is changed only by `renameDoc`, never overwritten by a later subscribe.
+        if createIfMissing, let name, store.name(of: docId) == nil {
+            try? store.setName(name, for: docId)
         }
         let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments)
         // Reentrancy: a delete may have ended this session while we awaited it. Registering the
@@ -716,6 +722,7 @@ public actor SessionManager {
         var entries = try store.list().map { info in
             DocListEntry(
                 id: info.docId,
+                name: info.name,
                 sizeBytes: info.sizeBytes,
                 modifiedAt: info.modifiedAt,
                 seq: live[info.docId]?.seq,
@@ -726,7 +733,7 @@ public actor SessionManager {
         let contentIds = Set(entries.map { $0.id.lowercased() })
         for (docId, entry) in liveIndex where !contentIds.contains(docId.lowercased()) {
             entries.append(DocListEntry(
-                id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
+                id: docId, name: entry.name, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
                 seq: nil, subscriberCount: nil, hasContent: false))
         }
         return entries.sorted { $0.id < $1.id }
@@ -754,7 +761,7 @@ public actor SessionManager {
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)
                 if ad.modifiedAt >= existing.modifiedAt {
-                    existing.name = ad.docId
+                    existing.name = ad.name
                     existing.sizeBytes = ad.sizeBytes
                     existing.modifiedAt = ad.modifiedAt
                     existing.thumbnail = ad.thumbnail
@@ -762,9 +769,15 @@ public actor SessionManager {
                 liveIndex[ad.docId] = existing
             } else {
                 liveIndex[ad.docId] = LiveDocEntry(
-                    name: ad.docId, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
+                    name: ad.name, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
                     thumbnail: ad.thumbnail, holders: [deviceId])
             }
+        }
+        // A STORED document without a label takes the advertised name — what restores the labels
+        // after `.names.json` was lost. A labelled document keeps its label: a name changes only
+        // through `renameDoc`.
+        for ad in ads where store.name(of: ad.docId) == nil && ((try? store.exists(docId: ad.docId)) ?? false) {
+            try? store.setName(ad.name, for: ad.docId)
         }
         announceLiveIndexChange(from: before)
     }
@@ -824,6 +837,42 @@ public actor SessionManager {
     }
 
     public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
+
+    // MARK: - names (labels)
+
+    /// A document's name is a LABEL: renaming changes it here and on every device (each renames its
+    /// own file), and changes nothing else — content, versions and subscriptions stay as they are.
+    /// Every status subscriber is told, the renaming device included: two devices renaming at once
+    /// then both end on the name applied last here, because everyone hears the renames in this order.
+    public func renameDoc(docId: String, name: String) async throws {
+        let docId = canonicalDocId(docId)
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else { throw DocumentStoreError.invalidDocId }
+        let stored = (try? store.exists(docId: docId)) ?? false
+        let advertised = liveIndexEntry(docId) != nil
+        guard stored || advertised || sessions[docId] != nil else { throw DocumentStoreError.notFound }
+        try store.setName(label, for: docId)
+        for key in liveIndex.keys where key.lowercased() == docId.lowercased() {
+            liveIndex[key]?.name = label
+        }
+        broadcastToStatusSubscribers(.docRenamed(docId: docId, name: label))
+    }
+
+    /// Label a document an agent is about to create (the create itself is an ordinary submit).
+    public func labelDocument(docId: String, name: String) {
+        try? store.setName(name, for: canonicalDocId(docId))
+    }
+
+    public func resolveDocRef(_ ref: String) async -> DocRefResolution {
+        var candidates = ((try? await listDocuments()) ?? []).map {
+            DocRefCandidate(id: $0.id, name: $0.name, modifiedAt: $0.modifiedAt)
+        }
+        // A session with nothing stored yet (a create in flight) is a document too.
+        for id in sessions.keys where !candidates.contains(where: { $0.id == id }) {
+            candidates.append(DocRefCandidate(id: id, name: store.name(of: id) ?? id, modifiedAt: Date()))
+        }
+        return DocRefResolver.resolve(ref, among: candidates)
+    }
 
     public func liveEntry(docId: String) -> LiveDocEntry? { liveIndexEntry(canonicalDocId(docId)) }
 
@@ -935,8 +984,13 @@ public actor SessionManager {
     }
 
     private func emitStatus(docId: String, kind: String, seq: Int?, count: Int?) {
-        let message = ServerMessage.statusEvent(
-            payload: StatusPayload(docId: docId, kind: kind, seq: seq, subscriberCount: count))
+        broadcastToStatusSubscribers(.statusEvent(
+            payload: StatusPayload(docId: docId, kind: kind, seq: seq, subscriberCount: count)))
+    }
+
+    /// Every status subscriber, in the order this actor produces the messages. A subscriber whose
+    /// bounded buffer overflowed is dropped (its stream finished), exactly as for status events.
+    private func broadcastToStatusSubscribers(_ message: ServerMessage) {
         for (token, continuation) in statusSubscribers {
             switch continuation.yield(message) {
             case .dropped, .terminated:
