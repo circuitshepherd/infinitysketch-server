@@ -129,6 +129,24 @@ public enum TransferDefaults {
     public static let inlineLimit = 64 * 1024
     /// Payload bytes per binary chunk message.
     public static let chunkSize = 64 * 1024
+    /// The largest TEXT frame a message with an inline bulk payload may make. The payload's own
+    /// `inlineLimit` does not bound the frame: other fields ride beside it — a `strokeOpRequest`'s
+    /// spec may itself be up to 64 KiB (`OpSpecBundleWire.inlineSpecLimit`) — and both are base64
+    /// in the JSON, so a request just under both limits was a ~175 KB frame. A message whose inline
+    /// frame would pass this chunks its payload instead, leaving a frame of the other fields alone.
+    /// 96 KiB is a full inline payload's base64 (~87 KB) plus room for its envelope.
+    public static let maxInlineTextFrame = 96 * 1024
+}
+
+/// Error reasons both ends of the wire name. One definition, because a reason renamed on one side
+/// only leaves both suites green and the other side reading the wrong thing.
+public enum WireErrorReason {
+    /// A message the server could not decode. It names no request, so the device cannot tell
+    /// which of its waiters went unanswered — it reconnects, which answers them all.
+    public static let malformedMessage = "malformedMessage"
+    /// An `advertiseDocs` payload the server could not decode. It awaits no answer, so it is NOT
+    /// connection-fatal: the device only loses the browser rows it advertised.
+    public static let badAdvertisement = "badAdvertisement"
 }
 
 /// Sender-side expansion: one semantic message → one or more wire frames.
@@ -136,16 +154,25 @@ public enum TransferDefaults {
 public struct TransferSender<Message: TransferCarrying>: Sendable {
     public let inlineLimit: Int
     public let chunkSize: Int
+    /// See `TransferDefaults.maxInlineTextFrame`.
+    public let maxInlineTextFrame: Int
     private var nextTransferId: UInt32 = 0
 
-    public init(inlineLimit: Int, chunkSize: Int) {
+    public init(inlineLimit: Int, chunkSize: Int,
+                maxInlineTextFrame: Int = TransferDefaults.maxInlineTextFrame) {
         self.inlineLimit = inlineLimit
         self.chunkSize = chunkSize
+        self.maxInlineTextFrame = maxInlineTextFrame
     }
 
     public mutating func frames(for message: Message) throws -> [WireFrame] {
-        guard let bytes = message.bulkBytes, bytes.count > inlineLimit else {
+        guard let bytes = message.bulkBytes, !bytes.isEmpty else {
             return [.text(try message.jsonText())]
+        }
+        if bytes.count <= inlineLimit {
+            let text = try message.jsonText()
+            // Bounded by what rides BESIDE the payload too — see `maxInlineTextFrame`.
+            if text.utf8.count <= maxInlineTextFrame { return [.text(text)] }
         }
         let descriptor = TransferDescriptor(
             transferId: nextTransferId, totalBytes: bytes.count, chunkSize: chunkSize)

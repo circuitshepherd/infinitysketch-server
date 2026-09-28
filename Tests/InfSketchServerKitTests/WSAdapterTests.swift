@@ -848,7 +848,10 @@ private struct ServerMessageReader {
         _ = try await reader.next()   // helloAck
 
         try harness.send(.advertiseDocs(payload: .inline(Data("not-json".utf8))))
-        #expect(try await reader.next() == .error(reason: "malformedMessage"))
+        // Its own reason, not `malformedMessage`: the app treats that one as connection-fatal
+        // (it names no request, so the only way to answer the request it was is a reconnect),
+        // while a bad advertisement costs nothing but the browser rows.
+        #expect(try await reader.next() == .error(reason: WireErrorReason.badAdvertisement))
 
         // Connection survives: a normal listDocs still works afterward.
         try harness.send(.listDocs)

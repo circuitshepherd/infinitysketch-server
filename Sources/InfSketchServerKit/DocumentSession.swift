@@ -94,6 +94,13 @@ public struct SessionConfig: Sendable {
     /// literals, `localhost`, `*.local`, this machine's name) — `--allow-host`. See
     /// `WebSocketOriginPolicy` for why a name has to be trusted at all.
     public var allowedHostNames: [String]
+    /// How long a connection that just UNSUBSCRIBED from a document still counts as having it
+    /// open when a live-state op is routed (`SessionManager.subscribedConnections`). A device's
+    /// refetch is an unsubscribe followed by a subscribe; an agent's selection op arriving in that
+    /// gap used to be refused `documentNotOpen` while the document never left the user's screen.
+    /// A device that really closed the document answers `noSelectionActive` itself, which is the
+    /// same answer.
+    public var unsubscribeRoutingGrace: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -113,8 +120,10 @@ public struct SessionConfig: Sendable {
         helloDeadline: Duration = .seconds(10),
         maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes,
         writeStallTimeout: Duration = .seconds(30),
-        allowedHostNames: [String] = []
+        allowedHostNames: [String] = [],
+        unsubscribeRoutingGrace: Duration = .seconds(5)
     ) {
+        self.unsubscribeRoutingGrace = unsubscribeRoutingGrace
         self.allowedHostNames = allowedHostNames
         self.writeStallTimeout = writeStallTimeout
         self.maxTransferBytes = maxTransferBytes

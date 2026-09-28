@@ -45,9 +45,25 @@ import MCP
 /// Mounts the MCP endpoint behind FlyingFox's `POST /mcp`, `GET /mcp`,
 /// `DELETE /mcp` routes. Every request is bridged to `MCP.HTTPRequest` and
 /// handed to `adapter.handle(_:)`, which owns all session routing.
-public func mountMCP(on http: HTTPServer, adapter: MCPAdapter) async {
+///
+/// **A request that carries an `Origin` is held to the `/ws` rule** (`WebSocketOriginPolicy`: the
+/// Origin must match the `Host`, and the `Host` must be a name no outside party controls — an IP
+/// literal, `localhost`, `*.local`, this machine's name or an `--allow-host` name). A browser page
+/// always sends `Origin` and cannot forge it; without this, a page whose public name was re-pointed
+/// at this machine (DNS rebinding) could call every tool, `delete_doc` included, with Origin and
+/// Host agreeing. An agent sends no `Origin` and is unaffected — which is why this is its own check
+/// and NOT the SDK's `OriginValidator.localhost()`, which refuses by `Host` alone and so refused
+/// every agent on another machine (see `MCPAdapter.validationPipeline`).
+public func mountMCP(on http: HTTPServer, adapter: MCPAdapter,
+                     allowedHostNames: Set<String> = []) async {
     let handler: @Sendable (FlyingFox.HTTPRequest) async throws -> FlyingFox.HTTPResponse = { request in
-        await mcpBridgeResponse(for: request, through: adapter)
+        guard WebSocketOriginPolicy.allows(origin: request.headers[FlyingFox.HTTPHeader("Origin")],
+                                           host: request.headers[.host],
+                                           allowedHostNames: allowedHostNames) else {
+            ServerLog.verbose("[mcp] refused a request from Origin \(request.headers[FlyingFox.HTTPHeader("Origin")] ?? "-") for Host \(request.headers[.host] ?? "-")")
+            return FlyingFox.HTTPResponse(statusCode: .forbidden)
+        }
+        return await mcpBridgeResponse(for: request, through: adapter)
     }
 
     await http.appendRoute("POST /mcp", handler: handler)

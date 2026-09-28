@@ -112,3 +112,44 @@ import FoundationNetworking
         await server.stop()
     }
 }
+
+/// `/mcp` holds a request that carries an `Origin` to the `/ws` rule, so a web page cannot reach
+/// the tool surface by DNS rebinding — while an agent, which sends no `Origin`, is unaffected even
+/// from another machine (round 6, item 9).
+@Suite struct MCPOriginTests {
+    private func post(port: UInt16, host: String, origin: String?) async throws -> Int? {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/mcp")!)
+        request.httpMethod = "POST"
+        request.setValue(host, forHTTPHeaderField: "Host")
+        if let origin { request.setValue(origin, forHTTPHeaderField: "Origin") }
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#.utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return (response as? HTTPURLResponse)?.statusCode
+    }
+
+    @Test func aRebindingPageIsRefusedAndAnAgentIsNot() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mcporigin-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let server = InfSketchServer(port: 0, docsDirectory: dir, config: SessionConfig())
+        let task = Task { try await server.run() }
+        defer { task.cancel() }
+        try await server.waitUntilListening()
+        let port = try #require(await server.listeningPort)
+
+        // A page under a public name re-pointed here: Origin and Host agree, and are refused.
+        #expect(try await post(port: port, host: "evil.example.com:\(port)",
+                               origin: "http://evil.example.com:\(port)") == 403)
+        // A cross-site page on a trusted host: refused too.
+        #expect(try await post(port: port, host: "127.0.0.1:\(port)",
+                               origin: "http://evil.example.com") == 403)
+        // An agent on another machine: no Origin, a LAN Host — served.
+        let agent = try await post(port: port, host: "192.168.1.50:\(port)", origin: nil)
+        #expect(agent != 403 && agent != nil)
+        #expect(agent == 200)
+        await server.stop()
+    }
+}

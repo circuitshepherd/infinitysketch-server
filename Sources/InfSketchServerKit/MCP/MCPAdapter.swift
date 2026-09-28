@@ -2907,11 +2907,22 @@ public actor MCPAdapter {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
         let arguments = await canonicalisingDocIds(arguments)
         let result = try await dispatchCallTool(name: name, arguments: arguments)
-        if Self.liveSelectionWriteTools.contains(name), result.isError != true,
+        if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
            let docId = arguments?["docId"]?.stringValue {
             await history.recordLiveSelectionChange(docId: docId)
         }
         return await enrichedError(result, arguments: arguments)
+    }
+
+    /// Whether a live-selection write may have landed on the device. A success did; so may an op
+    /// whose device went quiet or away with it (`deviceTimeout` / `deviceDisconnected`) — the
+    /// device can still apply it until the request's `notAfter`. Recording a barrier for an op
+    /// that did NOT land only makes the next undo refuse; not recording one for an op that did
+    /// makes it reverse the older write beneath it.
+    static func mayHaveChangedTheDocument(_ result: CallTool.Result) -> Bool {
+        guard result.isError == true else { return true }
+        guard case .text(let text, _, _)? = result.content.first else { return false }
+        return text.hasPrefix("deviceTimeout") || text.hasPrefix("deviceDisconnected")
     }
 
     /// Tools that change the document through the user's LIVE selection. They commit in the

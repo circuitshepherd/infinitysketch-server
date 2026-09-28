@@ -4,6 +4,8 @@ import FlyingFox
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif canImport(WinSDK)
+import WinSDK
 #endif
 
 /// Browsers apply no same-origin rule to a WebSocket handshake: any page open in a browser that
@@ -77,6 +79,19 @@ enum WebSocketOriginPolicy {
     static let machineHostNames: Set<String> = {
         var names: Set<String> = []
         #if os(Windows)
+        // The DNS host name, which is what a browser puts in `Host` — `COMPUTERNAME` is the
+        // NetBIOS name, upper-cased and cut at 15 characters, so a longer machine name never
+        // matched. Both are kept: a LAN resolving NetBIOS names reaches the machine by that one.
+        var length: DWORD = 0
+        _ = GetComputerNameExW(ComputerNameDnsHostname, nil, &length)
+        if length > 0 {
+            var buffer = [WCHAR](repeating: 0, count: Int(length) + 1)
+            var capacity = DWORD(buffer.count)
+            if GetComputerNameExW(ComputerNameDnsHostname, &buffer, &capacity) {
+                let name = String(decoding: buffer.prefix(Int(capacity)), as: UTF16.self)
+                if !name.isEmpty { names.insert(name.lowercased()) }
+            }
+        }
         if let name = ProcessInfo.processInfo.environment["COMPUTERNAME"] { names.insert(name.lowercased()) }
         #else
         var buffer = [CChar](repeating: 0, count: 256)

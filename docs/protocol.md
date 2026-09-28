@@ -30,10 +30,11 @@ store — a device keys what it last agreed with a server by it. `serverTimeMs` 
 by its estimate of the SERVER's clock built from these, never by its own.
 
 A docId-less `error` is reserved for failures of the CONNECTION (`helloRequired`,
-`unsupportedVersion`, `transferViolation`), plus two that answer one message and leave the
-connection up: `listFailed` for a `listDocs` the store could not answer, and `malformedMessage` for
-a message (in practice an advertisement) the server could not decode — the app logs it and carries
-on, since reconnecting would re-send the same bytes. Everything about one document names it: an op on a document the
+`unsupportedVersion`, `transferViolation`, and `malformedMessage` for a message the server could
+not decode — it names no request, so the device reconnects, which answers every waiter), plus two
+that answer one message and leave the connection up: `listFailed` for a `listDocs` the store could
+not answer, and `badAdvertisement` for an `advertiseDocs` payload the server could not decode (it
+awaits no answer; reconnecting would only re-send the same bytes). Everything about one document names it: an op on a document the
 connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a second subscribe is
 `subscribeFailed(docId, "alreadySubscribed")`, deleting an absent document answers
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
@@ -87,14 +88,20 @@ disconnects fails `deviceDisconnected` (and, for a pure op, is retried once on a
 
 **Which device.** The live-selection ops (`controlSelection`: get/transform/duplicate/delete/draw/
 restyle a selection, `get_tool`, the viewport) act on state that exists only on a device that has
-the document OPEN, so they go only to a connection subscribed to that docId — none means
-`noSelectionActive: no connected device has this document open`, and they are never retried
-elsewhere. Every other op PREFERS a subscribed device (its pen is what an omitted colour/width/ink
-inherits; its viewport is what `render_sketch` reports) and falls back to any capable one; among
+the document OPEN, so they go only to a connection subscribed to that docId (or one that
+unsubscribed within the last 5 s — a refetch unsubscribes and resubscribes) — none means
+`noSelectionActive: no connected device has this document open`. They carry no document bytes (the
+device acts on its own open copy), and they are never retried elsewhere after a timeout — but a
+device that answers "nothing selected" (`noSelectionActive`, or `active: false` for
+`getSelection`) is followed by the next open device, and only when every one says so is that the
+answer. Every other op PREFERS a subscribed device (its pen is what an omitted colour/width/ink
+inherits; its viewport is what `render_sketch` reports) — unless that device has been quiet longer
+than the keepalive interval while another capable device is awake — and falls back to any capable
+one; among
 equals the device that spoke most recently wins.
 
 **Deadline.** `strokeOpRequest` carries `notAfter`, Unix milliseconds: the request's timeout plus a
-10 s clock-skew allowance, in the SERVER's clock (the device compares it with its estimate of that
+2 s allowance, in the SERVER's clock (the device compares it with its estimate of that
 clock — see `helloAck`). A device that reaches a live-selection op after it — it was suspended
 with the request queued — answers `requestExpired` instead of applying it: the agent was long ago
 told `deviceTimeout` and may have retried. Byte ops may ignore it; a late reply to one is dropped.

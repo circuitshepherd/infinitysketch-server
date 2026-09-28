@@ -686,7 +686,7 @@ public extension ServerMessage {
 // `bulk` (read) and `mapBulk` (rewrite) — and the four `TransferCarrying` requirements are derived
 // from those two. They used to be four hand-written switches per direction, each re-listing every
 // field of every case: a field forgotten in one of them was lost only for a message big enough to
-// chunk (above 256 KiB), which no small test reaches. `mapBulk` rebuilds a case with EVERY label
+// chunk (above 64 KiB, `TransferDefaults.inlineLimit`), which no small test reaches. `mapBulk` rebuilds a case with EVERY label
 // spelled out (no default arguments relied on), and `WireProtocolTests` round-trips every bulk
 // message with every field set through the swap.
 

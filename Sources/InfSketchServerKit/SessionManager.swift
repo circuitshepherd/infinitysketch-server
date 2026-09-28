@@ -346,13 +346,30 @@ public actor SessionManager {
 
     /// The connections holding a subscription to `docId`'s CURRENT session — the devices that have
     /// the document open. A subscription left on a session a delete already ended does not count.
+    ///
+    /// A connection that unsubscribed within `SessionConfig.unsubscribeRoutingGrace` still counts:
+    /// a device's refetch unsubscribes and resubscribes, and the document is on its screen the
+    /// whole time. A connection that has since CLOSED is filtered out by the broker, which only
+    /// picks among connections it still has registered.
     public func subscribedConnections(docId: String) -> Set<UUID> {
         let docId = canonicalDocId(docId)
-        guard let session = sessions[docId] else { return [] }
-        return Set(tokenDocs.values.compactMap { entry in
+        let now = ContinuousClock.now
+        var result = Set<UUID>()
+        if var recent = recentlyUnsubscribed[docId] {
+            recent = recent.filter { now - $0.value <= config.unsubscribeRoutingGrace }
+            recentlyUnsubscribed[docId] = recent.isEmpty ? nil : recent
+            result.formUnion(recent.keys)
+        }
+        guard let session = sessions[docId] else { return result }
+        result.formUnion(tokenDocs.values.compactMap { entry in
             entry.docId == docId && entry.session === session ? entry.connectionId : nil
         })
+        return result
     }
+
+    /// docId → connections that unsubscribed from it recently, and when. See
+    /// `subscribedConnections`. Pruned as it is read; a delete clears the document's entry.
+    private var recentlyUnsubscribed: [String: [UUID: ContinuousClock.Instant]] = [:]
 
     /// The token decides which document and session this was; `docId` is the caller's spelling
     /// and is only checked to name the same document.
@@ -362,6 +379,9 @@ public actor SessionManager {
         tokenDocs.removeValue(forKey: token)
         let docId = entry.docId
         let session = entry.session
+        if let connectionId = entry.connectionId, sessions[docId] === session {
+            recentlyUnsubscribed[docId, default: [:]][connectionId] = ContinuousClock.now
+        }
         // A session a delete already ended has no count here any more; its successor's count is
         // not this subscriber's.
         let isCurrent = sessions[docId] === session
@@ -409,6 +429,7 @@ public actor SessionManager {
         // it re-advertises on its next push, which is the accepted resurrection path.
         let holders = liveIndexEntry(docId)?.holders.sorted() ?? []
         for key in liveIndex.keys where key.lowercased() == wanted { liveIndex.removeValue(forKey: key) }
+        recentlyUnsubscribed.removeValue(forKey: docId)
         let session = sessions.removeValue(forKey: docId)
         if session != nil {
             counts.removeValue(forKey: docId)

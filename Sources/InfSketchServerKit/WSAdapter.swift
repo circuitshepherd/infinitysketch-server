@@ -137,7 +137,7 @@ actor Connection {
             await close()
             return
         } catch {
-            emit(.error(reason: "malformedMessage"))
+            emit(.error(reason: WireErrorReason.malformedMessage))
             return
         }
         guard let message else { return }   // chunk consumed / transfer opened / aborted
@@ -475,7 +475,10 @@ actor Connection {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
             guard let ads = try? JSONDecoder().decode([DocAdvertisement].self, from: bytes) else {
-                return emit(.error(reason: "malformedMessage"))
+                // Not `malformedMessage`, which the app reads as "a request of mine went
+                // unanswered" and reconnects on: an advertisement awaits no answer, so a bad
+                // one must cost the device nothing but the rows it advertised.
+                return emit(.error(reason: WireErrorReason.badAdvertisement))
             }
             await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
         }

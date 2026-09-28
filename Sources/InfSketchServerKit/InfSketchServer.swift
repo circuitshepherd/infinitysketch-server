@@ -99,7 +99,8 @@ public final class InfSketchServer: Sendable {
         self.config = config
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
-            createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout)
+            createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout,
+            quietAfter: config.keepaliveIdleInterval)
         self.deviceCommandBroker = deviceCommandBroker
         self.mcpAdapter = MCPAdapter(
             manager: manager,
@@ -342,7 +343,8 @@ public final class InfSketchServer: Sendable {
         // transport bridge and MCPAdapter.swift for the resource surface +
         // per-session registry (task-1-report.md has the SPIKE-PIN write-up
         // this was built from).
-        await mountMCP(on: http, adapter: mcpAdapter)
+        await mountMCP(on: http, adapter: mcpAdapter,
+                       allowedHostNames: Set(config.allowedHostNames))
 
         // Where a scanned QR code lands. The address comes from the request's own Host header —
         // whatever the DEVICE used to reach us, which is by definition an address that works from

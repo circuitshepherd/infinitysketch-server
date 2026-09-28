@@ -73,6 +73,26 @@ import InfSketchWire
         #expect(try ServerMessage(jsonText: json)
             == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 16))))
     }
+    /// A payload under the inline limit still chunks when the fields BESIDE it would make the
+    /// text frame too big: a `strokeOpRequest` with a spec near its own 64 KiB limit and a payload
+    /// near the inline limit was one ~175 KB frame (round 6, item 13).
+    @Test func aFrameMadeBigByItsOtherFieldsChunksItsPayload() throws {
+        var sender = TransferSender<ServerMessage>(inlineLimit: 64 * 1024, chunkSize: 64 * 1024)
+        let spec = Data(repeating: 0x41, count: 60 * 1024)
+        let payload = Data(repeating: 0x42, count: 60 * 1024)
+        let frames = try sender.frames(for: .strokeOpRequest(
+            requestId: 1, docId: "d", payload: .inline(payload), spec: spec))
+        #expect(frames.count == 3, "announce + one chunk + end")
+        for frame in frames {
+            if case .text(let text) = frame {
+                #expect(text.utf8.count <= TransferDefaults.maxInlineTextFrame)
+            }
+        }
+        // The same payload with a small spec stays one frame.
+        let small = try sender.frames(for: .strokeOpRequest(
+            requestId: 2, docId: "d", payload: .inline(payload), spec: Data("{}".utf8)))
+        #expect(small.count == 1)
+    }
     @Test func bulklessMessageStaysSingleTextFrame() throws {
         var sender = TransferSender<ServerMessage>(inlineLimit: 0, chunkSize: 8)
         let frames = try sender.frames(for: .helloAck(protocolVersion: 1, serverId: "s"))
@@ -406,3 +426,24 @@ import InfSketchWire
     }
 }
 
+
+/// `docList` is never chunked (it has no bulk field) and reaches a `URLSessionWebSocketTask` whose
+/// receive limit is 1 MiB, which it answers by DROPPING the connection. Pinned at a realistic
+/// store: 500 documents with long names make ~70 KB, so the limit is ~7000 documents away
+/// (round 6, item 13 — measured, and deliberately not chunked).
+@Suite struct DocListFrameSizeTests {
+    @Test func fiveHundredDocumentsStayFarUnderTheReceiveLimit() throws {
+        let docs = (0..<500).map { i in
+            DocListEntry(id: "A fairly long document name number \(i)", sizeBytes: 5_812_345,
+                         modifiedAt: Date(), seq: 123, subscriberCount: 2, hasContent: true)
+        }
+        var sender = TransferSender<ServerMessage>(inlineLimit: TransferDefaults.inlineLimit,
+                                                   chunkSize: TransferDefaults.chunkSize)
+        let frames = try sender.frames(for: .docList(docs: docs))
+        guard case .text(let text)? = frames.first, frames.count == 1 else {
+            Issue.record("docList is one text frame"); return
+        }
+        print("[measure] docList of 500 documents: \(text.utf8.count) B")
+        #expect(text.utf8.count < 128 * 1024)
+    }
+}

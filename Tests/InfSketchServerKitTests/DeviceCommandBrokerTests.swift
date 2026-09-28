@@ -282,9 +282,176 @@ private actor SentBox {
             Issue.record("the request must carry notAfter"); return
         }
         let after = Int(Date().timeIntervalSince1970 * 1000)
-        #expect(notAfter >= before + 30_000 && notAfter <= after + 30_000)
+        // The allowance is 2 s: the device judges the deadline in the SERVER's clock
+        // (`ServerClock`), so it only has to cover the hello's one-way latency, not clock skew.
+        #expect(notAfter >= before + 22_000 && notAfter <= after + 22_000)
         await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
         _ = try await task.value
+    }
+
+    // MARK: - Several devices with the document open (round 6, item 3)
+
+    /// Waits for the first strokeOpRequest a box receives.
+    private static func awaitRequest(_ box: SentBox) async -> (UInt32, BulkPayload)? {
+        for _ in 0..<100 {
+            for message in await box.all() {
+                if case .strokeOpRequest(let rid, _, let payload, _, _, _) = message { return (rid, payload) }
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
+    }
+
+    /// Two devices have the document open; the one asked first has nothing selected. The
+    /// selection may be on the other, so it is asked too — a device without a selection refuses
+    /// without changing anything, so asking the next is safe.
+    @Test func aNothingSelectedAnswerIsCheckedOnTheOtherOpenDevice() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox(), sentB = SentBox()
+        let a = UUID(), b = UUID()
+        await broker.register(connectionId: a, capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: b, capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await broker.setSubscriberLookup { _ in [a, b] }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(), spec: Data(#"{"op":"transformSelection"}"#.utf8),
+            capability: "controlSelection") }
+        let first = try #require(await Self.awaitRequest(sentB))
+        await broker.handleReply(requestId: first.0, bytes: nil, failureReason: "noSelectionActive")
+        let second = try #require(await Self.awaitRequest(sentA), "the other open device must be asked")
+        await broker.handleReply(requestId: second.0, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        #expect(try await task.value.meta == Data("{}".utf8))
+    }
+
+    /// Only when EVERY open device says nothing is selected is that the answer.
+    @Test func nothingSelectedOnEveryOpenDeviceIsTheAnswer() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox(), sentB = SentBox()
+        let a = UUID(), b = UUID()
+        await broker.register(connectionId: a, capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: b, capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await broker.setSubscriberLookup { _ in [a, b] }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(), spec: Data(#"{"op":"deleteSelection"}"#.utf8),
+            capability: "controlSelection") }
+        let first = try #require(await Self.awaitRequest(sentB))
+        await broker.handleReply(requestId: first.0, bytes: nil, failureReason: "noSelectionActive")
+        let second = try #require(await Self.awaitRequest(sentA))
+        await broker.handleReply(requestId: second.0, bytes: nil, failureReason: "noSelectionActive")
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("noSelectionActive")) {
+            _ = try await task.value
+        }
+    }
+
+    /// Any other refusal (a gesture in progress, a stale `expect`) is the device that HAS the
+    /// selection speaking, so it is final.
+    @Test func aUserBusyAnswerIsNotRetried() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox(), sentB = SentBox()
+        let a = UUID(), b = UUID()
+        await broker.register(connectionId: a, capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: b, capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await broker.setSubscriberLookup { _ in [a, b] }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(), spec: Data(#"{"op":"transformSelection"}"#.utf8),
+            capability: "controlSelection") }
+        let first = try #require(await Self.awaitRequest(sentB))
+        await broker.handleReply(requestId: first.0, bytes: nil, failureReason: "userBusy")
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("userBusy")) {
+            _ = try await task.value
+        }
+        #expect(await sentA.all().isEmpty)
+    }
+
+    /// `get_selection` answers "nothing selected" as a SUCCESS (`active: false`), so it is asked
+    /// of the next open device too, and a device with a selection wins.
+    @Test func getSelectionFindsTheSelectionOnTheOtherOpenDevice() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox(), sentB = SentBox()
+        let a = UUID(), b = UUID()
+        await broker.register(connectionId: a, capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: b, capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await broker.setSubscriberLookup { _ in [a, b] }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(), spec: Data(#"{"op":"getSelection"}"#.utf8),
+            capability: "controlSelection") }
+        let first = try #require(await Self.awaitRequest(sentB))
+        await broker.handleReply(requestId: first.0, bytes: nil,
+                                 meta: Data(#"{"active":false,"sessionActive":false}"#.utf8), failureReason: nil)
+        let second = try #require(await Self.awaitRequest(sentA))
+        await broker.handleReply(requestId: second.0, bytes: nil,
+                                 meta: Data(#"{"active":true,"sessionActive":true}"#.utf8), failureReason: nil)
+        #expect(try await task.value.meta == Data(#"{"active":true,"sessionActive":true}"#.utf8))
+    }
+
+    /// A select op is NOT read-only, so an `active: false` answer (`select_all` on an empty
+    /// document) is final — asking the other device would change ITS selection too.
+    @Test func aSelectOpsInactiveAnswerIsFinal() async throws {
+        let broker = DeviceCommandBroker()
+        let sentA = SentBox(), sentB = SentBox()
+        let a = UUID(), b = UUID()
+        await broker.register(connectionId: a, capabilities: ["controlSelection"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: b, capabilities: ["controlSelection"]) { msg in Task { await sentB.set(msg) } }
+        await broker.setSubscriberLookup { _ in [a, b] }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(), spec: Data(#"{"op":"selectAll"}"#.utf8),
+            capability: "controlSelection") }
+        let first = try #require(await Self.awaitRequest(sentB))
+        await broker.handleReply(requestId: first.0, bytes: nil,
+                                 meta: Data(#"{"active":false}"#.utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await sentA.all().isEmpty)
+    }
+
+    /// A live-selection op never reads the request's document (the device acts on its own live
+    /// selection), so none is sent: a large document's upload would only eat the op's deadline.
+    @Test func aSelectionOpSendsNoDocument() async throws {
+        let broker = DeviceCommandBroker()
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection", "blobOmission"]) { msg in Task { await sent.set(msg) } }
+        let task = Task { try await broker.requestStrokeOp(
+            docId: "D", docBytes: Data(repeating: 7, count: 4096),
+            spec: Data(#"{"op":"getSelection"}"#.utf8), capability: "controlSelection") }
+        let request = try #require(await Self.awaitRequest(sent))
+        guard case .inline(let bytes) = request.1 else { Issue.record("expected inline"); return }
+        #expect(bytes.isEmpty)
+        await broker.handleReply(requestId: request.0, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+    }
+
+    // MARK: - A sleeping open device (round 6, item 6)
+
+    /// The open device has been quiet longer than the keepalive interval while another capable
+    /// device is awake: an op on bytes goes to the awake one rather than wait out a timeout.
+    @Test func anOpOnBytesSkipsASleepingOpenDevice() async throws {
+        let broker = DeviceCommandBroker(quietAfter: .milliseconds(50))
+        let sentOpen = SentBox(), sentAwake = SentBox()
+        let open = UUID(), awake = UUID()
+        await broker.register(connectionId: open, capabilities: ["authorStrokes"]) { msg in Task { await sentOpen.set(msg) } }
+        await broker.register(connectionId: awake, capabilities: ["authorStrokes"]) { msg in Task { await sentAwake.set(msg) } }
+        await broker.setSubscriberLookup { _ in [open] }
+        try await Task.sleep(for: .milliseconds(120))
+        await broker.noteActivity(connectionId: awake)
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        let request = try #require(await Self.awaitRequest(sentAwake), "the awake device must be asked")
+        await broker.handleReply(requestId: request.0, bytes: Data("x".utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await sentOpen.all().isEmpty)
+    }
+
+    /// When every device is quiet, the open one is still the better guess.
+    @Test func anOpOnBytesStillPrefersTheOpenDeviceWhenAllAreQuiet() async throws {
+        let broker = DeviceCommandBroker(quietAfter: .milliseconds(50))
+        let sentOpen = SentBox(), sentOther = SentBox()
+        let open = UUID(), other = UUID()
+        await broker.register(connectionId: open, capabilities: ["authorStrokes"]) { msg in Task { await sentOpen.set(msg) } }
+        await broker.register(connectionId: other, capabilities: ["authorStrokes"]) { msg in Task { await sentOther.set(msg) } }
+        await broker.setSubscriberLookup { _ in [open] }
+        try await Task.sleep(for: .milliseconds(120))
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        let request = try #require(await Self.awaitRequest(sentOpen))
+        await broker.handleReply(requestId: request.0, bytes: Data("x".utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await sentOther.all().isEmpty)
     }
 
     @Test func retryAfterCompletionWorks() async throws {
