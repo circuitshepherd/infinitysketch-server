@@ -51,6 +51,11 @@ public enum TransferWireError: Error, Equatable {
     case wrongTransferId(expected: UInt32, got: UInt32)
     case controlWithoutTransfer
     case invalidDescriptor
+    /// A descriptor declared more bytes than the receiver accepts in one transfer.
+    case transferTooLarge(totalBytes: Int, limit: Int)
+    /// A descriptor or chunk arrived while the receiver does not accept transfers (the server,
+    /// before `hello`).
+    case transferBeforeHandshake
 }
 
 /// Binary chunk message framing:
@@ -83,10 +88,10 @@ public enum ChunkFraming {
     }
 }
 
-/// end/abort control extracted from a wire message.
+/// The control message that closes a transfer. There is only `end`: an abort message existed and
+/// nothing ever sent one — a sender that fails mid-transfer closes the connection instead.
 public enum TransferControl: Equatable, Sendable {
     case end(UInt32)
-    case abort(UInt32, reason: String)
 }
 
 /// A wire message that can carry one bulk byte field. Adopted by both
@@ -106,21 +111,68 @@ public protocol TransferCarrying: Sendable {
     func jsonText() throws -> String
 }
 
+/// The sizes BOTH ends send with. A sender's choice, not part of the wire format: every descriptor
+/// states its own `chunkSize` and the reassembler accepts any self-consistent one, so either end
+/// may change these without the other.
+///
+/// Why 64 KB, and not the 256 KB inline / 512 KB chunks both ends used before: the app treats a
+/// connection that delivered no WHOLE message for 60 s as dead (`MirrorTransport`'s silence
+/// watchdog), and a WebSocket message is only delivered once it has fully arrived. At 512 KB a
+/// link slower than ~8.7 KB/s could never deliver one chunk inside that window, so a healthy but
+/// slow transfer was torn down and retried from the start — forever. At 64 KB the floor is ~1.1
+/// KB/s. The inline limit moves with it for the same reason: an inline payload is base64 inside
+/// one text message (~4/3 of its size), so a 256 KB one was a ~341 KB message with the same
+/// problem. The cost is more frames per document (a 5 MB document is ~80 chunks instead of 10),
+/// each with a 9-byte header.
+public enum TransferDefaults {
+    /// Bulk payloads at or below this many raw bytes travel inline.
+    public static let inlineLimit = 64 * 1024
+    /// Payload bytes per binary chunk message.
+    public static let chunkSize = 64 * 1024
+    /// The largest TEXT frame a message with an inline bulk payload may make. The payload's own
+    /// `inlineLimit` does not bound the frame: other fields ride beside it — a `strokeOpRequest`'s
+    /// spec may itself be up to 64 KiB (`OpSpecBundleWire.inlineSpecLimit`) — and both are base64
+    /// in the JSON, so a request just under both limits was a ~175 KB frame. A message whose inline
+    /// frame would pass this chunks its payload instead, leaving a frame of the other fields alone.
+    /// 96 KiB is a full inline payload's base64 (~87 KB) plus room for its envelope.
+    public static let maxInlineTextFrame = 96 * 1024
+}
+
+/// Error reasons both ends of the wire name. One definition, because a reason renamed on one side
+/// only leaves both suites green and the other side reading the wrong thing.
+public enum WireErrorReason {
+    /// A message the server could not decode. It names no request, so the device cannot tell
+    /// which of its waiters went unanswered — it reconnects, which answers them all.
+    public static let malformedMessage = "malformedMessage"
+    /// An `advertiseDocs` payload the server could not decode. It awaits no answer, so it is NOT
+    /// connection-fatal: the device only loses the browser rows it advertised.
+    public static let badAdvertisement = "badAdvertisement"
+}
+
 /// Sender-side expansion: one semantic message → one or more wire frames.
 /// Owned by a single serialized writer (an actor); not thread-safe on its own.
 public struct TransferSender<Message: TransferCarrying>: Sendable {
     public let inlineLimit: Int
     public let chunkSize: Int
+    /// See `TransferDefaults.maxInlineTextFrame`.
+    public let maxInlineTextFrame: Int
     private var nextTransferId: UInt32 = 0
 
-    public init(inlineLimit: Int, chunkSize: Int) {
+    public init(inlineLimit: Int, chunkSize: Int,
+                maxInlineTextFrame: Int = TransferDefaults.maxInlineTextFrame) {
         self.inlineLimit = inlineLimit
         self.chunkSize = chunkSize
+        self.maxInlineTextFrame = maxInlineTextFrame
     }
 
     public mutating func frames(for message: Message) throws -> [WireFrame] {
-        guard let bytes = message.bulkBytes, bytes.count > inlineLimit else {
+        guard let bytes = message.bulkBytes, !bytes.isEmpty else {
             return [.text(try message.jsonText())]
+        }
+        if bytes.count <= inlineLimit {
+            let text = try message.jsonText()
+            // Bounded by what rides BESIDE the payload too — see `maxInlineTextFrame`.
+            if text.utf8.count <= maxInlineTextFrame { return [.text(text)] }
         }
         let descriptor = TransferDescriptor(
             transferId: nextTransferId, totalBytes: bytes.count, chunkSize: chunkSize)
@@ -152,8 +204,22 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
         var isComplete: Bool { Int(nextIndex) == descriptor.chunkCount }
     }
     private var pending: Pending?
+    /// The largest `totalBytes` a descriptor may declare. The size is known the moment a transfer
+    /// is announced, so an absurd one is refused before a single chunk is buffered — one peer
+    /// declaring gigabytes otherwise grew the server by hundreds of MB (measured).
+    public let maxTotalBytes: Int
+    /// False refuses any transfer outright. The server keeps it false until `hello`: nothing an
+    /// unauthenticated peer says needs a chunked transfer, and before this a pre-hello peer
+    /// streamed 400 MB into one.
+    public var acceptsTransfers = true
 
-    public init() {}
+    /// 512 MB: far above any real document (the bundled examples are 2–6 MB), far below a memory
+    /// problem.
+    public static var defaultMaxTotalBytes: Int { 512 * 1024 * 1024 }
+
+    public init(maxTotalBytes: Int = Self.defaultMaxTotalBytes) {
+        self.maxTotalBytes = maxTotalBytes
+    }
 
     public mutating func consume(_ frame: WireFrame) throws -> Message? {
         switch frame {
@@ -174,17 +240,15 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
                 guard current.isComplete else { throw TransferWireError.endBeforeComplete }
                 pending = nil
                 return current.owner.resolvingBulk(with: current.buffer)
-            case .abort(let id, _):
-                guard id == current.descriptor.transferId else {
-                    throw TransferWireError.wrongTransferId(expected: current.descriptor.transferId, got: id)
-                }
-                pending = nil   // owner voided
-                return nil
             }
         }
         if let descriptor = message.openingDescriptor {
+            guard acceptsTransfers else { throw TransferWireError.transferBeforeHandshake }
             guard pending == nil else { throw TransferWireError.transferAlreadyInFlight }
             guard descriptor.isSelfConsistent else { throw TransferWireError.invalidDescriptor }
+            guard descriptor.totalBytes <= maxTotalBytes else {
+                throw TransferWireError.transferTooLarge(totalBytes: descriptor.totalBytes, limit: maxTotalBytes)
+            }
             var buffer = Data()
             // Pre-size is only an optimization hint; Data grows amortized
             // beyond this clamp, so a self-consistent but absurd totalBytes
@@ -198,6 +262,7 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
     }
 
     private mutating func consumeBinary(_ data: Data) throws -> Message? {
+        guard acceptsTransfers else { throw TransferWireError.transferBeforeHandshake }
         let chunk = try ChunkFraming.decode(data)
         // Read only the cheap value fields through the optional — never bind a
         // second copy of `pending` (which owns the accumulated `Data` buffer).

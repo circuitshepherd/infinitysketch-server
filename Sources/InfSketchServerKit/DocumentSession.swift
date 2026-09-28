@@ -9,7 +9,8 @@ public struct SessionConfig: Sendable {
     /// larger ones become chunked binary transfers.
     public var inlineLimit: Int
     /// Payload bytes per binary chunk message. Header + payload stays under
-    /// URLSessionWebSocketTask's 1 MiB default receive cap.
+    /// URLSessionWebSocketTask's 1 MiB default receive cap. See `TransferDefaults` for why the
+    /// default is 64 KB.
     public var chunkSize: Int
     /// MCP sessions idle longer than this are reaped (the SDK's own client
     /// never sends `DELETE /mcp`, so idle reaping is the ORDINARY teardown
@@ -78,11 +79,33 @@ public struct SessionConfig: Sendable {
     /// treating it as stalled is the correct verdict; the point of the floor is only that the
     /// deadline must at least cover DELIVERING the question.
     public var assumedMinimumDrainRate: Int
+    /// A WebSocket connection that has not sent a valid `hello` this long after it opened is
+    /// closed. An idle socket otherwise holds a file descriptor for ever, and enough of them end
+    /// the server with EMFILE on `accept`. Observed at `keepaliveTickInterval` resolution.
+    public var helloDeadline: Duration
+    /// The largest document or payload one inbound chunked transfer may declare. See
+    /// `TransferReassembler.maxTotalBytes`.
+    public var maxTransferBytes: Int
+    /// A socket write that has seen no drain for this long fails, which closes the connection.
+    /// See `WriteStallTimeoutPool`: it is the only way a peer that stopped reading actually loses
+    /// its socket rather than just its subscriptions.
+    public var writeStallTimeout: Duration
+    /// Host names a browser page may use to open `/ws`, beyond the built-in trusted ones (IP
+    /// literals, `localhost`, `*.local`, this machine's name) — `--allow-host`. See
+    /// `WebSocketOriginPolicy` for why a name has to be trusted at all.
+    public var allowedHostNames: [String]
+    /// How long a connection that just UNSUBSCRIBED from a document still counts as having it
+    /// open when a live-state op is routed (`SessionManager.subscribedConnections`). A device's
+    /// refetch is an unsubscribe followed by a subscribe; an agent's selection op arriving in that
+    /// gap used to be refused `documentNotOpen` while the document never left the user's screen.
+    /// A device that really closed the document answers `noSelectionActive` itself, which is the
+    /// same answer.
+    public var unsubscribeRoutingGrace: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
-        inlineLimit: Int = 256 * 1024,
-        chunkSize: Int = 512 * 1024,
+        inlineLimit: Int = TransferDefaults.inlineLimit,
+        chunkSize: Int = TransferDefaults.chunkSize,
         mcpSessionIdleTimeout: Duration = .seconds(3600),
         mcpSessionCleanupInterval: Duration = .seconds(60),
         createDocTimeout: Duration = .seconds(10),
@@ -93,8 +116,18 @@ public struct SessionConfig: Sendable {
         keepalivePingGrace: Duration = .seconds(10),
         keepaliveTickInterval: Duration = .seconds(5),
         assumedMinimumDrainRate: Int = 1024 * 1024,
-        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)]
+        relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)],
+        helloDeadline: Duration = .seconds(10),
+        maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes,
+        writeStallTimeout: Duration = .seconds(30),
+        allowedHostNames: [String] = [],
+        unsubscribeRoutingGrace: Duration = .seconds(5)
     ) {
+        self.unsubscribeRoutingGrace = unsubscribeRoutingGrace
+        self.allowedHostNames = allowedHostNames
+        self.writeStallTimeout = writeStallTimeout
+        self.maxTransferBytes = maxTransferBytes
+        self.helloDeadline = helloDeadline
         self.relayRetryDelays = relayRetryDelays
         self.gracePeriod = gracePeriod
         self.outboundBufferLimit = outboundBufferLimit
@@ -199,6 +232,10 @@ actor DocumentSession {
 
     var subscriberCount: Int { subscribers.count }
 
+    /// Set by `deleteFromStore`. A deleted session writes nothing more: every save of this
+    /// document goes through this actor, so after this turn nothing can bring the file back.
+    private var deleted = false
+
     /// The document's current in-memory bytes — always in sync with the
     /// store's on-disk copy, since `submit` writes through before updating
     /// this. Read-only accessor for callers (e.g. MCP tools) that just need
@@ -233,6 +270,7 @@ actor DocumentSession {
     /// through the ordinary path — see `SessionManager.currentBytesOrFetch` for what the app's
     /// create-push does once this content is durable, and for the two narrow consequences.
     func adoptIfEmpty(bytes newBytes: Data) -> Data {
+        guard !deleted else { return bytes }
         guard bytes.isEmpty else { return bytes }          // a real write landed; it persisted itself
         if let durable = try? store.load(docId: docId), !durable.isEmpty {
             bytes = durable                                 // a store-only promotion beat us
@@ -282,6 +320,13 @@ actor DocumentSession {
         // but the wire cannot promise that.
         if let px = framePx, px > 0 {
             watcherFramePx[token] = min(px, Self.maxWatcherFramePx)
+        }
+        // A new watcher learns at once that a frame is there to fetch. Without this nudge a
+        // page that reconnected (a laptop waking with the tab in front, a server restart) kept
+        // its pre-disconnect picture until the next edit: the cached frame is current, so the
+        // device renders nothing and no other nudge ever comes (review finding 24).
+        if let frame = latestFrame {
+            continuation.yield(.frameAvailable(docId: docId, seq: frame.seq))
         }
         notifyWatcherCount()
         return WatchResult(events: stream, token: token)
@@ -365,6 +410,11 @@ actor DocumentSession {
                 submitter: UUID? = nil,
                 receivedAt: ContinuousClock.Instant? = nil,
                 writer: String? = nil) -> SubmitOutcome {
+        // The document was deleted while this write was on its way: saving it would re-create
+        // the file the user just deleted.
+        guard !deleted else {
+            return .rejected(.reject(docId: docId, opId: opId, reason: "unknownDoc", seq: seq))
+        }
         // Telemetry, off by default and only assembled when the flag is on (`SyncTelemetry`). The
         // clock reads stay unconditional: `ContinuousClock.now` is nanoseconds against a write that
         // costs tens of milliseconds, and a branch per phase would be more code than it saves.
@@ -448,7 +498,7 @@ actor DocumentSession {
         switch payload.type {
         case "fullDoc":
             newBytes = inline
-        case "strippedDoc":
+        case BlobOmissionWire.strippedDocKind:
             func refuseRebuild(_ why: String) -> SubmitOutcome {
                 Self.report("\(docId): \(why)")
                 recordTelemetry(kind: payload.type, payloadBytes: inline.count,
@@ -562,6 +612,21 @@ actor DocumentSession {
     /// Their copy is not touched — a subscriber holding the document keeps it and turns it into a
     /// LOCAL-ONLY document. Without this push a device with the doc open would keep mirroring and
     /// re-create it on the server within seconds, which looks like the delete silently failing.
+    /// Delete the document from the store IN THIS ACTOR, then tell everyone.
+    ///
+    /// The manager used to delete the file on its own actor while this one might be mid-`submit`:
+    /// two actors run at once, so a save already in flight could land after the delete and
+    /// re-create the file (review finding 19 — the "single writer per docId" comment above
+    /// `store.save` did not hold for deletion). Here the delete is serialised after any save,
+    /// and `deleted` refuses every later one.
+    func deleteFromStore() throws {
+        deleted = true
+        if (try? store.exists(docId: docId)) == true {
+            try store.delete(docId: docId)
+        }
+        announceDeleted()
+    }
+
     func announceDeleted() {
         broadcast(.docDeleted(docId: docId))
         for (_, continuation) in subscribers { continuation.finish() }
@@ -625,7 +690,7 @@ actor DocumentSession {
         // Encoded ONCE — it is a multi-megabyte copy, and the second call existed only to count
         // its bytes for the line below.
         let encoded = candidate.encoded()
-        let stripped = event(OpPayload(type: "strippedDoc", data: encoded))
+        let stripped = event(OpPayload(type: BlobOmissionWire.strippedDocKind, data: encoded))
         Self.report("\(docId): broadcasting \(encoded.count) B instead of "
                     + "\(newBytes.count) B to \(audience.count) subscriber(s)")
         for (token, continuation) in subscribers {

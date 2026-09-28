@@ -304,6 +304,13 @@ public enum DocJSON {
         guard JSONSerialization.isValidJSONObject(doc) else {
             throw DocJSONError.invalidDocumentJSON
         }
+        // Every caller of this CHANGED the document, and the server cannot render: the stored
+        // preview would be the previous content's. A thumbnail is stored with a document only if
+        // it belongs to the bytes being stored — otherwise none (a stale preview is worse than an
+        // absent one, since nothing about it looks wrong). The app decodes an absent key as an
+        // empty preview and shows its placeholder; the device's next save renders a real one.
+        var doc = doc
+        doc.removeValue(forKey: "aaa001_thumbnailData")
         return try JSONSerialization.data(withJSONObject: doc)
     }
 

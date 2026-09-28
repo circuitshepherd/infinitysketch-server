@@ -167,10 +167,12 @@ public enum WebUI {
     </div>
     <script>
     \#(tableSortJS)
+    \#(versionReloadJS)
 
     const statusEl = document.getElementById("status");
     const docsEl = document.getElementById("docs");
     let refreshTimer = null;
+    let versionRefused = false;   // the server refused this page's wire version and no reload was allowed
     // No argument = DEFAULT_SORT (subscribers descending, then name). The sort is held
     // in this variable and nowhere else, so a reload always comes back to the default.
     const sorter = makeTableSort();
@@ -226,9 +228,19 @@ public enum WebUI {
       });
     }
 
+    // A failed load keeps what the table shows and tries again shortly. It used to be an
+    // unhandled rejection: a first load that failed left the table empty until a status
+    // event happened to arrive, which on a quiet server is never.
     async function refresh() {
-      docs = await (await fetch("/api/docs")).json();
-      render();
+      try {
+        const res = await fetch("/api/docs", { cache: "no-store" });
+        if (!res.ok) throw new Error(`docs ${res.status}`);
+        docs = await res.json();
+        render();
+      } catch (e) {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(refresh, 2000);
+      }
     }
 
     function scheduleRefresh() {              // debounce bursts of status events
@@ -239,19 +251,33 @@ public enum WebUI {
     function connect() {
       const ws = new WebSocket(`ws://${location.host}/ws`);
       ws.onopen = () => {
-        statusEl.textContent = "live";
-        statusEl.className = "badge live";
         ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
         ws.send(JSON.stringify({ type: "subscribeStatus" }));
+        // Status events missed while the socket was down are gone for good: resync the
+        // table from scratch on every (re)connect.
+        scheduleRefresh();
       };
       ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
         // The server drops a connection that will not prove it is reading.
         if (m.type === "ping") return ws.send(JSON.stringify({ type: "pong" }));
+        // "live" only once the server has accepted the hello — an open socket to a server
+        // that then refuses the version is not live.
+        if (m.type === "helloAck") {
+          versionRefused = false;
+          statusEl.textContent = "live";
+          statusEl.className = "badge live";
+          return;
+        }
+        if (m.type === "error" && String(m.reason).startsWith("unsupportedVersion")) {
+          versionRefused = !reloadForNewServer();
+          if (versionRefused) statusEl.textContent = "server was updated — reload the page";
+          return;
+        }
         if (m.type === "statusEvent") scheduleRefresh();
       };
       ws.onclose = () => {
-        statusEl.textContent = "disconnected — retrying…";
+        if (!versionRefused) statusEl.textContent = "disconnected — retrying…";
         statusEl.className = "badge";
         setTimeout(connect, 2000);
       };
@@ -264,6 +290,56 @@ public enum WebUI {
     </html>
     """#
     }
+
+    /// What both pages do when the server refuses their hello as the wrong wire version: the
+    /// page embeds the version of the server that SERVED it, so a server upgraded underneath an
+    /// open tab refuses every reconnect, forever, every 2 s. A reload fetches the page the new
+    /// server serves. At most once a minute (the stamp lives in sessionStorage, which survives
+    /// the reload), so a server that refuses its own page cannot put the tab in a reload loop —
+    /// and with no storage to stamp in, no reload at all. Returns false when it did not reload,
+    /// so the page can say why it is stuck. A standalone constant so the suite can drive it.
+    public static let versionReloadJS = #"""
+    function reloadForNewServer() {
+      const KEY = "infsketch.versionReloadAt";
+      try {
+        const last = Number(sessionStorage.getItem(KEY)) || 0;
+        if (Date.now() - last < 60000) return false;
+        sessionStorage.setItem(KEY, String(Date.now()));
+      } catch (e) {
+        return false;
+      }
+      location.reload();
+      return true;
+    }
+    """#
+
+    /// The viewer's frame-fetch discipline: ONE fetch in flight. A request while one runs only
+    /// marks the loader dirty, and it runs exactly once more when the current one finishes — so
+    /// the newest frame is always fetched in the end, and since fetches never overlap, an older
+    /// response can never land after a newer one. The old page started a fetch per nudge and
+    /// threw away all but the newest, so while someone drew, a fetch slower than the nudges
+    /// (Res 2048, an image document over Wi-Fi) never landed at all (review finding 25).
+    /// `job` returns a promise; its failure is the job's own business. Pure, so the suite
+    /// drives the real source.
+    public static let singleFlightJS = #"""
+    function makeSingleFlight(job) {
+      let running = false;
+      let dirty = false;
+      function request() {
+        if (running) { dirty = true; return; }
+        running = true;
+        dirty = false;
+        Promise.resolve()
+          .then(job)
+          .catch(() => {})
+          .then(() => {
+            running = false;
+            if (dirty) request();
+          });
+      }
+      return request;
+    }
+    """#
 
     /// The pan/zoom viewport core — a standalone constant so the test suite can
     /// evaluate the REAL source in a JSContext rather than a Swift re-derivation.
@@ -380,10 +456,24 @@ public enum WebUI {
     }
     """#
 
-    /// The per-document live view. docId is embedded JSON-encoded (safe for
+    /// A string as a JSON literal that is also safe INSIDE an inline `<script>`. JSON alone is
+    /// not: `JSONEncoder` leaves `<` alone, so a document named `<!--<script>` put the HTML
+    /// parser into its script-data escape states and the page's script never closed — no
+    /// code ran and the viewer was dead (review finding 25). `\u003c` and friends are the same
+    /// characters to JavaScript and nothing at all to the HTML tokenizer.
+    static func scriptSafeJSON(_ string: String) -> String {
+        let json = String(decoding: (try? JSONEncoder().encode(string)) ?? Data("\"?\"".utf8),
+                          as: UTF8.self)
+        return json
+            .replacingOccurrences(of: "<", with: "\\u003c")
+            .replacingOccurrences(of: ">", with: "\\u003e")
+            .replacingOccurrences(of: "&", with: "\\u0026")
+    }
+
+    /// The per-document live view. docId is embedded as script-safe JSON (safe for
     /// any filename) and HTML-escaped for the title.
     public static func docHTML(docId: String) -> String {
-        let jsonId = String(decoding: (try? JSONEncoder().encode(docId)) ?? Data("\"?\"".utf8), as: UTF8.self)
+        let jsonId = Self.scriptSafeJSON(docId)
         let htmlId = docId
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -459,6 +549,8 @@ public enum WebUI {
         const stage = document.getElementById("stage");
 
         \#(viewportJS)
+        \#(singleFlightJS)
+        \#(versionReloadJS)
 
         const vp = makeViewport(() => window.devicePixelRatio || 1);
         window.__viewport = vp;   // deliberately exposed: how the browser checks drive the math
@@ -519,7 +611,7 @@ public enum WebUI {
             ws.send(paused ? JSON.stringify({ type: "unwatchDoc", docId: docId })
                            : watchMessage());
           }
-          if (!paused) refetch(`resume-${Date.now()}`);
+          if (!paused) refetch();
           updateBadge();
         };
 
@@ -711,18 +803,27 @@ public enum WebUI {
         // ---- frames ----
         let lastSeq = null;
         let lastFrameAt = 0;
-        let loadGen = 0;
         let disconnected = false;
+        let notFoundAt = 0;        // when the server last answered the watch with unknownDoc
+        let rewatchTimer = null;
+        let versionRefused = false;
+        const REWATCH_MS = 10000;
 
         // fetch, not `new Image()`: the frame's canvas rect arrives as a response
         // HEADER, which an <img> load cannot read. Still decoded into a detached Image
         // and swapped only on load — assigning img.src directly blanks the element for
         // the whole download, once a second, and a zoomed inspection must never
-        // flicker. On any failure keep the last good frame.
+        // flicker. On any failure keep the last good frame. The promise settles only when
+        // the frame is on screen (or given up), so the single-flight below covers the
+        // decode too. A fetch that hangs is aborted rather than blocking every later one.
+        const FRAME_FETCH_TIMEOUT_MS = 30000;
         let objectUrl = null;
-        function refetch(tag) {
-          const gen = ++loadGen;
-          fetch(`/api/docs/${encodeURIComponent(docId)}/frame?v=${tag}`, { cache: "no-store" })
+        function loadLatestFrame() {
+          const abort = typeof AbortController === "function" ? new AbortController() : null;
+          const timer = setTimeout(() => { if (abort) abort.abort(); }, FRAME_FETCH_TIMEOUT_MS);
+          // The time in the URL keeps any cache between here and the server out of it.
+          return fetch(`/api/docs/${encodeURIComponent(docId)}/frame?v=${Date.now()}`,
+                       { cache: "no-store", signal: abort ? abort.signal : undefined })
             .then((res) => {
               if (!res.ok) throw new Error(`frame ${res.status}`);
               // Absent header = unknown rect, which the viewport handles as its own
@@ -732,29 +833,41 @@ public enum WebUI {
               const rect = raw ? raw.split(",").map(Number) : null;
               return res.blob().then((blob) => ({ blob, rect }));
             })
-            .then(({ blob, rect }) => {
-              if (gen !== loadGen) return;   // superseded by a newer frame
+            .then(({ blob, rect }) => new Promise((resolve) => {
               const url = URL.createObjectURL(blob);
               const probe = new Image();
               probe.onload = () => {
-                if (gen !== loadGen) return URL.revokeObjectURL(url);
                 img.src = url;
                 if (objectUrl) URL.revokeObjectURL(objectUrl);
                 objectUrl = url;
                 vp.setFrame(probe.naturalWidth, probe.naturalHeight, rect);
                 render();
+                resolve();
               };
-              probe.onerror = () => URL.revokeObjectURL(url);
+              probe.onerror = () => { URL.revokeObjectURL(url); resolve(); };
               probe.src = url;
-            })
-            .catch(() => {});
+            }))
+            .finally(() => clearTimeout(timer));
         }
+        const refetch = makeSingleFlight(loadLatestFrame);
 
         function updateBadge() {
           // Every write keeps the "badge" base class — dropping it loses the type styling.
+          if (versionRefused) {
+            badge.textContent = "server was updated — reload the page";
+            badge.className = "badge";
+            return;
+          }
           if (paused) { badge.textContent = "paused"; badge.className = "badge"; return; }
           if (disconnected) {
             badge.textContent = "disconnected — retrying…";
+            badge.className = "badge";
+            return;
+          }
+          // Held a little past the retry interval, so a retry that fails again never lets the
+          // message flicker off; a retry that succeeds lets it lapse (or a frame clears it).
+          if (notFoundAt && Date.now() - notFoundAt < REWATCH_MS + 2000) {
+            badge.textContent = "Document not found (deleted or renamed)";
             badge.className = "badge";
             return;
           }
@@ -765,44 +878,81 @@ public enum WebUI {
         }
         setInterval(updateBadge, 1000);
 
+        // The server answers a watch for a document it does not have — deleted, or renamed
+        // away from this page's name — with unknownDoc and registers nothing. Ask again on a
+        // slow timer rather than sitting on the old frame for good: a document re-created
+        // under this name is picked up by itself.
+        function rewatch() {
+          if (!paused && ws && ws.readyState === WebSocket.OPEN) ws.send(watchMessage());
+        }
+        function handleServerError(reason) {
+          if (reason === "unknownDoc") {
+            notFoundAt = Date.now();
+            clearTimeout(rewatchTimer);
+            rewatchTimer = setTimeout(rewatch, REWATCH_MS);
+          } else if (reason.startsWith("unsupportedVersion")) {
+            versionRefused = !reloadForNewServer();
+          }
+          updateBadge();
+        }
+
         // A socket that died without a FIN — laptop sleep, a Wi-Fi hop — looks exactly like a
         // quiet document, except that the server pings an idle connection every 30 s, so a
-        // healthy socket is never silent for a minute. Close one that is: `ws.close()` runs
-        // `onclose` locally at once, and that path reconnects and re-watches. Coming back to
-        // the tab checks immediately (a background tab's timers are throttled) and refetches,
-        // since a frame may have landed while the tab could not act on the nudge.
+        // healthy socket is never silent for a minute. Drop one that is and reconnect at once:
+        // its handlers are detached first, because a dead socket's closing handshake can take
+        // minutes and its `onclose` would otherwise be what reconnects. Coming back to the tab
+        // checks immediately (a background tab's timers are throttled) and refetches, since a
+        // frame may have landed while the tab could not act on the nudge.
         const SILENT_SOCKET_MS = 60000;
         let lastMessageAt = Date.now();
         function closeIfSilent() {
-          if (ws && ws.readyState === WebSocket.OPEN
-              && Date.now() - lastMessageAt > SILENT_SOCKET_MS) ws.close();
+          if (!ws || ws.readyState !== WebSocket.OPEN
+              || Date.now() - lastMessageAt <= SILENT_SOCKET_MS) return;
+          const dead = ws;
+          dead.onopen = dead.onmessage = dead.onclose = null;
+          dead.close();
+          disconnected = true;
+          updateBadge();
+          connect();
         }
         setInterval(closeIfSilent, 15000);
         document.addEventListener("visibilitychange", () => {
           if (document.hidden) return;
           closeIfSilent();
-          if (!paused) refetch(`visible-${Date.now()}`);
+          if (!paused) refetch();
         });
 
         let ws = null;
         function connect() {
           ws = new WebSocket(`ws://${location.host}/ws`);
           ws.onopen = () => {
-            disconnected = false;
             lastMessageAt = Date.now();
+            clearTimeout(rewatchTimer);
             ws.send(JSON.stringify({ type: "hello", protocolVersion: \#(WireProtocol.version), capabilities: [] }));
-            if (!paused) ws.send(watchMessage());
-            updateBadge();
+            if (!paused) {
+              ws.send(watchMessage());
+              // Whatever landed while the socket was down was never announced to this page.
+              refetch();
+            }
           };
           ws.onmessage = (e) => {
             lastMessageAt = Date.now();
             const m = JSON.parse(e.data);
             // The server drops a connection that will not prove it is reading.
             if (m.type === "ping") return ws.send(JSON.stringify({ type: "pong" }));
+            // Connected means the server ACCEPTED the hello, not merely that a socket opened.
+            if (m.type === "helloAck") {
+              disconnected = false;
+              versionRefused = false;
+              updateBadge();
+              return;
+            }
+            if (m.type === "error") return handleServerError(String(m.reason || ""));
             if (m.type === "frameAvailable" && m.docId === docId && !paused) {
               lastSeq = m.seq;
               lastFrameAt = Date.now();
-              refetch(`${m.seq}-${lastFrameAt}`);
+              notFoundAt = 0;
+              refetch();
               updateBadge();
             }
           };
@@ -813,7 +963,7 @@ public enum WebUI {
           };
         }
 
-        refetch("initial");
+        refetch();
         connect();
         </script>
         </body>

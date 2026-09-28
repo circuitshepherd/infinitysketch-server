@@ -82,7 +82,7 @@ import MCP
             @unknown default: continue
             }
             guard let message = (try? reassembler.consume(wireFrame)) ?? nil else { continue }
-            if case .strokeOpRequest(_, _, let payload, let spec, let kind) = message {
+            if case .strokeOpRequest(_, _, let payload, let spec, let kind, _) = message {
                 guard kind == OpSpecBundleWire.kind, let bytes = payload.inlineData,
                       let bundle = try? OpSpecBundle(encoded: bytes) else {
                     return .received(specBytes: spec.count)
@@ -132,23 +132,31 @@ import MCP
     @Test func aSmallOpSpecReachesTheDevice() async throws {
         let outcome = try await relay(specPayloadBytes: 64 * 1024)
         print("small spec -> \(outcome)")
-        guard case .received = outcome else {
+        switch outcome {
+        case .received, .receivedBundle: return
+        default: break
+        }
+        do {
             Issue.record("a small spec must reach the device, got \(outcome)")
             return
         }
     }
 
     /// The reported case: `Untitled 22` is 1_176_673 B on disk, and `revertMerge` sends two copies
-    /// of it in the spec. The device's receive FAILS — so no reply is ever sent, and the broker
-    /// answers `deviceTimeout` with nothing wrong at either end but the frame size.
-    @Test func aDocumentSizedOpSpecKillsTheDeviceConnection() async throws {
+    /// of it in the spec. Before v11 the device's receive FAILED — no reply was ever sent, and the
+    /// broker answered `deviceTimeout` with nothing wrong at either end but the frame size. v11
+    /// lifted the named bulk fields out; v12 moves ANY spec over `inlineSpecLimit` into the chunked
+    /// payload, so even a spec handed over whole — as here, with no `specParts` — now arrives at
+    /// the device's ordinary 1 MiB limit, restored byte for byte.
+    @Test func aDocumentSizedOpSpecNowReachesTheDeviceWhole() async throws {
         let outcome = try await relay(specPayloadBytes: 2 * 1_176_673)
         print("document-sized spec -> \(outcome)")
-        guard case .receiveFailed(let reason) = outcome else {
-            Issue.record("expected the device receive to fail, got \(outcome)")
+        guard case .receivedBundle(let restored, let parts, _) = outcome else {
+            Issue.record("expected the request to arrive as a bundle, got \(outcome)")
             return
         }
-        print("device receive failed with: \(reason)")
+        #expect(parts == ["spec"])
+        #expect(restored > 2 * 1_176_673)
     }
 
     /// CONTROL: the same request, to a device that raised its own receive limit. Nothing else
@@ -157,7 +165,11 @@ import MCP
         let outcome = try await relay(specPayloadBytes: 2 * 1_176_673,
                                       deviceMaximumMessageSize: 64 * 1024 * 1024)
         print("document-sized spec, 64 MiB device limit -> \(outcome)")
-        guard case .received = outcome else {
+        switch outcome {
+        case .received, .receivedBundle: return
+        default: break
+        }
+        do {
             Issue.record("expected the request to arrive once the limit was raised, got \(outcome)")
             return
         }

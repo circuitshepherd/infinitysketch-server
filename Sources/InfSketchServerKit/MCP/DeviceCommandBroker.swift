@@ -32,7 +32,67 @@ public actor DeviceCommandBroker {
         case noDeviceAvailable
         case requestInFlight
         case deviceTimeout
+        /// The device's connection closed while the request was outstanding. Distinct from
+        /// `deviceTimeout` because the causes and the cures differ: a device that went away is
+        /// not slow, and a socket the device dropped (an oversized frame, the app backgrounded)
+        /// used to be reported as a timeout that nobody could explain.
+        case deviceDisconnected
+        /// A live-state op (the user's selection) and no capable connected device has the
+        /// document open. Distinct from `noDeviceAvailable`: a device is there, the document is
+        /// not open on it, and sending the op to it anyway could only answer "nothing selected".
+        case documentNotOpen
         case deviceFailed(String)
+    }
+
+    /// Which devices a request may go to, relative to the ones that have its document OPEN.
+    ///
+    /// The broker used to pick by capability alone — the device that most recently spoke — so
+    /// with an iPad holding a selection and a Mac connected later, `transform_selection` went to
+    /// the Mac and failed `noSelectionActive`, an omitted colour came from the Mac's pen and
+    /// `render_sketch` lost the iPad's viewport (review finding 20).
+    enum Routing: Equatable {
+        /// Any capable device: the op names no open document (creating one, fetching from a
+        /// named holder).
+        case any
+        /// A device with the document open when there is one, else any capable device. For ops
+        /// on bytes whose answer is better from the device the user is looking at — the pen an
+        /// omitted colour inherits, the viewport a render reports — but valid from any.
+        case preferOpen
+        /// Only a device with the document open: the op acts on LIVE state that exists only
+        /// there.
+        case requireOpen
+
+        static func `for`(capability: String) -> Routing {
+            switch capability {
+            case "controlSelection": return .requireOpen
+            case "createDoc", "provideContent": return .any
+            default: return .preferOpen
+            }
+        }
+    }
+
+    /// The connections subscribed to a document — `SessionManager.subscribedConnections`, set by
+    /// `InfSketchServer`. Unset (a broker in a unit test), every request routes as `.any`.
+    public typealias SubscriberLookup = @Sendable (String) async -> Set<UUID>
+    private var subscriberLookup: SubscriberLookup?
+
+    public func setSubscriberLookup(_ lookup: @escaping SubscriberLookup) {
+        subscriberLookup = lookup
+    }
+
+    /// How long past its timeout a request stays valid on the device. The device judges the
+    /// deadline in THIS machine's clock (`ServerClock`, sampled at hello and on every ping), so
+    /// the allowance no longer has to cover clock skew — only the latency of those samples, which
+    /// the device's estimate can overshoot by at most one one-way trip. The failure the deadline
+    /// exists for is MINUTES late (a suspended iPad waking up); 2 s keeps an op the agent was
+    /// told timed out from landing much after that answer.
+    static let deadlineSkewAllowance: Duration = .seconds(2)
+
+    /// `notAfter` for a request sent now with `timeout`: Unix milliseconds.
+    static func deadline(after timeout: Duration, now: Date = Date()) -> Int {
+        let seconds = Double((timeout + deadlineSkewAllowance).components.seconds)
+            + Double((timeout + deadlineSkewAllowance).components.attoseconds) / 1e18
+        return Int((now.timeIntervalSince1970 + seconds) * 1000)
     }
 
     /// `requestStrokeOp`'s result: the reply's bytes (doc bytes for
@@ -61,6 +121,8 @@ public actor DeviceCommandBroker {
         let deviceId: String?
         let capabilities: Set<String>
         let send: @Sendable (ServerMessage) -> Void
+        /// When the peer last sent anything (fed by `noteActivity`); registration counts.
+        var lastActivity: ContinuousClock.Instant
     }
 
     private struct PendingRequest {
@@ -72,6 +134,8 @@ public actor DeviceCommandBroker {
         /// just sent them, so it knows we have them — and this is what they are spliced back from.
         /// Empty bytes for requests that send no document.
         let sentDoc: SentDocument
+        /// Whether this request took `docIdsInFlight` and must release it.
+        let holdsDocumentLock: Bool
     }
 
     /// A document a connection was sent, beside the two derivations of it that BOTH directions of
@@ -114,8 +178,8 @@ public actor DeviceCommandBroker {
     private let createTimeout: Duration
     private let strokeOpTimeout: Duration
 
-    /// Ordered oldest → newest; the last capability-matching element is the
-    /// most-recently-registered connection, which request methods prefer.
+    /// Ordered oldest → newest by registration. Requests go to the capable connection that most
+    /// recently SPOKE, registration order breaking ties — see `pickConnection`.
     private var connections: [Connection] = []
     /// The document bytes most recently SENT to each connection, per docId — the base a
     /// stripped REQUEST is cut against (M4, spec 2026-08-03-request-blob-stripping-design.md).
@@ -133,9 +197,16 @@ public actor DeviceCommandBroker {
     private var docIdsInFlight: Set<String> = []
     private var nextRequestId: UInt32 = 1
 
-    public init(createTimeout: Duration = .seconds(10), strokeOpTimeout: Duration = .seconds(20)) {
+    /// How long a connection may be silent before it counts as possibly ASLEEP when choosing a
+    /// device for an op that any device can serve. A live peer answers the keepalive at least this
+    /// often (`SessionConfig.keepaliveIdleInterval`), so a quieter one is probably a suspended iPad.
+    private let quietAfter: Duration
+
+    public init(createTimeout: Duration = .seconds(10), strokeOpTimeout: Duration = .seconds(20),
+                quietAfter: Duration = .seconds(30)) {
         self.createTimeout = createTimeout
         self.strokeOpTimeout = strokeOpTimeout
+        self.quietAfter = quietAfter
     }
 
     /// WSAdapter calls at hello with the connection's full hello capability
@@ -147,8 +218,42 @@ public actor DeviceCommandBroker {
     ) {
         connections.removeAll { $0.id == connectionId }
         connections.append(Connection(id: connectionId, deviceId: deviceId,
-                                      capabilities: capabilities, send: send))
+                                      capabilities: capabilities, send: send,
+                                      lastActivity: ContinuousClock.now))
     }
+
+    /// The peer on this connection sent something. `WSAdapter` reports it (throttled), so a
+    /// device that went to sleep stops looking like the best one to ask.
+    public func noteActivity(connectionId: UUID) {
+        guard let index = connections.firstIndex(where: { $0.id == connectionId }) else { return }
+        connections[index].lastActivity = ContinuousClock.now
+    }
+
+    /// The capable connection that most recently SPOKE; among equals, the most recently
+    /// registered.
+    ///
+    /// "Most recently connected" alone chose an iPad that connected after a Mac and then went to
+    /// sleep: every agent call waited out the full timeout on the sleeping one while the Mac sat
+    /// idle and able (measured: `render_sketch` failed `deviceTimeout` after 20.3 s; review
+    /// finding 21). A live device answers the keepalive at least every ~30 s, so it stays ahead
+    /// of one that has gone quiet.
+    ///
+    /// `within`, when given, narrows the candidates to those connections (the ones with the
+    /// document open).
+    private func pickConnection(capability: String, deviceId: String?,
+                                excluding: Set<UUID> = [], within: Set<UUID>? = nil) -> Connection? {
+        connections.enumerated()
+            .filter { $0.element.capabilities.contains(capability)
+                && (deviceId == nil || $0.element.deviceId == deviceId)
+                && !excluding.contains($0.element.id)
+                && (within == nil || within!.contains($0.element.id)) }
+            .max { ($0.element.lastActivity, $0.offset) < ($1.element.lastActivity, $1.offset) }?
+            .element
+    }
+
+    /// Ops that act on LIVE state on the device (a user's selection) and so must never be sent
+    /// twice: a device that was merely slow may still apply the first.
+    private static let neverRetriedCapabilities: Set<String> = ["controlSelection"]
 
     /// How many devices are connected, and the union of what they can do. Read only to make
     /// `noDeviceAvailable` say WHY (spec 2026-07-27-actionable-tool-errors-design.md): "no device
@@ -159,14 +264,14 @@ public actor DeviceCommandBroker {
     }
 
     /// WSAdapter calls on connection close. Fails that connection's pending
-    /// requests immediately with .deviceTimeout.
+    /// requests immediately with .deviceDisconnected.
     public func unregister(connectionId: UUID) {
         connections.removeAll { $0.id == connectionId }
         lastSentDocs[connectionId] = nil
         let affected = pending.filter { $0.value.connectionId == connectionId }.map(\.key)
         for requestId in affected {
             guard let entry = completePending(requestId) else { continue }
-            entry.continuation.resume(throwing: DeviceCommandError.deviceTimeout)
+            entry.continuation.resume(throwing: DeviceCommandError.deviceDisconnected)
         }
     }
 
@@ -194,6 +299,12 @@ public actor DeviceCommandBroker {
     /// `strokeOpReply` wire messages and the same per-docId in-flight guard;
     /// only the capability used to pick a connection differs.
     ///
+    /// `takesDocumentLock: false` is the watcher-frame relay's: it renders, writes nothing, and
+    /// fires after every accepted write to a watched closed document — holding the agents' lock
+    /// there made the agent's NEXT call on that document fail `opInProgress`, and the other way
+    /// round failed the relay (review finding 22). Every agent write is compare-and-swap guarded,
+    /// so a render running beside one needs no lock.
+    ///
     /// `specParts` are op-spec fields too big to sit IN the spec. The spec rides inline in the
     /// message's JSON text frame — `TransferSender` chunks only `bulkBytes`, which is `payload` —
     /// so a whole document base64'd into a spec produced a single frame of ~3.56x the document
@@ -202,12 +313,12 @@ public actor DeviceCommandBroker {
     /// spec before any op handler sees it (`OpSpecBundle`).
     public func requestStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String = "authorStrokes",
-        specParts: [OpSpecBundleWire.Field: Data] = [:]
+        specParts: [OpSpecBundleWire.Field: Data] = [:], takesDocumentLock: Bool = true
     ) async throws -> StrokeOpReply {
         do {
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                           capability: capability, specParts: specParts,
-                                          allowStripping: true)
+                                          allowStripping: true, takesDocumentLock: takesDocumentLock)
         } catch DeviceCommandError.deviceFailed(let reason)
             where reason.hasPrefix(BlobOmissionWire.cannotReconstructRequestReason) {
             // The device lost its copy (relaunch, eviction) or the ledger drifted past it — a
@@ -217,16 +328,26 @@ public actor DeviceCommandBroker {
             forgetSentDoc(docId: docId)
             return try await sendStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                           capability: capability, specParts: specParts,
-                                          allowStripping: false)
+                                          allowStripping: false, takesDocumentLock: takesDocumentLock)
         }
     }
 
     private func sendStrokeOp(
         docId: String, docBytes: Data, spec: Data, capability: String,
-        specParts: [OpSpecBundleWire.Field: Data], allowStripping: Bool
+        specParts: [OpSpecBundleWire.Field: Data], allowStripping: Bool, takesDocumentLock: Bool
     ) async throws -> StrokeOpReply {
+        // A live-selection op acts on the device's OWN open document and never reads the request's
+        // bytes (the app's bridge takes only the spec), so it carries none: uploading a large
+        // document would only spend the op's deadline before the device could even look at it.
+        let isLiveStateOp = Routing.for(capability: capability) == .requireOpen
+        let docBytes = isLiveStateOp ? Data() : docBytes
+        let readOnlySelectionRead = isLiveStateOp && Self.opName(of: spec) == "getSelection"
         return try await performRequest(docId: docId, capability: capability, timeout: strokeOpTimeout,
-                                        sentBytes: docBytes) { broker, connection, requestId in
+                                        sentBytes: docBytes, takesDocumentLock: takesDocumentLock,
+                                        nothingSelected: { outcome in
+                                            Self.saysNothingSelected(outcome,
+                                                                     readOnly: readOnlySelectionRead)
+                                        }) { broker, connection, requestId in
             // The strip decision needs the CHOSEN connection, so it lives here — the closure
             // runs isolated on the broker, which is what lets it read and update the ledger
             // synchronously. `sentBytes` above stays the WHOLE document regardless — it is what
@@ -238,14 +359,52 @@ public actor DeviceCommandBroker {
             // A strict WRAPPER around whatever the document payload already was, so the blob
             // omission above is unchanged and simply travels inside — the device unwraps this,
             // then resolves `primary` by its own kind exactly as before.
-            if !specParts.isEmpty {
+            // The spec itself goes the same way once it is too big to sit inline: the text frame
+            // is never chunked, and a spec of a few thousand full-attribute points (a large
+            // `reshape_strokes`) passed the 1 MiB the app's socket receives — which drops the
+            // connection instead of refusing the message.
+            var parts = specParts
+            var inlineSpec = spec
+            if spec.count > OpSpecBundleWire.inlineSpecLimit {
+                parts[.spec] = spec
+                inlineSpec = Data("{}".utf8)
+            }
+            if !parts.isEmpty {
                 let bundle = OpSpecBundle(primary: payload.bytes, primaryKind: payload.kind,
-                                          parts: specParts)
+                                          parts: parts)
                 payload = (bundle.encoded(), OpSpecBundleWire.kind)
             }
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
-                                             payload: .inline(payload.bytes), spec: spec,
-                                             payloadKind: payload.kind))
+                                             payload: .inline(payload.bytes), spec: inlineSpec,
+                                             payloadKind: payload.kind,
+                                             notAfter: Self.deadline(after: broker.strokeOpTimeout)))
+        }
+    }
+
+    /// The spec's `op`, when it has one.
+    static func opName(of spec: Data) -> String? {
+        struct Peek: Decodable { let op: String? }
+        return (try? JSONDecoder().decode(Peek.self, from: spec))?.op
+    }
+
+    /// Whether a device's answer to a live-selection op means "nothing is selected HERE" — which,
+    /// with the document open on several devices, says nothing about the others.
+    ///
+    /// A refusal `noSelectionActive` always qualifies: every selection op that answers it checks
+    /// for a selection before changing anything, so asking the next device is safe. A SUCCESS
+    /// qualifies only for the read-only `getSelection` (`active: false`) — `select_all` on an
+    /// empty document answers the same way, and asking the next device would select there too.
+    static func saysNothingSelected(_ outcome: Result<StrokeOpReply, Error>, readOnly: Bool) -> Bool {
+        switch outcome {
+        case .failure(DeviceCommandError.deviceFailed(let reason)):
+            return reason.hasPrefix("noSelectionActive")
+        case .failure:
+            return false
+        case .success(let reply):
+            guard readOnly, let meta = reply.meta,
+                  let object = try? JSONSerialization.jsonObject(with: meta) as? [String: Any],
+                  let active = object["active"] as? Bool else { return false }
+            return !active
         }
     }
 
@@ -343,7 +502,7 @@ public actor DeviceCommandBroker {
         // bytes go on to be stored under a compare-and-swap. A rebuild that does not match the
         // device's own hash of its result is a failure, never a document.
         var resolved = bytes ?? Data()
-        if payloadKind == "strippedDoc" {
+        if payloadKind == BlobOmissionWire.strippedDocKind {
             guard let stripped = try? StrippedDocument(encoded: resolved),
                   stripped.basedOn == entry.sentDoc.hash,
                   let rebuilt = try? stripped.restore(usingRuns: entry.sentDoc.runs),
@@ -361,8 +520,8 @@ public actor DeviceCommandBroker {
     }
 
     /// Shared request path for `requestCreation`, `requestStrokeOp` and
-    /// `requestProvideContent`: capability-filtered most-recent connection
-    /// selection — narrowed to ONE named device when `deviceId` is non-nil
+    /// `requestProvideContent`: capability-filtered most-recently-active connection
+    /// selection (`pickConnection`), one failover on timeout for pure ops — narrowed to ONE named device when `deviceId` is non-nil
     /// (M2c-1: only a device that HAS a document can serve its content;
     /// passing nil keeps the original "any capable device" behaviour) — the
     /// shared per-docId in-flight guard, atomic actor-turn continuation
@@ -372,18 +531,99 @@ public actor DeviceCommandBroker {
     /// this registration into existence.
     private func performRequest(
         docId: String, capability: String, timeout: Duration, deviceId: String? = nil,
-        sentBytes: Data = Data(),
+        sentBytes: Data = Data(), takesDocumentLock: Bool = true,
+        nothingSelected: ((Result<StrokeOpReply, Error>) -> Bool)? = nil,
         send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
-        guard let connection = connections.last(where: {
-            $0.capabilities.contains(capability) && (deviceId == nil || $0.deviceId == deviceId)
-        }) else {
+        let routing = deviceId == nil ? Routing.for(capability: capability) : .any
+        var open: Set<UUID>?
+        if routing != .any, let subscriberLookup {
+            open = await subscriberLookup(docId)
+        }
+        let now = ContinuousClock.now
+        // A device with the document open first; for `.preferOpen`, any capable one after that.
+        func pick(excluding: Set<UUID>) -> Connection? {
+            if let open, let preferred = pickConnection(capability: capability, deviceId: deviceId,
+                                                        excluding: excluding, within: open) {
+                // An op any device can serve does not wait on an open device that has gone quiet
+                // (a suspended iPad) while another capable device is demonstrably awake: the pen
+                // and viewport it would inherit are worth less than a `deviceTimeout`.
+                if routing == .preferOpen, now - preferred.lastActivity > quietAfter,
+                   let awake = pickConnection(capability: capability, deviceId: deviceId,
+                                              excluding: excluding),
+                   now - awake.lastActivity <= quietAfter {
+                    return awake
+                }
+                return preferred
+            }
+            if routing == .requireOpen, open != nil { return nil }
+            return pickConnection(capability: capability, deviceId: deviceId, excluding: excluding)
+        }
+        guard let first = pick(excluding: []) else {
+            // "Nothing can do this at all" and "something could, but not with this document
+            // open" have different cures, so they are different errors.
+            if pickConnection(capability: capability, deviceId: deviceId) != nil {
+                throw DeviceCommandError.documentNotOpen
+            }
             throw DeviceCommandError.noDeviceAvailable
         }
-        guard !docIdsInFlight.contains(docId) else {
-            throw DeviceCommandError.requestInFlight
+        if routing == .requireOpen, let nothingSelected {
+            // Live state: the document may be open on several devices, and the selection is on
+            // (at most) one. The device asked first answering "nothing selected" says nothing about
+            // the others, so ask each open device in turn; only when every one says so is that
+            // the answer (the FIRST device's, the most recently active). Never a retry after a
+            // timeout — a slow device may still apply the op (`neverRetriedCapabilities`).
+            var tried: Set<UUID> = []
+            var firstAnswer: Result<StrokeOpReply, Error>?
+            var connection = first
+            while true {
+                tried.insert(connection.id)
+                let outcome: Result<StrokeOpReply, Error>
+                do {
+                    outcome = .success(try await performRequest(
+                        on: connection, docId: docId, timeout: timeout, sentBytes: sentBytes,
+                        takesDocumentLock: takesDocumentLock, send: send))
+                } catch {
+                    outcome = .failure(error)
+                }
+                guard nothingSelected(outcome) else { return try outcome.get() }
+                if firstAnswer == nil { firstAnswer = outcome }
+                guard let next = pick(excluding: tried) else { return try firstAnswer!.get() }
+                ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)': nothing selected on one open device; asking another")
+                connection = next
+            }
         }
-        docIdsInFlight.insert(docId)
+        do {
+            return try await performRequest(
+                on: first, docId: docId, timeout: timeout, sentBytes: sentBytes,
+                takesDocumentLock: takesDocumentLock, send: send)
+        } catch let error as DeviceCommandError
+            where (error == .deviceTimeout || error == .deviceDisconnected)
+                && deviceId == nil && !Self.neverRetriedCapabilities.contains(capability) {
+            // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
+            // device that answers late (or went away) costs nothing but a discarded reply. A
+            // request addressed to one named device (a holder fetch) has no other device to ask.
+            guard let next = pick(excluding: [first.id]) else {
+                throw error
+            }
+            ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)' failed (\(error)); retrying once on another device")
+            return try await performRequest(
+                on: next, docId: docId, timeout: timeout, sentBytes: sentBytes,
+                takesDocumentLock: takesDocumentLock, send: send)
+        }
+    }
+
+    private func performRequest(
+        on connection: Connection, docId: String, timeout: Duration,
+        sentBytes: Data, takesDocumentLock: Bool,
+        send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
+    ) async throws -> StrokeOpReply {
+        if takesDocumentLock {
+            guard !docIdsInFlight.contains(docId) else {
+                throw DeviceCommandError.requestInFlight
+            }
+            docIdsInFlight.insert(docId)
+        }
 
         let requestId = nextRequestId
         nextRequestId &+= 1
@@ -397,7 +637,8 @@ public actor DeviceCommandBroker {
             // to resume, never race it into existence.
             pending[requestId] = PendingRequest(
                 docId: docId, connectionId: connection.id, continuation: continuation,
-                sentDoc: SentDocument(docId: docId, bytes: sentBytes))
+                sentDoc: SentDocument(docId: docId, bytes: sentBytes),
+                holdsDocumentLock: takesDocumentLock)
 
             send(self, connection, requestId)
 
@@ -423,7 +664,7 @@ public actor DeviceCommandBroker {
     @discardableResult
     private func completePending(_ requestId: UInt32) -> PendingRequest? {
         guard let entry = pending.removeValue(forKey: requestId) else { return nil }
-        docIdsInFlight.remove(entry.docId)
+        if entry.holdsDocumentLock { docIdsInFlight.remove(entry.docId) }
         entry.timeoutTask?.cancel()
         return entry
     }

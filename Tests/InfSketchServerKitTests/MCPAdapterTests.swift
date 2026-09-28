@@ -306,7 +306,7 @@ private actor FakeCreateDocDevice {
         ws.resume()
         try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
+        guard isCurrentHelloAck(ack) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }
@@ -332,7 +332,7 @@ private actor FakeCreateDocDevice {
     /// arrives — NOT through any MCP tool. What `theAppsOwnPushIsNotUndoable` needs.
     func push(docId: String, bytes: Data) async throws {
         try await ws.send(.string(ClientMessage.subscribe(
-            docId: docId, fromSeq: nil, createIfMissing: true).jsonText()))
+            docId: docId, createIfMissing: true).jsonText()))
         _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
         try await ws.send(.string(ClientMessage.op(
             docId: docId, opId: "app-push-\(UUID().uuidString)",
@@ -405,12 +405,12 @@ private actor FakeStrokeOpDevice {
         ws.resume()
         try await ws.send(.string(ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: Array(capabilities), deviceId: nil).jsonText()))
         let ack = try await Self.receiveOne(ws)
-        guard ack == .helloAck(protocolVersion: WireProtocol.version) else {
+        guard isCurrentHelloAck(ack) else {
             throw DocumentStoreError.notFound  // any error type; an unexpected ack fails the test loudly
         }
         if let subscribeTo {
             try await ws.send(.string(ClientMessage.subscribe(
-                docId: subscribeTo, fromSeq: nil, createIfMissing: false).jsonText()))
+                docId: subscribeTo, createIfMissing: false).jsonText()))
             _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
         }
         pumpTask = Task { [weak self] in await self?.pumpLoop() }
@@ -419,7 +419,7 @@ private actor FakeStrokeOpDevice {
     private func pumpLoop() async {
         while true {
             guard let message = try? await Self.receiveOne(ws) else { return }
-            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, let kind) = message else { continue }
+            guard case .strokeOpRequest(let requestId, let docId, let payload, let spec, let kind, _) = message else { continue }
             // The real device does exactly this, in `ServerMirror.resolveAndAnswerStrokeOpRequest`:
             // an op-spec's bulk fields ride the chunked PAYLOAD and are spliced back into the spec
             // before any handler sees it. Resolving it here is what lets every assertion below
@@ -1477,6 +1477,34 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Round 5, item 6: a document CREATED from an agent's bytes gets its own identity — the
+    /// bytes are usually another document's raw read — while a REPLACE keeps the identity of the
+    /// document being replaced. Everything else is stored byte for byte.
+    @Test func replaceDocMintsAnIdentityOnCreateAndKeepsItOnReplace() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let copied = Data(#"{"aaa001_thumbnailData":"T","documentId":"COPIED","placedTextsData":[]}"#.utf8)
+        _ = try await client.callTool(
+            name: "replace_doc", arguments: ["docId": "made", "bytes": .string(copied.base64EncodedString())])
+        let stored = Data(base64Encoded: try #require(
+            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+        let minted = try #require(DocumentIdentity.documentId(of: stored))
+        #expect(minted != "COPIED")
+        #expect(stored == DocumentIdentity.replacingDocumentId(in: copied, with: minted))
+
+        let other = Data(#"{"aaa001_thumbnailData":"","documentId":"OTHER","marker":1}"#.utf8)
+        _ = try await client.callTool(
+            name: "replace_doc", arguments: ["docId": "made", "bytes": .string(other.base64EncodedString())])
+        let replaced = Data(base64Encoded: try #require(
+            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+        #expect(DocumentIdentity.documentId(of: replaced) == minted)
+
+        await server.stop()
+    }
+
     @Test func replaceDocRoundTripsRawBytes() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -1845,6 +1873,27 @@ private actor FakeStrokeOpDevice {
         // device — no createDocRequest should have been sent.
         #expect(await device.receivedRequests.isEmpty)
 
+        await server.stop()
+    }
+
+    /// A name a connected device ADVERTISES is taken, even with no bytes on the server: creating
+    /// it here meant that when the user opened theirs, the agent's content was unioned in — or,
+    /// with a stale base on the device, the user's content deleted (review finding 23).
+    @Test func createDocOnAnAdvertisedNameErrors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Held", modifiedAt: Date(), sizeBytes: 10, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "create_doc", arguments: ["docId": "held"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("docExists"))
+        #expect(await device.receivedRequests.isEmpty)
         await server.stop()
     }
 
@@ -4026,7 +4075,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"],"referencePoint":[10,20]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4090,7 +4139,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([
@@ -4127,7 +4176,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([.object(["op": .string("flipHorizontal")])])
@@ -4149,7 +4198,7 @@ private actor FakeStrokeOpDevice {
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
-            port: port, autoReply: .failure("noReferencePoint"), capabilities: ["controlSelection"])
+            port: port, autoReply: .failure("noReferencePoint"), capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([.object(["op": .string("scale"), "factor": .double(2)])])
@@ -4177,7 +4226,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4206,7 +4255,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"selectedKeys":["seed1:1.0"]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4242,7 +4291,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"referencePoint":[10,20]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4268,7 +4317,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4288,7 +4337,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"selectedKeys":[]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4323,7 +4372,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"elements":[],"grids":[]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([
@@ -4371,7 +4420,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data([1, 2, 3]), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([.object(["op": .string("flipHorizontal")])])
@@ -4431,7 +4480,7 @@ private actor FakeStrokeOpDevice {
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
-            port: port, autoReply: .failure("noReferencePoint"), capabilities: ["controlSelection"])
+            port: port, autoReply: .failure("noReferencePoint"), capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([.object(["op": .string("scale"), "factor": .double(2)])])
@@ -4453,7 +4502,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data([1, 2, 3]), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([
@@ -4495,7 +4544,7 @@ private actor FakeStrokeOpDevice {
         let metaBytes = Data(#"{"newStrokeKeys":["clone1:1.0"]}"#.utf8)
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: metaBytes),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let opsArg: Value = .array([
@@ -4530,7 +4579,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (_, isError) = try await client.callTool(
@@ -4555,7 +4604,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
-            capabilities: ["controlSelection"])
+            capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (_, isError) = try await client.callTool(
@@ -4613,7 +4662,7 @@ private actor FakeStrokeOpDevice {
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
         let device = try await FakeStrokeOpDevice(
-            port: port, autoReply: .failure("noSelectionActive"), capabilities: ["controlSelection"])
+            port: port, autoReply: .failure("noSelectionActive"), capabilities: ["controlSelection"], subscribeTo: "d")
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
@@ -4797,6 +4846,28 @@ private actor FakeStrokeOpDevice {
         let tRaw = try await client.readResource(uri: "infsketch://doc/T/raw")
         #expect(Data(base64Encoded: try #require(tRaw[0].blob)) == targetBytes)
 
+        await server.stop()
+    }
+
+    /// Round 5, item 6: the union the device returns carries TARGET's identity; the new
+    /// document must not share it with `target`.
+    @Test func mergeDocsIntoGivesTheNewDocumentItsOwnIdentity() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8))
+        let union = Data(#"{"aaa001_thumbnailData":"","documentId":"TARGET-ID","marker":"merged"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(union), capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
+        #expect(isError != true)
+        let stored = Data(base64Encoded: try #require(try await client.readResource(uri: "infsketch://doc/C/raw")[0].blob))!
+        let id = try #require(DocumentIdentity.documentId(of: stored))
+        #expect(id != "TARGET-ID")
+        #expect(stored == DocumentIdentity.replacingDocumentId(in: union, with: id))
         await server.stop()
     }
 
@@ -6178,6 +6249,109 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - Live-state ops reach the device with the document open (review finding 20)
+
+    /// An iPad holds the selection; a Mac connected later (and so the device the broker used to
+    /// pick) does not have the document open. The selection op must reach the iPad.
+    @Test func aSelectionOpReachesTheDeviceWithTheDocumentOpenNotTheNewest() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let ipad = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{"from":"ipad"}"#.utf8)),
+            capabilities: ["controlSelection"], subscribeTo: "d")
+        defer { Task { await ipad.close() } }
+        let mac = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("noSelectionActive"), capabilities: ["controlSelection"])
+        defer { Task { await mac.close() } }
+
+        let (content, isError) = try await client.callTool(name: "get_selection", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"{"from":"ipad"}"#)
+        #expect(await mac.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// A device can control a selection but has the document closed: the op is not sent, and the
+    /// error says the document is open nowhere — not the device's "nothing selected", which the
+    /// old routing produced and the enrichment then vouched for.
+    @Test func aSelectionOpWithTheDocumentOpenNowhereSaysSo() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let mac = try await FakeStrokeOpDevice(
+            port: port, autoReply: .failure("noSelectionActive"), capabilities: ["controlSelection"])
+        defer { Task { await mac.close() } }
+
+        let (content, isError) = try await client.callTool(name: "get_selection", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noSelectionActive: no connected device has this document open"))
+        #expect(toolResultText(content).contains("no document is open on any connected device"))
+        #expect(await mac.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// An omitted pen resolves on the device that runs the op, so a draw goes to the device with
+    /// the document open even when another authoring device spoke last.
+    @Test func aDrawPrefersTheDeviceWithTheDocumentOpen() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","strokes":["new-stroke"]}"#.utf8)
+        let ipad = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), subscribeTo: "d")
+        defer { Task { await ipad.close() } }
+        let mac = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified))
+        defer { Task { await mac.close() } }
+
+        let strokesArg: Value = .array([.object([
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+        ])])
+        let (_, isError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        #expect(await ipad.receivedRequests.count == 1)
+        #expect(await mac.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// `draw_strokes` then `transform_selection`: the transform committed on the device and left
+    /// no bytes here, so an undo must not reach past it and reverse the DRAW (review finding 23).
+    @Test func anUndoAfterALiveSelectionChangeRefuses() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","strokes":["new-stroke"]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: modified, meta: Data("{}".utf8)),
+            capabilities: ["authorStrokes", "controlSelection"], subscribeTo: "d")
+        defer { Task { await device.close() } }
+
+        let strokesArg: Value = .array([.object([
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+        ])])
+        let (_, drawError) = try await client.callTool(
+            name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(drawError != true)
+        let opsArg: Value = .array([.object(["op": .string("rotate"), "degrees": .double(90)])])
+        let (_, transformError) = try await client.callTool(
+            name: "transform_selection", arguments: ["docId": "d", "ops": opsArg])
+        #expect(transformError != true)
+
+        let (content, isError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("lastEditWasLiveSelection"))
+        #expect(try await rawDocument(client, "d") == modified, "the draw must still be there")
+
+        await server.stop()
+    }
+
     // MARK: - undo_last_edit (2026-07-28 agent-undo design)
 
     /// THE ONE THAT MATTERS MOST. Recording lives at the MCP layer, not in
@@ -6272,6 +6446,91 @@ private actor FakeStrokeOpDevice {
         #expect(toolResultText(content).hasPrefix("undid 1 edit(s) in d"))
         #expect(try await rawDocument(client, "d") == before)
 
+        await server.stop()
+    }
+
+    /// The history is keyed by the document's ONE spelling, so an agent that writes `RAINFALL` and
+    /// undoes `rainfall` takes back its own write on the stored `Rainfall` (review finding 5).
+    @Test func aWriteAndItsUndoInOtherLetterCasesReachTheSameDocument() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "Rainfall")
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"agent wrote this"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified),
+                                                  capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let before = try await rawDocument(client, "Rainfall")
+        let (_, drewError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "RAINFALL", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]])
+        #expect(drewError != true)
+        #expect(Array(await server.manager.liveInfo().keys) == ["Rainfall"])
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "rainfall"])
+        #expect(isError != true, "\(toolResultText(content))")
+        #expect(try await rawDocument(client, "Rainfall") == before)
+
+        await server.stop()
+    }
+
+    /// Any delete forgets the document's agent history — not only `delete_doc`. An in-app delete
+    /// or a rename (the WS `deleteDoc`) left it, and a recycled name then merged the OLD
+    /// document's content into the new one on the next undo (review finding 23).
+    @Test func aDeleteByAnyRouteForgetsTheAgentHistory() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)),
+            capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "draw_strokes",
+                                      arguments: ["docId": "d", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]])
+
+        try await server.manager.deleteDoc(docId: "d")   // the path an app delete or rename takes
+        _ = await server.manager.submitOpeningSession(
+            docId: "d", createIfMissing: true, opId: "recycled",
+            payload: OpPayload(type: "fullDoc", data: Data(#"{"aaa001_thumbnailData":"","new":1}"#.utf8)),
+            expectation: .absent, writer: "app")
+
+        let (content, isError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("nothingToUndo"))
+        await server.stop()
+    }
+
+    /// A multi-step undo that fails part-way says how many steps DID land, instead of reporting
+    /// only the failure while the document has already moved.
+    @Test func aMultiStepUndoThatFailsPartWayReportsWhatLanded() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let agentBytes = Data(#"{"aaa001_thumbnailData":"","marker":"agent"}"#.utf8)
+        // No `mergeDocs`: a contended step cannot be reversed.
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(agentBytes),
+                                                  capabilities: ["authorStrokes"])
+        defer { Task { await device.close() } }
+        let stroke: [String: Value] = ["docId": "d", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]]
+        _ = try await client.callTool(name: "draw_strokes", arguments: stroke)          // before -> agent
+        // A user edit in between, through the app's own path (a subscription's push — never
+        // recorded), so the older agent edit can only be reversed by a merge.
+        let app = try await server.manager.subscribe(docId: "d")
+        _ = await server.manager.submit(
+            docId: "d", opId: "user", payload: OpPayload(type: "fullDoc", data: Data(#"{"aaa001_thumbnailData":"","m":"user"}"#.utf8)),
+            submitter: app.token)
+        _ = try await client.callTool(name: "draw_strokes", arguments: stroke)          // user -> agent
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "d", "steps": 2])
+        #expect(isError == true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("noDeviceAvailable"), "the reason token stays first: \(text)")
+        #expect(text.contains("1 of 2"), "it must say one step landed: \(text)")
         await server.stop()
     }
 
@@ -6834,12 +7093,11 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "replace_doc",
             arguments: ["docId": "Ghost", "bytes": .string(replacement.base64EncodedString())])
-        #expect(isError != true)
-        #expect(toolResultText(content).contains("replaced Ghost"))
-
-        // Created directly from the agent's bytes (.absent create path) — NOT the fetched content.
-        let raw = await server.manager.currentBytes(docId: "Ghost")
-        #expect(raw == replacement)
+        // A document a device holds EXISTS (review finding 23): creating it here would be unioned
+        // into — or, with a stale base, would delete — the user's own copy when they open it.
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("docExists"))
+        #expect(await server.manager.currentBytes(docId: "Ghost") == nil, "nothing written")
 
         await server.stop()
     }

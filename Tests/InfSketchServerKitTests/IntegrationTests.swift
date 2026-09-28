@@ -171,9 +171,9 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         }
 
         try await send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
-        #expect(try await receive() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await receive()))
 
-        try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
+        try await send(.subscribe(docId: "sample", createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Fixtures.docBytes)
@@ -219,8 +219,8 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         }
 
         try await send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
-        #expect(try await receive() == .helloAck(protocolVersion: WireProtocol.version))
-        try await send(.subscribe(docId: "sample", fromSeq: nil, createIfMissing: false))
+        #expect(isCurrentHelloAck(try await receive()))
+        try await send(.subscribe(docId: "sample", createIfMissing: false))
         #expect(try await receive() == .subscribed(docId: "sample", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         // Push a ~100 KB op up (chunked), get the echo back (chunked): both
@@ -270,7 +270,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // future stroke-authoring MCP tool, Task 4, will call into).
         try await send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
         guard case .text(let ackText) = try await receiveFrame(),
-              try ServerMessage(jsonText: ackText) == .helloAck(protocolVersion: WireProtocol.version)
+              isCurrentHelloAck(try ServerMessage(jsonText: ackText))
         else { Issue.record("expected helloAck"); return }
 
         let bigBytes = Data((0..<100_000).map { UInt8($0 % 256) })
@@ -282,7 +282,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         // Frame 1: the descriptor announce (spec travels inline on this very
         // frame — it is never chunked, only the doc-bytes bulk field is).
         guard case .text(let announce) = try await receiveFrame(),
-              case .strokeOpRequest(let requestId, "sample", .transfer(let d), let announcedSpec, _)
+              case .strokeOpRequest(let requestId, "sample", .transfer(let d), let announcedSpec, _, _)
                 = try ServerMessage(jsonText: announce)
         else { Issue.record("expected strokeOpRequest descriptor"); return }
         #expect(d.totalBytes == bigBytes.count)
@@ -312,7 +312,7 @@ private func startServer(config: SessionConfig = SessionConfig()) async throws -
         }
         #expect(try ServerMessage(jsonText: endText) == .transferEnd(transferId: d.transferId))
         let resolved = try reassembler.consume(.text(endText))
-        guard case .strokeOpRequest(let resolvedRequestId, "sample", .inline(let resolvedBytes), let resolvedSpec, _) = resolved
+        guard case .strokeOpRequest(let resolvedRequestId, "sample", .inline(let resolvedBytes), let resolvedSpec, _, _) = resolved
         else { Issue.record("expected resolved strokeOpRequest"); return }
         #expect(resolvedRequestId == requestId)
         #expect(resolvedBytes == bigBytes)

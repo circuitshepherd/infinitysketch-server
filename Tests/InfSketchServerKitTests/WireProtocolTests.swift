@@ -26,14 +26,16 @@ import InfSketchWire
         /// `spec` and into the chunked payload as an `OpSpecBundle`. The message shape did not
         /// change, so nothing would reject a stale peer — it would read the bundle as a document
         /// and hand an op garbage, which is precisely why the version had to move.
-        #expect(WireProtocol.version == 11)
+        /// v12 (2026-09-28): `helloAck.serverId`, `frame.seq`, the `spec` bundle part, and per-document
+        /// answers (`reject notSubscribed`, `subscribeFailed alreadySubscribed`) where a docId-less
+        /// `error` used to fail every pending request on the connection.
+        #expect(WireProtocol.version == 12)
     }
 
     @Test func clientMessagesRoundTrip() throws {
         let messages: [ClientMessage] = [
             .hello(protocolVersion: 1, capabilities: ["render"], deviceId: nil),
-            .subscribe(docId: "a", fromSeq: 7, createIfMissing: false),
-            .subscribe(docId: "a", fromSeq: nil, createIfMissing: false),
+            .subscribe(docId: "a", createIfMissing: false),
             .unsubscribe(docId: "a"),
             .op(docId: "a", opId: "c1-1", payload: OpPayload(type: "fullDoc", data: Data([1, 2, 3]))),
             .subscribeStatus,
@@ -47,12 +49,11 @@ import InfSketchWire
 
     @Test func serverMessagesRoundTrip() throws {
         let messages: [ServerMessage] = [
-            .helloAck(protocolVersion: 1),
+            .helloAck(protocolVersion: 1, serverId: "s"),
             .subscribed(docId: "a", seq: 0, snapshot: .inline(Data([9]))),
             .event(docId: "a", seq: 1, kind: "op", opId: "c1-1",
                    payload: OpPayload(type: "fullDoc", data: Data([1]))),
             .reject(docId: "a", opId: "c1-1", reason: "unsupportedPayloadType", seq: 3),
-            .resyncRequired(docId: "a", seq: 12),
             .statusEvent(payload: StatusPayload(docId: "a", kind: "docUpdated", seq: 4, subscriberCount: 2)),
             .error(reason: "malformedMessage"),
             .subscribeFailed(docId: "Doc-1", reason: "unknownDoc"),
@@ -64,7 +65,7 @@ import InfSketchWire
     }
 
     @Test func typeFieldIsFlatDiscriminator() throws {
-        let json = try ClientMessage.subscribe(docId: "doc1", fromSeq: nil, createIfMissing: false).jsonText()
+        let json = try ClientMessage.subscribe(docId: "doc1", createIfMissing: false).jsonText()
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         #expect(obj["type"] as? String == "subscribe")
         #expect(obj["docId"] as? String == "doc1")
@@ -104,11 +105,7 @@ import InfSketchWire
     }
     @Test func transferControlMessagesRoundTrip() throws {
         #expect(try roundTripServer(.transferEnd(transferId: 3)) == .transferEnd(transferId: 3))
-        #expect(try roundTripServer(.transferAbort(transferId: 3, reason: "storeFailure"))
-            == .transferAbort(transferId: 3, reason: "storeFailure"))
         #expect(try roundTripClient(.transferEnd(transferId: 9)) == .transferEnd(transferId: 9))
-        #expect(try roundTripClient(.transferAbort(transferId: 9, reason: "cancelled"))
-            == .transferAbort(transferId: 9, reason: "cancelled"))
     }
     @Test func framePxRoundTripsAndAbsenceDecodesNil() throws {
         #expect(try roundTripClient(.watchDoc(docId: "d", framePx: 2048))
@@ -146,12 +143,12 @@ import InfSketchWire
 
 @Suite struct CreateIfMissingWireTests {
     @Test func subscribeWithFlagRoundTrips() throws {
-        let m = ClientMessage.subscribe(docId: "d", fromSeq: nil, createIfMissing: true)
+        let m = ClientMessage.subscribe(docId: "d", createIfMissing: true)
         #expect(try ClientMessage(jsonText: m.jsonText()) == m)
         #expect(try m.jsonText().contains("createIfMissing"))
     }
     @Test func subscribeWithoutFlagStaysV0Compatible() throws {
-        let m = ClientMessage.subscribe(docId: "d", fromSeq: 3, createIfMissing: false)
+        let m = ClientMessage.subscribe(docId: "d", createIfMissing: false)
         #expect(!(try m.jsonText().contains("createIfMissing")))
         // Old-client JSON without the key decodes as false.
         let old = #"{"type":"subscribe","docId":"d","fromSeq":3}"#
@@ -177,7 +174,7 @@ import InfSketchWire
         let f = ClientMessage.frame(docId: "d", payload: .inline(Data([1, 2, 3])), canvasRect: nil)
         let decoded = try ClientMessage(jsonText: f.jsonText())
         #expect(decoded == f)
-        guard case .frame(_, _, let rect) = decoded else { return #expect(Bool(false)) }
+        guard case .frame(_, _, let rect, _) = decoded else { return #expect(Bool(false)) }
         #expect(rect == nil)
     }
     @Test func frameMessageRoundTripsAsDescriptor() throws {
@@ -370,7 +367,7 @@ import InfSketchWire
 /// `makeResponseFrames` both return nil for it).
 struct WirePingPongTests {
     @Test func serverPingRoundTrips() throws {
-        let json = try ServerMessage.ping.jsonText()
+        let json = try ServerMessage.ping().jsonText()
         #expect(json.contains("\"type\":\"ping\""))
         let decoded = try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
         guard case .ping = decoded else {
@@ -393,7 +390,7 @@ struct WirePingPongTests {
     /// connection and ANY inbound message clears it. Pinning the exact wire text keeps the
     /// hand-written web-UI and demo clients honest.
     @Test func thePingAndPongWireTextIsExactlyTheTypeTag() throws {
-        #expect(try ServerMessage.ping.jsonText() == #"{"type":"ping"}"#)
+        #expect(try ServerMessage.ping().jsonText() == #"{"type":"ping"}"#)
         #expect(try ClientMessage.pong.jsonText() == #"{"type":"pong"}"#)
     }
 }
@@ -413,14 +410,14 @@ extension WireProtocolTests {
         let descriptor = TransferDescriptor(transferId: 7, totalBytes: 3, chunkSize: 3)
 
         let announced = original.replacingBulk(with: descriptor)
-        guard case .strokeOpRequest(_, _, .transfer, _, let announcedKind) = announced else {
+        guard case .strokeOpRequest(_, _, .transfer, _, let announcedKind, _) = announced else {
             Issue.record("replacingBulk changed the message shape"); return
         }
         #expect(announcedKind == BlobOmissionWire.strippedDocKind,
                 "the kind must ride the transfer descriptor")
 
         let resolved = announced.resolvingBulk(with: Data([1, 2, 3]))
-        guard case .strokeOpRequest(let rid, let docId, .inline(let bytes), _, let resolvedKind) = resolved else {
+        guard case .strokeOpRequest(let rid, let docId, .inline(let bytes), _, let resolvedKind, _) = resolved else {
             Issue.record("resolvingBulk changed the message shape"); return
         }
         #expect(rid == 9)
@@ -428,5 +425,61 @@ extension WireProtocolTests {
         #expect(bytes == Data([1, 2, 3]))
         #expect(resolvedKind == BlobOmissionWire.strippedDocKind,
                 "the kind must land back beside the reassembled bytes")
+    }
+}
+
+/// The chunk swap keeps EVERY field of every bulk-carrying message. A field lost there is lost only
+/// for a message big enough to chunk (above 256 KiB), which no small round-trip test reaches — so
+/// each message is built here with every optional field set, swapped to a descriptor and back, and
+/// must come out equal. A new bulk message, or a new field on one, belongs in these lists.
+@Suite struct ChunkSwapKeepsEveryFieldTests {
+    private let descriptor = TransferDescriptor(transferId: 7, totalBytes: 3, chunkSize: 2)
+    private let bytes = Data([1, 2, 3])
+
+    @Test func everyClientBulkMessageSurvivesTheSwap() throws {
+        let messages: [ClientMessage] = [
+            .op(docId: "d", opId: "o", payload: OpPayload(type: "strippedDoc", data: bytes),
+                expectation: .matchHash(Data([9]))),
+            .frame(docId: "d", payload: .inline(bytes), canvasRect: [1, 2, 3, 4], seq: 5),
+            .advertiseDocs(payload: .inline(bytes)),
+            .createDocReply(requestId: 3, docId: "d", payload: .inline(bytes), failureReason: "why"),
+            .strokeOpReply(requestId: 4, docId: "d", payload: .inline(bytes), meta: Data([8]),
+                           failureReason: "why", payloadKind: "strippedDoc"),
+        ]
+        for message in messages {
+            #expect(message.bulkBytes == bytes, "\(message) must expose its bulk bytes")
+            let swapped = message.replacingBulk(with: descriptor)
+            #expect(swapped.openingDescriptor == descriptor)
+            #expect(swapped.bulkBytes == nil)
+            // Through the JSON too: what travels is the descriptor form.
+            let wire = try ClientMessage(jsonText: try swapped.jsonText())
+            #expect(wire.resolvingBulk(with: bytes) == message)
+        }
+    }
+
+    @Test func everyServerBulkMessageSurvivesTheSwap() throws {
+        let messages: [ServerMessage] = [
+            .subscribed(docId: "d", seq: 2, snapshot: .inline(bytes)),
+            .event(docId: "d", seq: 3, kind: "op", opId: "o",
+                   payload: OpPayload(type: "strippedDoc", data: bytes)),
+            .strokeOpRequest(requestId: 4, docId: "d", payload: .inline(bytes), spec: Data([7]),
+                             payloadKind: "opBundle", notAfter: 1_760_000_000_000),
+        ]
+        for message in messages {
+            #expect(message.bulkBytes == bytes, "\(message) must expose its bulk bytes")
+            let swapped = message.replacingBulk(with: descriptor)
+            #expect(swapped.openingDescriptor == descriptor)
+            #expect(swapped.bulkBytes == nil)
+            let wire = try ServerMessage(jsonText: try swapped.jsonText())
+            #expect(wire.resolvingBulk(with: bytes) == message)
+        }
+    }
+
+    /// The deadline is ADDITIVE: absent, it decodes nil and encodes no key.
+    @Test func aStrokeOpRequestWithoutADeadlineEncodesNoKey() throws {
+        let m = ServerMessage.strokeOpRequest(requestId: 1, docId: "d", payload: .inline(bytes),
+                                              spec: Data([7]))
+        #expect(!(try m.jsonText()).contains("notAfter"))
+        #expect(try ServerMessage(jsonText: m.jsonText()) == m)
     }
 }

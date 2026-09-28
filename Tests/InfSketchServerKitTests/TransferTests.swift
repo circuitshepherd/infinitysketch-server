@@ -73,9 +73,29 @@ import InfSketchWire
         #expect(try ServerMessage(jsonText: json)
             == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 16))))
     }
+    /// A payload under the inline limit still chunks when the fields BESIDE it would make the
+    /// text frame too big: a `strokeOpRequest` with a spec near its own 64 KiB limit and a payload
+    /// near the inline limit was one ~175 KB frame (round 6, item 13).
+    @Test func aFrameMadeBigByItsOtherFieldsChunksItsPayload() throws {
+        var sender = TransferSender<ServerMessage>(inlineLimit: 64 * 1024, chunkSize: 64 * 1024)
+        let spec = Data(repeating: 0x41, count: 60 * 1024)
+        let payload = Data(repeating: 0x42, count: 60 * 1024)
+        let frames = try sender.frames(for: .strokeOpRequest(
+            requestId: 1, docId: "d", payload: .inline(payload), spec: spec))
+        #expect(frames.count == 3, "announce + one chunk + end")
+        for frame in frames {
+            if case .text(let text) = frame {
+                #expect(text.utf8.count <= TransferDefaults.maxInlineTextFrame)
+            }
+        }
+        // The same payload with a small spec stays one frame.
+        let small = try sender.frames(for: .strokeOpRequest(
+            requestId: 2, docId: "d", payload: .inline(payload), spec: Data("{}".utf8)))
+        #expect(small.count == 1)
+    }
     @Test func bulklessMessageStaysSingleTextFrame() throws {
         var sender = TransferSender<ServerMessage>(inlineLimit: 0, chunkSize: 8)
-        let frames = try sender.frames(for: .helloAck(protocolVersion: 1))
+        let frames = try sender.frames(for: .helloAck(protocolVersion: 1, serverId: "s"))
         #expect(frames.count == 1)
     }
     @Test func largePayloadExpandsToDescriptorChunksEnd() throws {
@@ -211,18 +231,6 @@ import InfSketchWire
         let done = try reassembler.consume(frames[4])   // end
         #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(payload)))
     }
-    @Test func abortDiscardsPendingTransfer() throws {
-        var reassembler = TransferReassembler<ServerMessage>()
-        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
-        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
-        let aborted = try reassembler.consume(.text(try ServerMessage.transferAbort(transferId: 0, reason: "storeFailure").jsonText()))
-        #expect(aborted == nil)   // owner voided
-        // A fresh transfer with the same shape must now be accepted.
-        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
-        _ = try reassembler.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
-        let done = try reassembler.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
-        #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 8))))
-    }
     @Test func zeroByteTransferCompletes() throws {
         var reassembler = TransferReassembler<ServerMessage>()
         let d = TransferDescriptor(transferId: 0, totalBytes: 0, chunkSize: 8)
@@ -317,13 +325,6 @@ import InfSketchWire
             _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
         }
     }
-    @Test func abortWithWrongIdIsFatal() throws {
-        let d = TransferDescriptor(transferId: 5, totalBytes: 8, chunkSize: 8)
-        var r = try opened(d)
-        #expect(throws: TransferWireError.wrongTransferId(expected: 5, got: 9)) {
-            _ = try r.consume(.text(try ServerMessage.transferAbort(transferId: 9, reason: "oops").jsonText()))
-        }
-    }
     @Test func malformedJSONThrowsDecodingErrorNotTransferError() throws {
         var r = TransferReassembler<ServerMessage>()
         do {
@@ -346,9 +347,103 @@ import InfSketchWire
     @Test func selfConsistentHugeDescriptorOpensWithoutTrapping() throws {
         // A consistent but absurd totalBytes must not trap on reserveCapacity;
         // it simply opens a transfer that will never complete.
+        // (An uncapped reassembler: the size cap would refuse this before reserveCapacity.)
         let d = TransferDescriptor(transferId: 0, totalBytes: Int.max - 7, chunkSize: 8)
-        var r = TransferReassembler<ServerMessage>()
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: .max)
         let opened = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
         #expect(opened == nil)
+    }
+
+    // MARK: bounds (review finding 17)
+
+    /// One peer declaring a huge transfer grew the server by hundreds of MB before anything cut
+    /// it. The declared size is known up front, so it is refused up front.
+    @Test func aDescriptorOverTheCapIsFatal() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 1025, chunkSize: 512)
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: 1024)
+        #expect(throws: TransferWireError.transferTooLarge(totalBytes: 1025, limit: 1024)) {
+            _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        }
+    }
+
+    @Test func aDescriptorAtTheCapOpens() throws {
+        let d = TransferDescriptor(transferId: 0, totalBytes: 1024, chunkSize: 512)
+        var r = TransferReassembler<ServerMessage>(maxTotalBytes: 1024)
+        #expect(try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText())) == nil)
+    }
+
+    @Test func theDefaultCapIs512MB() {
+        #expect(TransferReassembler<ServerMessage>.defaultMaxTotalBytes == 512 * 1024 * 1024)
+    }
+
+    /// While transfers are not accepted (the server, before hello) neither a descriptor nor a chunk
+    /// may open or feed one; an ordinary message still passes.
+    @Test func transfersAreRefusedUntilAccepted() throws {
+        var r = TransferReassembler<ServerMessage>()
+        r.acceptsTransfers = false
+        #expect(try r.consume(.text(try ServerMessage.helloAck(protocolVersion: 1, serverId: "s").jsonText())) == .helloAck(protocolVersion: 1, serverId: "s"))
+        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
+        #expect(throws: TransferWireError.transferBeforeHandshake) {
+            _ = try r.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
+        }
+        var r2 = TransferReassembler<ServerMessage>()
+        r2.acceptsTransfers = false
+        #expect(throws: TransferWireError.transferBeforeHandshake) {
+            _ = try r2.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data([1]))))
+        }
+    }
+}
+
+/// Round 5, item 3: every WebSocket message either end sends by default stays small enough to
+/// arrive inside the app's 60 s silence window on a slow link. At 512 KB chunks a link below
+/// ~8.7 KB/s never delivered one; the defaults are 64 KB now, inline included.
+@Suite struct TransferDefaultsTests {
+    @Test func noDefaultMessageIsLargerThanAboutNinetyKilobytes() throws {
+        #expect(TransferDefaults.chunkSize == 64 * 1024)
+        #expect(TransferDefaults.inlineLimit == 64 * 1024)
+        #expect(SessionConfig().chunkSize == TransferDefaults.chunkSize)
+        #expect(SessionConfig().inlineLimit == TransferDefaults.inlineLimit)
+        var sender = TransferSender<ServerMessage>(inlineLimit: TransferDefaults.inlineLimit,
+                                                   chunkSize: TransferDefaults.chunkSize)
+        for size in [TransferDefaults.inlineLimit, TransferDefaults.inlineLimit + 1, 5_000_000] {
+            let frames = try sender.frames(for: .subscribed(docId: "d", seq: 1,
+                                                            snapshot: .inline(Data(repeating: 0x41, count: size))))
+            let largest = frames.map { frame -> Int in
+                switch frame { case .text(let t): t.utf8.count; case .binary(let d): d.count }
+            }.max() ?? 0
+            // Inline base64 is 4/3 of the payload; a chunk is the payload plus a 9-byte header.
+            #expect(largest <= 90 * 1024, "a \(size)-byte payload produced a \(largest)-byte message")
+        }
+        // …and a receiver still accepts any self-consistent chunk size a peer chooses.
+        var old = TransferSender<ServerMessage>(inlineLimit: 256 * 1024, chunkSize: 512 * 1024)
+        var receiver = TransferReassembler<ServerMessage>()
+        let big = Data(repeating: 0x42, count: 1_300_000)
+        var out: ServerMessage?
+        for frame in try old.frames(for: .subscribed(docId: "d", seq: 1, snapshot: .inline(big))) {
+            if let message = try receiver.consume(frame) { out = message }
+        }
+        #expect(out == .subscribed(docId: "d", seq: 1, snapshot: .inline(big)))
+    }
+}
+
+
+/// `docList` is never chunked (it has no bulk field) and reaches a `URLSessionWebSocketTask` whose
+/// receive limit is 1 MiB, which it answers by DROPPING the connection. Pinned at a realistic
+/// store: 500 documents with long names make ~70 KB, so the limit is ~7000 documents away
+/// (round 6, item 13 — measured, and deliberately not chunked).
+@Suite struct DocListFrameSizeTests {
+    @Test func fiveHundredDocumentsStayFarUnderTheReceiveLimit() throws {
+        let docs = (0..<500).map { i in
+            DocListEntry(id: "A fairly long document name number \(i)", sizeBytes: 5_812_345,
+                         modifiedAt: Date(), seq: 123, subscriberCount: 2, hasContent: true)
+        }
+        var sender = TransferSender<ServerMessage>(inlineLimit: TransferDefaults.inlineLimit,
+                                                   chunkSize: TransferDefaults.chunkSize)
+        let frames = try sender.frames(for: .docList(docs: docs))
+        guard case .text(let text)? = frames.first, frames.count == 1 else {
+            Issue.record("docList is one text frame"); return
+        }
+        print("[measure] docList of 500 documents: \(text.utf8.count) B")
+        #expect(text.utf8.count < 128 * 1024)
     }
 }

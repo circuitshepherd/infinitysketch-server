@@ -25,7 +25,7 @@ struct ConnectionKeepaliveTests {
     /// the test was flaky by margin. Suite duration is set by `keepaliveIdleInterval`, which is
     /// what paces the pings, so widening the grace costs nothing.
     private static func fastConfig(
-        budget: Int = 64, idle: Duration = .milliseconds(60)
+        budget: Int = 160, idle: Duration = .milliseconds(60)
     ) -> SessionConfig {
         SessionConfig(
             outboundByteBudget: budget,
@@ -105,6 +105,56 @@ struct ConnectionKeepaliveTests {
         }
     }
 
+    /// A socket that connects and never says hello is closed at the hello deadline, even though
+    /// the idle keepalive is far away.
+    @Test func aConnectionThatNeverSaysHelloIsClosed() async throws {
+        let manager = try Self.makeManager()
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .seconds(300),
+            keepaliveTickInterval: .milliseconds(10), helloDeadline: .milliseconds(150))
+        let harness = try await Harness(manager: manager, config: config)
+        defer { harness.finish() }
+        #expect(await harness.wait { await $0.closed }, "a connection that never said hello must be closed")
+    }
+
+    @Test func aConnectionThatSaidHelloOutlivesTheHelloDeadline() async throws {
+        let manager = try Self.makeManager()
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .seconds(300),
+            keepaliveTickInterval: .milliseconds(10), helloDeadline: .milliseconds(100))
+        let harness = try await Harness(manager: manager, config: config)
+        defer { harness.finish() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+        let closed = await harness.wait(upTo: .milliseconds(500)) { await $0.closed }
+        #expect(!closed)
+    }
+
+    /// A connection that closes while its subscribe is still fetching the document from a holder
+    /// must not leave the subscription behind: it used to be stored after the close, never
+    /// released, and the session could never tear down (review finding 12).
+    @Test func aSubscribeThatCompletesAfterTheCloseIsReleased() async throws {
+        let manager = try Self.makeManager()
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "remote", modifiedAt: Date(), sizeBytes: 2, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "holder")
+        let closedFlag = Collector()
+        await manager.setContentProvider { _, _ in
+            // Hold the fetch until the connection has been dropped.
+            while !(await closedFlag.closed) { try await Task.sleep(for: .milliseconds(10)) }
+            return Data("{}".utf8)
+        }
+        let harness = try await Harness(manager: manager, config: Self.fastConfig())
+        defer { harness.finish() }
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+        try harness.send(.subscribe(docId: "remote", createIfMissing: false))
+        #expect(await harness.wait { await $0.closed }, "the silent peer is dropped")
+        await closedFlag.markClosed()
+        let released = await harness.wait {
+            _ in await manager.liveInfo()["remote"].map { $0.subscriberCount == 0 } ?? false
+        }
+        #expect(released, "the late subscription must be released, not stored")
+    }
+
     /// A peer that never answers is pinged and then dropped. This is the half-open socket: it
     /// says hello, then goes silent forever while the connection stays open.
     @Test func aSilentPeerIsPingedThenDropped() async throws {
@@ -125,7 +175,7 @@ struct ConnectionKeepaliveTests {
         let harness = try await Harness(manager: manager, config: Self.fastConfig())
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
 
         #expect(await harness.wait { await $0.closed }, "the peer must be dropped")
 
@@ -168,8 +218,8 @@ struct ConnectionKeepaliveTests {
     }
 
     /// The BUDGET path, end to end and in isolation. Both other integration tests reach their
-    /// ping through the IDLE timer (`aSilentPeerIsPingedThenDropped` emits only a 39-byte
-    /// `helloAck` against its 64-byte budget, so it never crosses it;
+    /// ping through the IDLE timer (`aSilentPeerIsPingedThenDropped` emits only its `helloAck`,
+    /// ~80 bytes with the server's clock, against a 160-byte budget, so it never crosses it;
     /// `droppingAPeerReleasesItsSubscription` does cross it but asserts nothing about which path
     /// fired) — so a regression that broke `noteEmitted`'s ping and left `tick`'s intact used to
     /// pass every integration test.
@@ -181,15 +231,15 @@ struct ConnectionKeepaliveTests {
     @Test func crossingTheByteBudgetPingsEvenWhenTheIdleTimerCannotFire() async throws {
         let manager = try Self.makeManager()
         let harness = try await Harness(
-            manager: manager, config: Self.fastConfig(budget: 100, idle: .seconds(60)))
+            manager: manager, config: Self.fastConfig(budget: 160, idle: .seconds(60)))
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
 
         #expect(await harness.wait { await $0.messages.isEmpty == false }, "expected a helloAck")
         #expect(await harness.collector.pingCount == 0,
-                "the 39-byte helloAck is under the 100-byte budget — nothing should have pinged yet")
+                "the helloAck (~80 bytes with its serverTimeMs) is under the 160-byte budget — nothing should have pinged yet")
 
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(await harness.wait { await $0.pingCount > 0 },
                 "the snapshot pushes emitted bytes past the budget, which must ASK the peer to prove it is reading")
     }

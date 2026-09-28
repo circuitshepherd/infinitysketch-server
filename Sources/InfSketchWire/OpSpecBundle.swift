@@ -19,7 +19,18 @@ public enum OpSpecBundleWire {
         case source
         /// `addImage` — the image file.
         case imageBytes
+        /// The WHOLE spec, when it is itself too big to ride inline (`inlineSpecLimit`). Not a
+        /// field of the spec — it replaces the message's own (then empty) spec before the other
+        /// parts are spliced into it. The review measured a `reshape_strokes` of ~6000
+        /// full-attribute points making a 1.1 MB text frame, past what the app's socket accepts.
+        case spec
     }
+
+    /// Above this many bytes a request's spec travels as the bundle's `spec` part instead of
+    /// inline in the JSON text frame. Well under the app's 1 MiB receive limit even beside an
+    /// inline payload at the transfer layer's inline ceiling, and far above every ordinary spec, so
+    /// the common request is unchanged.
+    public static let inlineSpecLimit = 64 * 1024
 }
 
 public enum OpSpecBundleError: Error, Equatable {
@@ -140,12 +151,17 @@ extension OpSpecBundle {
     ///
     /// Done as a JSON object edit rather than a decode into a typed spec, because the spec's shape
     /// differs per op and this layer must stay ignorant of all of them.
+    ///
+    /// A `spec` part IS the spec (see `OpSpecBundleWire.Field.spec`): it replaces the message's
+    /// placeholder, and the remaining parts are spliced into it.
     public func specRestoringParts(into spec: Data) throws -> Data {
-        guard !parts.isEmpty else { return spec }
-        guard var object = try JSONSerialization.jsonObject(with: spec) as? [String: Any] else {
-            return spec
+        let base = parts[.spec] ?? spec
+        let fields = parts.filter { $0.key != .spec }
+        guard !fields.isEmpty else { return base }
+        guard var object = try JSONSerialization.jsonObject(with: base) as? [String: Any] else {
+            return base
         }
-        for (field, bytes) in parts {
+        for (field, bytes) in fields {
             object[field.rawValue] = bytes.base64EncodedString()
         }
         return try JSONSerialization.data(withJSONObject: object)

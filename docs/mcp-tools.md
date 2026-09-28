@@ -210,7 +210,9 @@ Take back YOUR OWN last write to a document — the one you just made and wish y
 
 Only YOUR writes are recorded, never the user's own drawing, so this can never reverse their work. One undo = one tool call, the same unit the app registers, and `steps` walks further back one call at a time.
 
-If the document changed after your write, it is MERGED rather than refused: your change is reversed and everything that happened since is kept. That path needs a connected device; an unchanged document does not. There is no redo — but an undo is itself a write, so undoing it again does the obvious thing. History is bounded and in memory, so a much older edit answers `nothingToUndo`.
+If the document changed after your write, it is MERGED rather than refused: your change is reversed and everything that happened since is kept. That path needs a connected device; an unchanged document does not. There is no redo: calling this again takes back the edit before that one, never the undo itself. History is bounded and in memory, so a much older edit answers `nothingToUndo`. If a multi-step undo fails part-way, the error says how many steps had already landed.
+
+A change made through the user's live selection (transform_selection, duplicate_selection, delete_selection, draw_selection, restyle_selection) commits in the app and cannot be taken back here: an undo that reaches one refuses with `lastEditWasLiveSelection` rather than reverse an older write beneath it.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|

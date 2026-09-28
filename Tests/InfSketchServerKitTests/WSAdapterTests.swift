@@ -84,9 +84,9 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
 
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let payload = OpPayload(type: "fullDoc", data: Data([7]))
@@ -95,10 +95,25 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "o1", payload: payload))
     }
 
+    /// A peer is answered in ITS spelling of the document even though the server keys the
+    /// document by the stored one — the app matches its pending subscribe by docId.
+    @Test func aPeerIsAnsweredInItsOwnSpellingOfTheDocument() async throws {
+        let harness = try await Harness(manager: try makeManager())   // stores "d"
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "D", createIfMissing: false))
+        #expect(try await reader.next() == .subscribed(docId: "D", seq: 0, snapshot: .inline(Fixtures.docBytes)))
+        let payload = OpPayload(type: "fullDoc", data: Data([7]))
+        try harness.send(.op(docId: "D", opId: "o1", payload: payload))
+        #expect(try await reader.next() == .event(docId: "D", seq: 1, kind: "op", opId: "o1", payload: payload))
+        #expect(await harness.manager.liveInfo().keys.sorted() == ["d"])
+    }
+
     @Test func messagesBeforeHelloAreRejected() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(try await reader.next() == .error(reason: "helloRequired"))
     }
 
@@ -106,7 +121,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: 99, capabilities: [], deviceId: nil))
-        #expect(try await reader.next() == .error(reason: "unsupportedVersion"))
+        #expect(try await reader.next() == .error(reason: "unsupportedVersion:\(WireProtocol.version)"))
         #expect(try await reader.next() == nil)  // stream finished = connection closed
     }
 
@@ -119,13 +134,42 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .error(reason: "malformedMessage"))
     }
 
-    @Test func opWithoutSubscribeErrors() async throws {
+    /// v12: an op on a document this connection is not subscribed to is REJECTED BY NAME, so the
+    /// pusher that sent it hears an answer. It used to be a docId-less `error` that answered no
+    /// push — the app waited on it for as long as the connection lived (review finding 10).
+    @Test func opWithoutSubscribeIsRejectedWithItsOpId() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
         try harness.send(.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: Data())))
-        #expect(try await reader.next() == .error(reason: "notSubscribed"))
+        #expect(try await reader.next() == .reject(docId: "d", opId: "o1", reason: "notSubscribed", seq: 0))
+    }
+
+    /// v12: a second subscribe for the same document names the document, instead of a docId-less
+    /// `error` that failed every pending subscribe on the connection.
+    @Test func aDuplicateSubscribeFailsOnlyThatDocument() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "d", createIfMissing: true))
+        guard case .subscribed(docId: "d", _, _)? = try await reader.next() else {
+            Issue.record("expected the first subscribe to succeed"); return
+        }
+        try harness.send(.subscribe(docId: "d", createIfMissing: true))
+        #expect(try await reader.next() == .subscribeFailed(docId: "d", reason: "alreadySubscribed"))
+    }
+
+    /// v12: deleting a document that is not there answers `docDeleted` — the goal state holds —
+    /// rather than a docId-less `error`.
+    @Test func deletingAnUnknownDocumentIsIdempotent() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await reader.next()
+        try harness.send(.deleteDoc(docId: "never-existed"))
+        #expect(try await reader.next() == .docDeleted(docId: "never-existed"))
     }
 
     /// Task 3: the `.op` case used to bind the wire `expectation` field and
@@ -142,9 +186,9 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
-        try harness.send(.subscribe(docId: "wsAbsent", fromSeq: nil, createIfMissing: true))
+        try harness.send(.subscribe(docId: "wsAbsent", createIfMissing: true))
         #expect(try await reader.next() == .subscribed(docId: "wsAbsent", seq: 0, snapshot: .inline(Data())))
 
         let firstPayload = OpPayload(type: "fullDoc", data: Data([1, 2, 3]))
@@ -169,7 +213,7 @@ private struct ServerMessageReader {
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
 
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
 
         let stalePayload = OpPayload(type: "fullDoc", data: Data([9, 9, 9]))
@@ -191,7 +235,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await reader.next()
         #expect(await manager.liveInfo()["d"]?.subscriberCount == 1)
 
@@ -211,7 +255,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await reader.next()
 
         harness.input.yield(.close(.normalClosure))
@@ -239,7 +283,7 @@ private struct ServerMessageReader {
         // handled strictly in order, so the status subscription is registered
         // before this subscribe emits sessionOpened. (A direct manager call
         // here would race the async subscribeStatus handling.)
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         // The output interleaves the .subscribed reply with pumped statusEvents;
         // the first statusEvent must be sessionOpened (emitted before
         // subscriberCount, and the pump preserves stream order).
@@ -266,7 +310,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()   // helloAck
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         // The reader reassembles descriptor + chunks + end back into one message.
         #expect(try await reader.next() == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
     }
@@ -276,7 +320,7 @@ private struct ServerMessageReader {
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = await it.next()   // helloAck text frame
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
 
         guard case .text(let announce) = await it.next(),
               case .subscribed(_, 0, .transfer(let d)) = try ServerMessage(jsonText: announce)
@@ -298,7 +342,7 @@ private struct ServerMessageReader {
         var it = harness.output.makeAsyncIterator()
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = await it.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         guard case .text(let json) = await it.next() else { Issue.record("expected single text frame"); return }
         #expect(try ServerMessage(jsonText: json) == .subscribed(docId: "d", seq: 0, snapshot: .inline(Fixtures.docBytes)))
     }
@@ -309,7 +353,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await reader.next()   // subscribed
         // Submit a big op directly through the manager (incoming chunks land in Task 6).
         let bigBytes = Data((0..<200).map { UInt8($0 % 256) })
@@ -328,7 +372,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()   // helloAck
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await reader.next()   // subscribed
         return (harness, reader, manager)
     }
@@ -345,19 +389,24 @@ private struct ServerMessageReader {
         #expect(await manager.liveInfo()["d"]?.seq == 1)
     }
 
-    @Test func abortMidTransferVoidsOpAndConnectionSurvives() async throws {
-        var (harness, reader, manager) = try await subscribedHarness()
+
+    /// Before hello nothing may open a transfer: a pre-hello peer streamed 400 MB into one.
+    @Test func aTransferBeforeHelloIsFatal() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
         let d = TransferDescriptor(transferId: 0, totalBytes: 100, chunkSize: 8)
-        try harness.send(.op(docId: "d", opId: "doomed",
+        try harness.send(.op(docId: "d", opId: "early",
                              payload: OpPayload(type: "fullDoc", bulk: .transfer(d))))
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
+    }
+
+    @Test func aChunkBeforeHelloIsFatal() async throws {
+        let harness = try await Harness(manager: try makeManager())
+        var reader = ServerMessageReader(harness.output)
         harness.sendBinary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8)))
-        try harness.send(.transferAbort(transferId: 0, reason: "cancelled"))
-        // The voided op consumed no seq; a follow-up inline op works and is seq 1.
-        try harness.send(.op(docId: "d", opId: "after",
-                             payload: OpPayload(type: "fullDoc", data: Data([1]))))
-        #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "after",
-                                                  payload: OpPayload(type: "fullDoc", data: Data([1]))))
-        #expect(await manager.liveInfo()["d"]?.seq == 1)
+        #expect(try await reader.next() == .error(reason: "transferViolation"))
+        #expect(try await reader.next() == nil)
     }
 
     @Test func unknownBinaryKindIsFatal() async throws {
@@ -402,7 +451,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "brandnew", fromSeq: nil, createIfMissing: true))
+        try harness.send(.subscribe(docId: "brandnew", createIfMissing: true))
         #expect(try await reader.next() == .subscribed(docId: "brandnew", seq: 0, snapshot: .inline(Data())))
         let payload = OpPayload(type: "fullDoc", data: Data([9]))
         try harness.send(.op(docId: "brandnew", opId: "o1", payload: payload))
@@ -416,7 +465,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "ghost", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "ghost", createIfMissing: false))
         #expect(try await reader.next() == .subscribeFailed(docId: "ghost", reason: "unknownDoc"))
     }
 }
@@ -429,7 +478,7 @@ private struct ServerMessageReader {
         var appReader = ServerMessageReader(app.output)
         try app.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: nil))
         _ = try await appReader.next()
-        try app.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try app.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await appReader.next()   // subscribed
 
         let browser = try await Harness(manager: manager)
@@ -450,13 +499,19 @@ private struct ServerMessageReader {
         #expect(try await appReader.next() == .watchers(docId: "d", count: 0, framePx: nil))
     }
 
-    @Test func frameWithoutSubscriptionErrors() async throws {
+    /// v12: a frame for a document the device is not subscribed to (a render finishing across a
+    /// close) is DROPPED. As an `error` it failed every pending subscribe on the connection. The
+    /// listDocs sent after it is answered first, which is how "nothing was said" is observable.
+    @Test func frameWithoutSubscriptionIsIgnored() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: nil))
         _ = try await reader.next()
         try harness.send(.frame(docId: "d", payload: .inline(Data([1])), canvasRect: nil))
-        #expect(try await reader.next() == .error(reason: "notSubscribed"))
+        try harness.send(.listDocs)
+        guard case .docList? = try await reader.next() else {
+            Issue.record("the frame drew a reply"); return
+        }
     }
 
     @Test func watchUnknownDocErrors() async throws {
@@ -475,7 +530,7 @@ private struct ServerMessageReader {
         var appReader = ServerMessageReader(app.output)
         try app.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: nil))
         _ = try await appReader.next()
-        try app.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try app.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await appReader.next()   // subscribed
 
         let browser = try await Harness(manager: manager)
@@ -554,7 +609,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         // Drive requestCreation on the broker the Connection registered
         // with at hello; the request must reach the client as a wire frame.
@@ -581,11 +636,11 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["provideContent"],
                                 deviceId: "device-A"))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         // Address the request to THIS device's id — it must reach the client as a wire frame.
         let task = Task { try await broker.requestProvideContent(docId: "doc-1", deviceId: "device-A") }
-        guard case .strokeOpRequest(let requestId, "doc-1", _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "doc-1", _, _, _, _) = try await reader.next() else {
             Issue.record("expected a strokeOpRequest frame addressed to device-A"); return
         }
         // The client answers over the wire; the reply must resolve the pending request.
@@ -600,7 +655,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestCreation(docId: "newDoc") }
         guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
@@ -626,7 +681,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         harness.input.finish()  // client disconnects
         while try await reader.next() != nil {}  // drain until adapter closes output (calls close())
@@ -648,7 +703,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestCreation(docId: "newDoc") }
         guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
@@ -667,7 +722,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["createDoc"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestCreation(docId: "newDoc") }
         guard case .createDocRequest(let requestId, "newDoc") = try await reader.next() else {
@@ -694,12 +749,12 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task {
             try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
         }
-        guard case .strokeOpRequest(let requestId, _, _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, _, _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         let meta = Data(#"{"active":false,"elements":[]}"#.utf8)
@@ -716,12 +771,12 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task {
             try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data("{}".utf8))
         }
-        guard case .strokeOpRequest(let requestId, _, _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, _, _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(
@@ -739,7 +794,7 @@ private struct ServerMessageReader {
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         _ = try await reader.next()   // subscribed → doc "d" is live
 
         try harness.send(.listDocs)
@@ -767,7 +822,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: manager)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "device-A"))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let ad = DocAdvertisement(docId: "advertised-only", modifiedAt: Date(timeIntervalSince1970: 1000),
                                   sizeBytes: 555, thumbnail: Data([1, 2, 3]))
@@ -793,7 +848,10 @@ private struct ServerMessageReader {
         _ = try await reader.next()   // helloAck
 
         try harness.send(.advertiseDocs(payload: .inline(Data("not-json".utf8))))
-        #expect(try await reader.next() == .error(reason: "malformedMessage"))
+        // Its own reason, not `malformedMessage`: the app treats that one as connection-fatal
+        // (it names no request, so the only way to answer the request it was is a reconnect),
+        // while a bad advertisement costs nothing but the browser rows.
+        #expect(try await reader.next() == .error(reason: WireErrorReason.badAdvertisement))
 
         // Connection survives: a normal listDocs still works afterward.
         try harness.send(.listDocs)
@@ -815,7 +873,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         // Drive requestStrokeOp on the broker the Connection registered with
         // at hello; the request must reach the client as a wire frame,
@@ -823,7 +881,7 @@ private struct ServerMessageReader {
         let docBytes = Data("stroke-doc-bytes".utf8)
         let spec = Data("stroke-spec-bytes".utf8)
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: docBytes, spec: spec) }
-        guard case .strokeOpRequest(let requestId, "d", .inline(let sentBytes), let sentSpec, _) = try await reader.next()
+        guard case .strokeOpRequest(let requestId, "d", .inline(let sentBytes), let sentSpec, _, _) = try await reader.next()
         else {
             Issue.record("expected strokeOpRequest frame"); return
         }
@@ -846,10 +904,10 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         // The client answers over the wire; Connection.dispatch must route
@@ -870,10 +928,10 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         let metaJSON = Data(#"{"pixelSize":[512,512],"scale":2}"#.utf8)
@@ -902,10 +960,10 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(requestId: requestId, docId: "d", payload: nil, meta: nil, failureReason: nil))
@@ -922,10 +980,10 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
-        guard case .strokeOpRequest(let requestId, "d", _, _, _) = try await reader.next() else {
+        guard case .strokeOpRequest(let requestId, "d", _, _, _, _) = try await reader.next() else {
             Issue.record("expected strokeOpRequest frame"); return
         }
         try harness.send(.strokeOpReply(
@@ -944,7 +1002,7 @@ private struct ServerMessageReader {
         let harness = try await Harness(manager: try makeManager(), broker: broker)
         var reader = ServerMessageReader(harness.output)
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: nil))
-        #expect(try await reader.next() == .helloAck(protocolVersion: WireProtocol.version))
+        #expect(isCurrentHelloAck(try await reader.next()))
 
         let task = Task { try await broker.requestStrokeOp(docId: "d", docBytes: Data(), spec: Data()) }
         guard case .strokeOpRequest = try await reader.next() else {
@@ -956,9 +1014,16 @@ private struct ServerMessageReader {
         harness.input.finish()  // client disconnects
         while try await reader.next() != nil {}  // drain until adapter closes output (calls close())
 
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceTimeout) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceDisconnected) {
             _ = try await task.value
         }
         #expect(clock.now - start < .seconds(1))
     }
+}
+
+/// A `helloAck` at the current wire version carrying a server id. The id itself is per server
+/// instance, so tests that only need "the handshake was accepted" check its shape, not its value.
+func isCurrentHelloAck(_ message: ServerMessage?) -> Bool {
+    if case .helloAck(WireProtocol.version, let serverId, _)? = message { return !serverId.isEmpty }
+    return false
 }

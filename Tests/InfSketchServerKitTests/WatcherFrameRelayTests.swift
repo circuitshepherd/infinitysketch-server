@@ -267,7 +267,11 @@ import InfSketchWire
         _ = await it.next()
         let big = try await manager.watch(docId: "d", framePx: 2048)
         var it2 = big.events.makeAsyncIterator()
+        // Two nudges: the cached default-size frame at once (a new watcher is told what is
+        // already there), then the 2048 render it asked for.
         #expect(await it2.next() == .frameAvailable(docId: "d", seq: 0))
+        #expect(await it2.next() == .frameAvailable(docId: "d", seq: 0))
+        #expect(await manager.latestFrame(docId: "d")?.px == 2048)
         // A page with no preference asks for the default size by name — auto and 1024 are one request.
         #expect(await calls.all.map(\.px) == [WatcherFrame.defaultLongSidePx, 2048])
     }

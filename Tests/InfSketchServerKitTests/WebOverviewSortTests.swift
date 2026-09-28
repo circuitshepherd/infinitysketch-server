@@ -44,8 +44,12 @@ import Testing
         // but the page's own variable — there is nothing else to assert against.
         // The dot is what makes these USES rather than the word in a comment; the
         // viewer page persists its own preferences this way, this one must not.
+        // The one storage use on the page is the version-reload guard's timestamp, which has
+        // nothing to do with the sort; it is taken out before looking.
+        #expect(html.contains(WebUI.versionReloadJS))
+        let page = html.replacingOccurrences(of: WebUI.versionReloadJS, with: "")
         for store in ["localStorage.", "sessionStorage.", "document.cookie", "indexedDB."] {
-            #expect(!html.contains(store), "the sort must not survive a reload via \(store)")
+            #expect(!page.contains(store), "the sort must not survive a reload via \(store)")
         }
     }
 

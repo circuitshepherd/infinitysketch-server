@@ -544,4 +544,32 @@ import Testing
         }
     }
 
+
+    // MARK: - no stale thumbnail (review finding 23)
+
+    /// A thumbnail is stored WITH a document only if it belongs to the bytes stored — else none.
+    /// These edits change the content and cannot re-render, so the preview they would carry is
+    /// the previous document's.
+    @Test func everyServerSideEditDropsTheThumbnail() throws {
+        var doc = try #require(try JSONSerialization.jsonObject(with: Self.fixture) as? [String: Any])
+        doc["aaa001_thumbnailData"] = Data([1, 2, 3]).base64EncodedString()
+        let withThumbnail = try JSONSerialization.data(withJSONObject: doc)
+        let edits: [(String, () throws -> Data)] = [
+            ("setPaper", { try DocJSON.setPaper(from: withThumbnail, light: "#112233", dark: nil, transparent: nil) }),
+            ("setPinned", { try DocJSON.setPinned(from: withThumbnail, ids: ["AAAAAAAA-0000-0000-0000-000000000001"], pinned: true) }),
+            ("removeText", { try DocJSON.removeText(from: withThumbnail, textId: "AAAAAAAA-0000-0000-0000-000000000001") }),
+        ]
+        for (name, edit) in edits {
+            let out = try edit()
+            let parsed = try #require(try JSONSerialization.jsonObject(with: out) as? [String: Any])
+            #expect(parsed["aaa001_thumbnailData"] == nil, "\(name) kept a thumbnail of the old content")
+        }
+    }
+
+    /// No thumbnail — absent or empty — reads as none, so the frame route falls through to its
+    /// next source (or 404) instead of serving an empty image.
+    @Test func anEmptyOrAbsentThumbnailIsNone() {
+        #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data(#"{"a":1}"#.utf8)) == nil)
+        #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8)) == nil)
+    }
 }

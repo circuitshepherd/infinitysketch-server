@@ -56,6 +56,40 @@ import InfSketchWire
         #expect(await manager.liveInfo()["d"]?.seq == 0)
     }
 
+    /// A watcher that arrives while a frame is cached is told so at once (review finding 24): a
+    /// page that reconnected after a sleep otherwise kept its old picture until the next edit,
+    /// because the cached frame is current and nothing renders or nudges again. A watcher that
+    /// arrives with nothing cached gets no nudge — there is nothing to fetch.
+    @Test func aNewWatcherIsNudgedWhenAFrameIsCached() async throws {
+        let (_, manager) = try makeManager()
+        _ = try await manager.subscribe(docId: "d")
+        _ = try await manager.watch(docId: "d")
+        #expect(await manager.submitFrame(docId: "d", bytes: Data([7]), canvasRect: nil, atSeq: 0))
+
+        let second = try await manager.watch(docId: "d")
+        #expect(await Self.firstEvent(of: second.events) == .frameAvailable(docId: "d", seq: 0))
+    }
+
+    @Test func aNewWatcherIsNotNudgedWhenNoFrameIsCached() async throws {
+        let (_, manager) = try makeManager()
+        _ = try await manager.subscribe(docId: "d")
+        let watch = try await manager.watch(docId: "d")
+        #expect(await Self.firstEvent(of: watch.events, within: .milliseconds(200)) == nil)
+    }
+
+    /// The stream's first event, or nil when none arrives in time — so a missing nudge fails
+    /// the test instead of hanging the suite (`unwatch` does not finish a watcher's stream).
+    private static func firstEvent(of events: AsyncStream<ServerMessage>,
+                                   within limit: Duration = .seconds(2)) async -> ServerMessage? {
+        await withTaskGroup(of: ServerMessage?.self) { group in
+            group.addTask { var it = events.makeAsyncIterator(); return await it.next() }
+            group.addTask { try? await Task.sleep(for: limit); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
     /// A rect a viewer could not divide by is dropped at submission, so both read paths
     /// see the one state the browser has a defined behaviour for: absent. A zero width
     /// arriving intact would put NaN into the page's transform.

@@ -197,6 +197,78 @@ struct ConnectionHealthTests {
                 "1200 bytes buys only the flat grace, so this one drops at 10 s")
     }
 
+    // MARK: - host suspension
+
+    /// `ContinuousClock` counts time the host slept. On wake the tick ran before the peer's
+    /// buffered pong was read, so every peer with a ping outstanding was dropped within
+    /// milliseconds (measured 4 of 4 with SIGSTOP 15–90 s). A tick gap far beyond the tick
+    /// interval is a suspension: deadlines restart from now.
+    @Test func aPingOutstandingAcrossASuspensionGetsAFreshGrace() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, tickInterval: .seconds(5))
+        var now = t0
+        for _ in 0..<6 { now = now.advanced(by: .seconds(5)); #expect(health.tick(now: now) == .none) }
+        now = now.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .ping, "idle 35 s: pinged")
+        // The host sleeps for 90 s with the ping outstanding.
+        now = now.advanced(by: .seconds(90))
+        #expect(health.tick(now: now) == .none, "waking must not drop a peer whose pong is still unread")
+        // The pong arrives on the next read.
+        #expect(health.noteInbound(now: now.advanced(by: .milliseconds(2))) == .none)
+        #expect(health.tick(now: now.advanced(by: .seconds(5))) == .none)
+    }
+
+    /// Re-arming is not forgiveness: a peer that stays silent after the wake is still dropped.
+    @Test func aSilentPeerIsStillDroppedAfterTheWake() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, tickInterval: .seconds(5))
+        #expect(health.noteEmitted(bytes: 2000, now: t0) == .ping)
+        var now = t0.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .none)
+        now = now.advanced(by: .seconds(120))
+        #expect(health.tick(now: now) == .none)
+        for _ in 0..<2 { now = now.advanced(by: .seconds(5)); _ = health.tick(now: now) }
+        now = now.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .drop(reason: .unresponsive))
+    }
+
+    /// Without a tick interval (the pure tests above jump tens of seconds between ticks) there is
+    /// no suspension detection at all.
+    @Test func withoutATickIntervalLongGapsAreOrdinary() {
+        let t0 = ContinuousClock.now
+        var health = makeHealth(now: t0)
+        #expect(health.noteEmitted(bytes: 2000, now: t0) == .ping)
+        #expect(health.tick(now: t0.advanced(by: .seconds(90))) == .drop(reason: .unresponsive))
+    }
+
+    // MARK: - hello deadline
+
+    /// A socket that never says hello holds a file descriptor for ever; enough of them end the
+    /// server with EMFILE on accept.
+    @Test func aConnectionWithoutHelloIsDroppedAtTheDeadline() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: .seconds(300), pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, helloDeadline: .seconds(10))
+        #expect(health.tick(now: t0.advanced(by: .seconds(9))) == .none)
+        // Talking is not saying hello: a pong-only peer is still refused.
+        #expect(health.noteInbound(now: t0.advanced(by: .seconds(9))) == .none)
+        #expect(health.tick(now: t0.advanced(by: .seconds(11))) == .drop(reason: .noHello))
+    }
+
+    @Test func helloDisarmsTheDeadline() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: .seconds(300), pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, helloDeadline: .seconds(10))
+        health.noteHello()
+        #expect(health.tick(now: t0.advanced(by: .seconds(60))) == .none)
+    }
+
     /// The idle timer must not fire on a busy-but-healthy connection.
     @Test func steadyInboundTrafficNeverPings() {
         var now = ContinuousClock.now
@@ -219,6 +291,7 @@ struct KeepaliveConfigTests {
         #expect(config.keepalivePingGrace == .seconds(10))
         #expect(config.keepaliveTickInterval == .seconds(5))
         #expect(config.assumedMinimumDrainRate == 1024 * 1024)
+        #expect(config.helloDeadline == .seconds(10))
     }
 
     @Test func theyAreOverridable() {

@@ -1,5 +1,6 @@
 import Foundation
 import FlyingFox
+import FlyingSocks
 
 public struct DocSummary: Codable, Equatable, Sendable {
     public var id: String
@@ -35,6 +36,14 @@ public final class InfSketchServer: Sendable {
     /// against the same broker instance the running server's `WSAdapter` uses.
     let deviceCommandBroker: DeviceCommandBroker
     let mcpAdapter: MCPAdapter  // internal for tests (session-registry assertions)
+    /// Set by `stop()` BEFORE the socket closes, so the accept failure that closing it produces
+    /// ends `run()` instead of being retried as descriptor exhaustion.
+    private let stopFlag = StopFlag()
+
+    private actor StopFlag {
+        private(set) var isSet = false
+        func set() { isSet = true }
+    }
 
     public convenience init(
         port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
@@ -58,9 +67,12 @@ public final class InfSketchServer: Sendable {
     /// tool handler's read and the session-open behind its submit see
     /// DIFFERENT content with no timing involved at all — see
     /// `StaleReadStore` in MCPAdapterTests.
+    ///
+    /// `socketPool` replaces FlyingFox's default event pool (still wrapped in
+    /// `WriteStallTimeoutPool`) — for the test that makes `accept` fail on a real server.
     init(
         port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
-        renderFileStore: RenderFileStore? = nil
+        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil
     ) {
         self.store = store
         self.renderFileStore = renderFileStore
@@ -69,11 +81,26 @@ public final class InfSketchServer: Sendable {
         // The logger is passed EXPLICITLY, never defaulted: FlyingFox's default prints to stdout on
         // every non-Apple platform, which made the quiet console Apple-only by accident. See
         // `ServerLogHTTPLogging`.
-        self.http = HTTPServer(port: port, logger: ServerLogHTTPLogging())
+        //
+        // The pool is wrapped so a peer that stops reading loses its SOCKET, not only its
+        // subscriptions — see `WriteStallTimeoutPool`. The address mirrors FlyingFox's own
+        // `init(port:)`, which cannot take a pool.
+        #if canImport(WinSDK)
+        let address = sockaddr_in.inet(port: port)
+        #else
+        let address = sockaddr_in6.inet6(port: port)
+        #endif
+        let pool = WriteStallTimeoutPool(inner: socketPool ?? HTTPServer.defaultPool(),
+                                         timeout: config.writeStallTimeout)
+        self.http = HTTPServer(config: HTTPServer.Configuration(
+            address: address,
+            pool: pool,
+            logger: ServerLogHTTPLogging()))
         self.config = config
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
-            createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout)
+            createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout,
+            quietAfter: config.keepaliveIdleInterval)
         self.deviceCommandBroker = deviceCommandBroker
         self.mcpAdapter = MCPAdapter(
             manager: manager,
@@ -84,9 +111,19 @@ public final class InfSketchServer: Sendable {
     }
 
     /// Configures routes and serves until stopped.
+    ///
+    /// An `accept` failure — EMFILE when descriptors run out — is not the end of the server: it
+    /// waits briefly and listens again (see `AcceptResilience`). Listening again drops the
+    /// connections the failed loop held, which is also what frees the descriptors.
     public func run() async throws {
         await configureRoutes()
-        try await http.run()
+        let stopFlag = self.stopFlag
+        try await AcceptResilience.run(
+            delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
+            shouldStop: { await stopFlag.isSet }
+        ) {
+            try await http.run()
+        }
     }
 
     /// Throws if the socket is not accepting within `timeout`. The default matches FlyingFox's own.
@@ -113,6 +150,7 @@ public final class InfSketchServer: Sendable {
     /// tests still passing. A sixteen-fold difference in the edit-test loop, for a second nobody
     /// was using.
     public func stop() async {
+        await stopFlag.set()
         await http.stop(timeout: 0)
         await mcpAdapter.shutdown()
     }
@@ -140,10 +178,19 @@ public final class InfSketchServer: Sendable {
         // A document with watchers and no subscriber gets its frame from any connected device
         // that can render — the relay `render_sketch` walks, so the picture is the one an agent
         // gets and the deployed app already serves it (spec 2026-08-29-watcher-frames-...).
+        // Every delete, however it arrives, forgets the agent's edit history for that document.
+        // Live-state ops go to the device with the document open (review finding 20).
+        await broker.setSubscriberLookup { docId in
+            await manager.subscribedConnections(docId: docId)
+        }
+        let mcpAdapter = self.mcpAdapter
+        await manager.setDocumentDeletedHandler { docId in
+            await mcpAdapter.forgetHistory(docId: docId)
+        }
         await manager.setFrameProvider { docId, bytes, px in
             let reply = try await broker.requestStrokeOp(
                 docId: docId, docBytes: bytes, spec: WatcherFrame.renderSpec(longSidePx: px),
-                capability: "render")
+                capability: "render", takesDocumentLock: false)
             return (png: reply.bytes, canvasRect: WatcherFrame.canvasRect(fromMetadata: reply.meta))
         }
 
@@ -157,8 +204,10 @@ public final class InfSketchServer: Sendable {
             }
             // M2c-1: metadata-only documents come from the LIVE index (connected devices'
             // advertisements). Content always beats metadata, so skip any docId with bytes.
-            let contentIds = Set(summaries.map(\.id))
-            for (docId, entry) in await manager.liveDocs() where !contentIds.contains(docId) {
+            // Case-insensitively, as `SessionManager.listDocuments` does: an advertised
+            // `rainfall` IS the stored `Rainfall`.
+            let contentIds = Set(summaries.map { $0.id.lowercased() })
+            for (docId, entry) in await manager.liveDocs() where !contentIds.contains(docId.lowercased()) {
                 summaries.append(DocSummary(
                     id: docId, name: entry.name, sizeBytes: entry.sizeBytes,
                     modifiedAt: entry.modifiedAt, seq: nil, subscriberCount: nil,
@@ -274,7 +323,7 @@ public final class InfSketchServer: Sendable {
             //     `IntegrationTests.percentNamedDocServesPageAndFrame`);
             //   - a connected device's advertisement (M2c metadata-only: no bytes here at all,
             //     and the frame route serves the thumbnail its holder advertised).
-            let hasSession = await manager.liveInfo()[docId] != nil
+            let hasSession = await manager.liveInfo()[manager.canonicalDocId(docId)] != nil
             let advertised = await manager.liveEntry(docId: docId) != nil
             let known = ((try? store.exists(docId: docId)) ?? false) || hasSession || advertised
             guard known else { return HTTPResponse(statusCode: .notFound) }
@@ -285,14 +334,17 @@ public final class InfSketchServer: Sendable {
 
         await http.appendRoute(
             "GET /ws",
-            to: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)))
+            to: OriginCheckedHTTPHandler(
+                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)),
+                allowedHostNames: Set(config.allowedHostNames)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
         // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the
         // transport bridge and MCPAdapter.swift for the resource surface +
         // per-session registry (task-1-report.md has the SPIKE-PIN write-up
         // this was built from).
-        await mountMCP(on: http, adapter: mcpAdapter)
+        await mountMCP(on: http, adapter: mcpAdapter,
+                       allowedHostNames: Set(config.allowedHostNames))
 
         // Where a scanned QR code lands. The address comes from the request's own Host header —
         // whatever the DEVICE used to reach us, which is by definition an address that works from

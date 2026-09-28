@@ -39,9 +39,16 @@ public actor SessionManager {
     private let store: any DocumentStore
     private let config: SessionConfig
     private var sessions: [String: DocumentSession] = [:]
-    private var tokenDocs: [UUID: String] = [:]
+    /// token → the docId and the SESSION it subscribed to. By session, not docId alone: a delete
+    /// ends one session and a later open makes another under the same docId, and a release that
+    /// arrives afterwards belongs to the first — charging it to the second tore that down under
+    /// a live subscriber (review finding 19).
+    /// Which document, session and CONNECTION each subscription belongs to. The connection is what
+    /// lets the broker send a live-state op (the user's selection, the pen they hold, their
+    /// viewport) to the device that actually has the document open (`subscribedConnections`).
+    private var tokenDocs: [UUID: (docId: String, session: DocumentSession, connectionId: UUID?)] = [:]
     private var counts: [String: Int] = [:]
-    private var tokenWatchDocs: [UUID: String] = [:]
+    private var tokenWatchDocs: [UUID: (docId: String, session: DocumentSession)] = [:]
     private var watcherCounts: [String: Int] = [:]
     private var graceTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var statusSubscribers: [UUID: AsyncStream<ServerMessage>.Continuation] = [:]
@@ -58,9 +65,58 @@ public actor SessionManager {
     /// instead of each hitting a holder (the broker would reject the second with requestInFlight).
     private var inFlightFetches: [String: Task<Data, Error>] = [:]
 
+    /// This server INSTANCE's identity, sent in every `helloAck`. Persistent for a store that can
+    /// keep it (a documents directory keeps it in a file beside the documents), otherwise random
+    /// per process — an in-memory store's documents do not outlive the process either, so a new id
+    /// each run is the honest answer.
+    public nonisolated let serverId: String
+
     public init(store: any DocumentStore, config: SessionConfig = SessionConfig()) {
         self.store = store
         self.config = config
+        self.serverId = store.persistentServerId() ?? UUID().uuidString
+    }
+
+    // MARK: - docId letter case
+
+    /// The one spelling a document goes by inside this actor.
+    ///
+    /// The store folds case (`RAINFALL` finds `Rainfall`) but the tables below were keyed by the
+    /// exact spelling, so an agent writing `RAINFALL` opened a SECOND session on the same file:
+    /// the app's session never heard of the write, and the app's next push — its base equal to
+    /// its stale session's bytes — was accepted and overwrote the agent's edit on disk. Every
+    /// public entry therefore canonicalises first: the spelling on disk when the document is
+    /// stored, else a live session's or an advertisement's spelling, else the caller's own.
+    ///
+    /// An exact session hit returns at once (no directory listing), which is every op on an open
+    /// document. Callers that talk back to a peer in the peer's own spelling (the WebSocket
+    /// connection) map outgoing messages themselves.
+    public func canonicalDocId(_ docId: String) -> String {
+        if sessions[docId] != nil { return docId }
+        if let stored = store.storedDocId(matching: docId) { return stored }
+        let wanted = docId.lowercased()
+        if let live = sessions.keys.filter({ $0.lowercased() == wanted }).min() { return live }
+        if liveIndex[docId] != nil { return docId }
+        if let advertised = liveIndex.keys.filter({ $0.lowercased() == wanted }).min() { return advertised }
+        return docId
+    }
+
+    /// The live session for `docId` in ANY letter case — exact spelling first — with the key it is
+    /// registered under. For the re-checks after an await: the spelling a caller canonicalised to
+    /// before suspending may not be the one a racing opener registered.
+    private func sessionMatching(_ docId: String) -> (key: String, session: DocumentSession)? {
+        if let exact = sessions[docId] { return (docId, exact) }
+        let wanted = docId.lowercased()
+        guard let key = sessions.keys.filter({ $0.lowercased() == wanted }).min(),
+              let session = sessions[key] else { return nil }
+        return (key, session)
+    }
+
+    /// The live-index entry for a canonical docId, whatever spelling the device advertised it in.
+    private func liveIndexEntry(_ docId: String) -> LiveDocEntry? {
+        if let exact = liveIndex[docId] { return exact }
+        let wanted = docId.lowercased()
+        return liveIndex.keys.filter { $0.lowercased() == wanted }.min().flatMap { liveIndex[$0] }
     }
 
     public func setContentProvider(_ provider: @escaping @Sendable (String, String) async throws -> Data) {
@@ -96,6 +152,14 @@ public actor SessionManager {
 
     public func setFrameProvider(_ provider: @escaping FrameProvider) {
         frameProvider = provider
+    }
+
+    /// Told after every successful `deleteDoc`, whoever asked for it. The MCP layer forgets the
+    /// document's agent edit history here, so a recycled name cannot inherit it.
+    private var documentDeletedHandler: (@Sendable (String) async -> Void)?
+
+    public func setDocumentDeletedHandler(_ handler: @escaping @Sendable (String) async -> Void) {
+        documentDeletedHandler = handler
     }
 
     /// A device that can render has connected: render whatever is watched and unopened. This is
@@ -194,7 +258,9 @@ public actor SessionManager {
     /// broadcasts may leave out image blobs it already holds. Defaults to false: a peer that never
     /// said so keeps receiving whole documents.
     public func subscribe(docId: String, createIfMissing: Bool = false,
-                          acceptsStrippedDocuments: Bool = false) async throws -> SubscribeResult {
+                          acceptsStrippedDocuments: Bool = false,
+                          connectionId: UUID? = nil) async throws -> SubscribeResult {
+        var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -246,8 +312,15 @@ public actor SessionManager {
             // freezes at its initial snapshot (and `sessionOpened` fires twice for one document).
             // For the two non-fetch branches there is no suspension, so `sessions[docId]` is still
             // nil here and this re-check is a no-op — their behaviour is unchanged.
-            if let raced = sessions[docId] {
-                session = raced
+            //
+            // The re-check is CASE-FOLDED, and it re-canonicalises: the spelling was chosen BEFORE
+            // the await, so two peers asking for a not-yet-stored document in different spellings
+            // (each advertised by a different device, say) both reached here, and an exact-key
+            // check let the second register a second session for the same document (round 5,
+            // item 7) — the split `canonicalDocId` exists to prevent.
+            if let raced = sessionMatching(docId) {
+                session = raced.session
+                docId = raced.key
             } else {
                 session = opened
                 sessions[docId] = opened
@@ -255,7 +328,14 @@ public actor SessionManager {
             }
         }
         let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments)
-        tokenDocs[result.token] = docId
+        // Reentrancy: a delete may have ended this session while we awaited it. Registering the
+        // token then counted a subscriber no release would ever uncount, so the next session of
+        // this docId could never tear down. The document is gone: say so.
+        guard sessions[docId] === session else {
+            await session.unsubscribe(result.token)
+            throw DocumentStoreError.notFound
+        }
+        tokenDocs[result.token] = (docId, session, connectionId)
         let newCount = counts[docId, default: 0] + 1
         counts[docId] = newCount
         if case .subscribed(_, let seq, _) = result.snapshot {
@@ -264,13 +344,54 @@ public actor SessionManager {
         return result
     }
 
+    /// The connections holding a subscription to `docId`'s CURRENT session — the devices that have
+    /// the document open. A subscription left on a session a delete already ended does not count.
+    ///
+    /// A connection that unsubscribed within `SessionConfig.unsubscribeRoutingGrace` still counts:
+    /// a device's refetch unsubscribes and resubscribes, and the document is on its screen the
+    /// whole time. A connection that has since CLOSED is filtered out by the broker, which only
+    /// picks among connections it still has registered.
+    public func subscribedConnections(docId: String) -> Set<UUID> {
+        let docId = canonicalDocId(docId)
+        let now = ContinuousClock.now
+        var result = Set<UUID>()
+        if var recent = recentlyUnsubscribed[docId] {
+            recent = recent.filter { now - $0.value <= config.unsubscribeRoutingGrace }
+            recentlyUnsubscribed[docId] = recent.isEmpty ? nil : recent
+            result.formUnion(recent.keys)
+        }
+        guard let session = sessions[docId] else { return result }
+        result.formUnion(tokenDocs.values.compactMap { entry in
+            entry.docId == docId && entry.session === session ? entry.connectionId : nil
+        })
+        return result
+    }
+
+    /// docId → connections that unsubscribed from it recently, and when. See
+    /// `subscribedConnections`. Pruned as it is read; a delete clears the document's entry.
+    private var recentlyUnsubscribed: [String: [UUID: ContinuousClock.Instant]] = [:]
+
+    /// The token decides which document and session this was; `docId` is the caller's spelling
+    /// and is only checked to name the same document.
     public func unsubscribe(docId: String, token: UUID) async {
-        guard tokenDocs.removeValue(forKey: token) == docId,
-              let session = sessions[docId] else { return }
+        guard let entry = tokenDocs[token],
+              entry.docId.lowercased() == docId.lowercased() else { return }
+        tokenDocs.removeValue(forKey: token)
+        let docId = entry.docId
+        let session = entry.session
+        if let connectionId = entry.connectionId, sessions[docId] === session {
+            recentlyUnsubscribed[docId, default: [:]][connectionId] = ContinuousClock.now
+        }
+        // A session a delete already ended has no count here any more; its successor's count is
+        // not this subscriber's.
+        let isCurrent = sessions[docId] === session
+        if isCurrent { counts[docId] = max(0, (counts[docId] ?? 1) - 1) }
         await session.unsubscribe(token)
-        counts[docId] = max(0, (counts[docId] ?? 1) - 1)
+        guard isCurrent else { return }
+        let seq = await session.seq
+        guard sessions[docId] === session else { return }
         let remaining = counts[docId] ?? 0
-        emitStatus(docId: docId, kind: "subscriberCount", seq: await session.seq, count: remaining)
+        emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: remaining)
         if remaining == 0 && (watcherCounts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
         } else if remaining == 0 {
@@ -292,35 +413,49 @@ public actor SessionManager {
     /// list. A device that still holds a copy may re-advertise or re-push it and bring it back,
     /// which is accepted behaviour rather than a bug to design against.
     public func deleteDoc(docId: String) async throws {
+        let docId = canonicalDocId(docId)
         let hadContent = (try? store.exists(docId: docId)) ?? false
-        let hadAdvertisement = liveIndex[docId] != nil
+        let hadAdvertisement = liveIndexEntry(docId) != nil
         guard hadContent || hadAdvertisement else { throw DocumentStoreError.notFound }
 
-        if hadContent { try store.delete(docId: docId) }
-        ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(liveIndex[docId]?.holders.sorted() ?? [])")
-
+        // With a live session the delete happens INSIDE it, serialised after any save it is
+        // making — deleting from here raced that save, which could land last and re-create the
+        // file (review finding 19). Everything keyed by this docId is cleared in THIS turn,
+        // before the await: a subscribe that opens a fresh session meanwhile owns the keys after
+        // it, and clearing them later would wipe that session's counts.
+        let wanted = docId.lowercased()
         // Drop the advertisement so the deleting device's own browser does not keep showing the
         // document as a remote row until the next advertisement refresh. A device that still holds
         // it re-advertises on its next push, which is the accepted resurrection path.
-        liveIndex.removeValue(forKey: docId)
-
-        if let session = sessions.removeValue(forKey: docId) {
-            await session.announceDeleted()
+        let holders = liveIndexEntry(docId)?.holders.sorted() ?? []
+        for key in liveIndex.keys where key.lowercased() == wanted { liveIndex.removeValue(forKey: key) }
+        recentlyUnsubscribed.removeValue(forKey: docId)
+        let session = sessions.removeValue(forKey: docId)
+        if session != nil {
             counts.removeValue(forKey: docId)
             watcherCounts.removeValue(forKey: docId)
             graceTasks.removeValue(forKey: docId)?.task.cancel()
             emitStatus(docId: docId, kind: "sessionClosed", seq: nil, count: 0)
         }
+        if let session {
+            try await session.deleteFromStore()
+        } else if hadContent {
+            try store.delete(docId: docId)
+        }
+        ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(holders)")
+
         // Unconditionally, and NOT folded into the branch above: a document with no live session
         // is the ordinary case for an agent `delete_doc`, and emitting only `sessionClosed` there
         // would tell status listeners nothing — a browser watching this channel would keep showing
         // the row until something else made it re-fetch.
         emitStatus(docId: docId, kind: "docDeleted", seq: nil, count: 0)
+        await documentDeletedHandler?(docId)
     }
 
     /// Register a viewer. Opens the session from the store if needed (no
     /// createIfMissing analog — you can't watch a doc that doesn't exist).
     public func watch(docId: String, framePx: Int? = nil) async throws -> WatchResult {
+        var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -339,9 +474,10 @@ public actor SessionManager {
                 opened = try await openSessionFetchingFromHolders(docId: docId)
             }
             // The fetch arm suspends and this actor is reentrant — a second watch or a subscribe
-            // may have registered a session meanwhile; adopt it (see `subscribe`).
-            if let raced = sessions[docId] {
-                session = raced
+            // may have registered a session meanwhile, in any spelling; adopt it (see `subscribe`).
+            if let raced = sessionMatching(docId) {
+                session = raced.session
+                docId = raced.key
             } else {
                 session = opened
                 sessions[docId] = opened
@@ -349,30 +485,46 @@ public actor SessionManager {
             }
         }
         let result = await session.watch(framePx: framePx)
-        tokenWatchDocs[result.token] = docId
+        guard sessions[docId] === session else {   // deleted meanwhile — see `subscribe`
+            await session.unwatch(result.token)
+            throw DocumentStoreError.notFound
+        }
+        tokenWatchDocs[result.token] = (docId, session)
         watcherCounts[docId, default: 0] += 1
         await relayFrameIfNeeded(docId: docId)
         return result
     }
 
     public func unwatch(docId: String, token: UUID) async {
-        guard tokenWatchDocs.removeValue(forKey: token) == docId,
-              let session = sessions[docId] else { return }
+        guard let entry = tokenWatchDocs[token],
+              entry.docId.lowercased() == docId.lowercased() else { return }
+        tokenWatchDocs.removeValue(forKey: token)
+        let docId = entry.docId
+        let session = entry.session
+        let isCurrent = sessions[docId] === session   // see `unsubscribe`
+        if isCurrent { watcherCounts[docId] = max(0, (watcherCounts[docId] ?? 1) - 1) }
         await session.unwatch(token)
-        watcherCounts[docId] = max(0, (watcherCounts[docId] ?? 1) - 1)
+        guard isCurrent, sessions[docId] === session else { return }
         if (watcherCounts[docId] ?? 0) == 0 && (counts[docId] ?? 0) == 0 {
             scheduleGraceTeardown(docId: docId)
         }
     }
 
     /// Returns false when the doc has no live session (frame dropped).
-    public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?) async -> Bool {
+    /// `atSeq` is the seq of the bytes the device rendered, when it says so — the frame is then
+    /// stamped with it rather than with whatever seq is current on arrival (review finding 25: a
+    /// render that finished after a write was labelled as showing that write). Nil keeps the
+    /// arrival seq, which is all an older sender could offer.
+    public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?,
+                            atSeq: Int? = nil) async -> Bool {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else { return false }
-        await session.submitFrame(bytes: bytes, canvasRect: canvasRect)
+        await session.submitFrame(bytes: bytes, canvasRect: canvasRect, atSeq: atSeq)
         return true
     }
 
     public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?, px: Int)? {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else { return nil }
         return await session.latestFrame
     }
@@ -388,6 +540,7 @@ public actor SessionManager {
         submitter: UUID? = nil, receivedAt: ContinuousClock.Instant? = nil,
         writer: String? = nil
     ) async -> SubmitOutcome {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
@@ -420,6 +573,7 @@ public actor SessionManager {
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
         expectation: WriteExpectation = .none, writer: String = "agent"
     ) async -> SubmitOutcome {
+        let docId = canonicalDocId(docId)
         if sessions[docId] == nil {
             let session: DocumentSession
             do {
@@ -447,6 +601,7 @@ public actor SessionManager {
     /// Live session bytes when a session is open, else the store's on-disk
     /// copy. `nil` only when neither exists (unknown doc).
     public func currentBytes(docId: String) async -> Data? {
+        let docId = canonicalDocId(docId)
         if let live = await sessions[docId]?.currentBytes {
             return live
         }
@@ -459,6 +614,7 @@ public actor SessionManager {
     /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
     /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
     public func currentBytesOrFetch(docId: String) async -> Data? {
+        let docId = canonicalDocId(docId)
         // An EMPTY `createIfMissing` placeholder is not content — it is a slot the app opened
         // moments before pushing (M2c-1 review F4). Treating it as resident is what made an agent
         // read a BLANK document while a holder had the real thing, and it disagreed with
@@ -482,7 +638,7 @@ public actor SessionManager {
         // From here a placeholder must never be worse off than before: every failure path below
         // falls back to it, so a doc mid-creation still reads as the empty doc it is rather than
         // turning a working call into `unknownDoc`.
-        guard liveIndex[docId] != nil else { return await currentBytes(docId: docId) }
+        guard liveIndexEntry(docId) != nil else { return await currentBytes(docId: docId) }
         guard let bytes = try? await fetchFromHolders(docId: docId) else {
             return await currentBytes(docId: docId)
         }
@@ -566,8 +722,9 @@ public actor SessionManager {
                 subscriberCount: live[info.docId]?.subscriberCount,
                 hasContent: true)
         }
-        let contentIds = Set(entries.map(\.id))
-        for (docId, entry) in liveIndex where !contentIds.contains(docId) {
+        // Case-insensitively: a device advertising `rainfall` names the stored `Rainfall`.
+        let contentIds = Set(entries.map { $0.id.lowercased() })
+        for (docId, entry) in liveIndex where !contentIds.contains(docId.lowercased()) {
             entries.append(DocListEntry(
                 id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
                 seq: nil, subscriberCount: nil, hasContent: false))
@@ -668,7 +825,7 @@ public actor SessionManager {
 
     public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
 
-    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndex[docId] }
+    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndexEntry(canonicalDocId(docId)) }
 
     /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
     /// origin — so a failure (offline, doc deleted, timeout) just moves to the next. Throws the
@@ -699,7 +856,7 @@ public actor SessionManager {
         // invisible until the session recycles and reloads from the store. An adopting caller
         // must therefore persist nothing at all. Nothing below suspends, so once these checks
         // pass the save/open sequence completes without further reentrancy.
-        if let raced = sessions[docId] { return raced }
+        if let raced = sessionMatching(docId) { return raced.session }
         // …and a session is not the only thing that can have landed content while we awaited: a
         // writer may have opened a session, written, and then had it GRACE TORN DOWN, leaving
         // durable bytes with NO session behind them (the same store-only state
@@ -714,7 +871,7 @@ public actor SessionManager {
     }
 
     private func fetchFromHolders(docId: String) async throws -> Data {
-        guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
+        guard let contentProvider, let entry = liveIndexEntry(docId), !entry.holders.isEmpty else {
             throw DocumentStoreError.notFound
         }
         if let existing = inFlightFetches[docId] { return try await existing.value }

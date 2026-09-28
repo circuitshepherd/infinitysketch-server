@@ -34,6 +34,24 @@ public protocol DocumentStore: Sendable {
     /// Nothing is retained afterwards: no tombstone, no record that the id ever existed. A device
     /// that still holds a copy may re-create it on its next push, which is accepted.
     func delete(docId: String) throws
+    /// The spelling a stored document goes by when `docId` names it in any letter case, or nil
+    /// when nothing is stored under it. What `SessionManager` canonicalises docIds to, so one
+    /// document is one session however a caller spells it.
+    func storedDocId(matching docId: String) -> String?
+    /// A server-instance id that survives restarts, or nil when this store cannot keep one (the
+    /// server then makes a random id per process). See `SessionManager.serverId`.
+    func persistentServerId() -> String?
+}
+
+extension DocumentStore {
+    /// For stores with no case folding of their own (the test stores): a document exists under
+    /// exactly the spelling asked for, or not at all.
+    public func storedDocId(matching docId: String) -> String? {
+        (try? exists(docId: docId)) == true ? docId : nil
+    }
+
+    /// Stores with nowhere durable to keep it: a random id per server process.
+    public func persistentServerId() -> String? { nil }
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -52,6 +70,41 @@ public struct DirectoryDocumentStore: DocumentStore {
         // Sweep once here as well as after each delete, so a server that runs for weeks without
         // deleting anything still clears out what expired while it was up.
         pruneTrash()
+        sweepAtomicWriteLeftovers()
+    }
+
+    /// A process killed during `save` leaves the `.atomic` write's temporary file behind —
+    /// `<name>.sb-<hash>-<random>` beside the document on Darwin — and nothing ever removed one.
+    /// At startup nothing of ours is writing, so any such file is an abandoned half-write. It can
+    /// never surface as a document (`list()` filters on the extension); this only reclaims space.
+    /// The file holding this documents directory's server id. A dot-file, and without the
+    /// document extension, so `list()` can never report it as a document.
+    public static let serverIdFileName = ".server-id"
+
+    /// Read once per server start (`SessionManager.init`). Created on first use; a file that
+    /// cannot be read or written degrades to nil — a random id for this run — rather than failing
+    /// the server over bookkeeping.
+    public func persistentServerId() -> String? {
+        let url = directory.appendingPathComponent(Self.serverIdFileName)
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            let id = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty { return id }
+        }
+        let id = UUID().uuidString
+        do {
+            try Data((id + "\n").utf8).write(to: url, options: .atomic)
+            return id
+        } catch {
+            ServerLog.error("could not persist the server id at \(url.path): \(error)")
+            return nil
+        }
+    }
+
+    private func sweepAtomicWriteLeftovers() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names where name.contains(".\(Self.fileExtension).sb-") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
     }
 
     public func list() throws -> [StoredDocInfo] {
@@ -89,6 +142,15 @@ public struct DirectoryDocumentStore: DocumentStore {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
     }
 
+    public func storedDocId(matching docId: String) -> String? {
+        guard let stored = try? list().map(\.docId) else { return nil }
+        if stored.contains(docId) { return docId }
+        let wanted = docId.lowercased()
+        // `.min()`: two files differing only in case can exist on a case-sensitive filesystem, and
+        // the same one must win every time (the rule `resolvedFileURL` follows).
+        return stored.filter { $0.lowercased() == wanted }.min()
+    }
+
     /// Name of the trash subdirectory. It has no `.infsketch` extension and `list()` enumerates
     /// non-recursively, so trashed documents can never appear in a listing.
     public static let trashDirectoryName = ".trash"
@@ -103,14 +165,19 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// Falls back to an outright removal if the move fails — deleting must still work, and leaving
     /// the document in place would mean the caller's delete silently did nothing.
     public func delete(docId: String) throws {
-        let url = try fileURL(for: docId)
+        // Resolved like `load` and `exists`: on a case-sensitive filesystem the exact spelling
+        // missed a document every other call found, and the trashed copy must carry the name the
+        // document was stored under, not the caller's spelling of it.
+        _ = try fileURL(for: docId)   // validates
+        let stem = storedDocId(matching: docId) ?? docId
+        let url = try fileURL(for: stem)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw DocumentStoreError.notFound
         }
         let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let stamped = "\(docId)__\(Self.trashStamp())"
+            let stamped = "\(stem)__\(Self.trashStamp())"
             try FileManager.default.moveItem(
                 at: url,
                 to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))
@@ -242,8 +309,12 @@ public enum ThumbnailExtractor {
     }
 
     /// Reads the thumbnail PNG from .infsketch document bytes.
-    /// Returns nil for documents without a thumbnail or non-JSON bytes.
+    /// Returns nil for documents without a thumbnail — absent or EMPTY, which is how the app and
+    /// the server's own edits store "none" — or non-JSON bytes, so a caller falls through to its
+    /// next source rather than serving a zero-byte image.
     public static func thumbnailPNG(fromDocumentBytes bytes: Data) -> Data? {
-        (try? JSONDecoder().decode(ThumbnailHeader.self, from: bytes))?.aaa001_thumbnailData
+        guard let png = (try? JSONDecoder().decode(ThumbnailHeader.self, from: bytes))?.aaa001_thumbnailData,
+              !png.isEmpty else { return nil }
+        return png
     }
 }

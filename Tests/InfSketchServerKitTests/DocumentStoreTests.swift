@@ -112,4 +112,21 @@ private func makeTempStore() throws -> (DirectoryDocumentStore, URL) {
         #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data(#"{"strokes":[]}"#.utf8)) == nil)
         #expect(ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: Data([0xFF])) == nil)
     }
+
+    /// A process killed mid-save leaves the atomic write's temporary file (`<name>.sb-…`) behind,
+    /// and nothing ever removed it. Opening the store sweeps them; documents are untouched.
+    @Test func openingTheStoreSweepsLeftoverAtomicWriteTemporaries() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try DirectoryDocumentStore(directory: dir).save(docId: "Kept", bytes: Data("doc".utf8))
+        let leftover = dir.appendingPathComponent("Kept.infsketch.sb-4f1c2e7a-Zq9Xk1")
+        try Data("half".utf8).write(to: leftover)
+
+        let store = DirectoryDocumentStore(directory: dir)
+
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+        #expect(try store.load(docId: "Kept") == Data("doc".utf8))
+    }
 }

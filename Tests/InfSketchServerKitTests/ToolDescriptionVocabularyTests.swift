@@ -92,4 +92,14 @@ struct ToolDescriptionVocabularyTests {
         #expect(!Self.containsBareToken("x", in: "a 16x16 image at maxPixels"))
         #expect(!Self.containsBareToken("y", in: "the array is ordered by distance only"))
     }
+
+    /// `undo_last_edit` said calling it again "does the obvious thing" — read by an agent as
+    /// "undoes the undo". It walks one edit FURTHER back; there is no redo.
+    @Test func undoLastEditSaysRepeatingItWalksBack() throws {
+        let tool = try #require(MCPAdapter.toolDefinitions.first { $0.name == "undo_last_edit" })
+        let text = tool.description ?? ""
+        #expect(!text.contains("obvious"))
+        #expect(text.contains("edit before"))
+        #expect(text.contains("no redo"))
+    }
 }

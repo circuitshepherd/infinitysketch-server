@@ -14,7 +14,7 @@ import Foundation
         Data(repeating: byte, count: count)
     }
 
-    @Test func aRecordedEditCanBeReadBackAndConsumedOnce() async {
+    @Test func aRecordedEditCanBeReadBackAndConsumedOnce() async throws {
         let history = AgentEditHistory()
         await history.record(docId: "d", before: bytes(1), after: bytes(2))
 
@@ -22,19 +22,43 @@ import Foundation
         #expect(entry?.before == bytes(1))
         #expect(entry?.after == bytes(2))
 
-        await history.consumeMostRecent(docId: "d")
+        await history.consume(docId: "d", id: try #require(await history.mostRecent(docId: "d")).id)
         #expect(await history.mostRecent(docId: "d") == nil)
     }
 
     /// Newest first: a second undo walks one step further back.
-    @Test func edgesAreConsumedNewestFirst() async {
+    @Test func edgesAreConsumedNewestFirst() async throws {
         let history = AgentEditHistory()
         await history.record(docId: "d", before: bytes(1), after: bytes(2))
         await history.record(docId: "d", before: bytes(2), after: bytes(3))
 
         #expect(await history.mostRecent(docId: "d")?.before == bytes(2))
-        await history.consumeMostRecent(docId: "d")
+        await history.consume(docId: "d", id: try #require(await history.mostRecent(docId: "d")).id)
         #expect(await history.mostRecent(docId: "d")?.before == bytes(1))
+    }
+
+    /// An undo consumes the entry IT took back. A write recorded while the undo was in flight is
+    /// the most recent by the time the undo lands, and dropping "the most recent" dropped that
+    /// write's history instead — so the next undo reversed the wrong one (review finding 23).
+    @Test func consumingByIdLeavesAWriteThatLandedMeanwhile() async throws {
+        let history = AgentEditHistory()
+        await history.record(docId: "d", before: bytes(1), after: bytes(2))
+        let undoing = try #require(await history.mostRecent(docId: "d"))
+        await history.record(docId: "d", before: bytes(2), after: bytes(3))   // lands meanwhile
+        await history.consume(docId: "d", id: undoing.id)
+        #expect(await history.mostRecent(docId: "d")?.after == bytes(3))
+        #expect(await history.entryCount(docId: "d") == 1)
+    }
+
+    /// A live-selection change leaves a barrier, never bytes, and a burst of them one barrier.
+    @Test func aLiveSelectionChangeIsABarrier() async {
+        let history = AgentEditHistory()
+        await history.record(docId: "d", before: bytes(1), after: bytes(2))
+        await history.recordLiveSelectionChange(docId: "d")
+        await history.recordLiveSelectionChange(docId: "d")
+        #expect(await history.mostRecent(docId: "d")?.isLiveSelectionChange == true)
+        #expect(await history.entryCount(docId: "d") == 2)
+        #expect(await history.currentByteCount() == 32)
     }
 
     /// A write that changed nothing is not recorded — undoing it would be a no-op that ate the

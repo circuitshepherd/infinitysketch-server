@@ -9,6 +9,10 @@ public struct WSAdapter: WSMessageHandler, Sendable {
     private let config: SessionConfig
     private let broker: DeviceCommandBroker
 
+    /// This machine's clock, Unix ms — what `helloAck` and every `ping` carry as `serverTimeMs`, so
+    /// a device can compare a request's `notAfter` against the clock that WROTE it.
+    static func nowMs(_ now: Date = Date()) -> Int { Int(now.timeIntervalSince1970 * 1000) }
+
     public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker) {
         self.manager = manager
         self.config = config
@@ -53,7 +57,7 @@ actor Connection {
     private let manager: SessionManager
     private let output: AsyncStream<WSMessage>.Continuation
     private var sender: TransferSender<ServerMessage>
-    private var reassembler = TransferReassembler<ClientMessage>()
+    private var reassembler: TransferReassembler<ClientMessage>
     /// Whether this connection advertised `blobOmission` in its hello, i.e. whether a broadcast to
     /// it may leave out image blobs it already has.
     private var acceptsStrippedDocuments = false
@@ -76,6 +80,7 @@ actor Connection {
     private let broker: DeviceCommandBroker
     private let connectionId = UUID()
     private var registeredWithBroker = false
+    private var lastActivityReport: ContinuousClock.Instant?
 
     init(
         manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
@@ -84,20 +89,32 @@ actor Connection {
         self.manager = manager
         self.output = output
         self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
+        var reassembler = TransferReassembler<ClientMessage>(maxTotalBytes: config.maxTransferBytes)
+        reassembler.acceptsTransfers = false   // until hello
+        self.reassembler = reassembler
         self.broker = broker
         self.health = ConnectionHealth(
             byteBudget: config.outboundByteBudget,
             idleInterval: config.keepaliveIdleInterval,
             pingGrace: config.keepalivePingGrace,
             assumedMinimumDrainRate: config.assumedMinimumDrainRate,
-            now: ContinuousClock.now)
+            now: ContinuousClock.now,
+            helloDeadline: config.helloDeadline,
+            tickInterval: config.keepaliveTickInterval)
     }
 
     func handle(_ frame: WSMessage) async {
         // Before every other gate, including hello: a peer that is talking is alive, whatever it
         // is saying and whether or not the message is even well-formed.
-        act(on: health.noteInbound(now: ContinuousClock.now))
+        let now = ContinuousClock.now
+        act(on: health.noteInbound(now: now))
         guard !closed else { return }
+        // Tell the broker this device is awake, so it is preferred over one that went quiet.
+        // At most once a second: a large push arrives as hundreds of chunk frames.
+        if registeredWithBroker, lastActivityReport.map({ now - $0 >= .seconds(1) }) ?? true {
+            lastActivityReport = now
+            await broker.noteActivity(connectionId: connectionId)
+        }
         let wire: WireFrame
         switch frame {
         case .close:
@@ -109,8 +126,7 @@ actor Connection {
             wire = .binary(data)
         }
         let message: ClientMessage?
-        // TODO(hardening): frames reach the reassembler before the hello gate —
-        // when auth lands, gate or bound pre-hello transfer bytes.
+        // Transfers are refused before hello and capped in size by the reassembler itself.
         do {
             message = try reassembler.consume(wire)
         } catch let error as TransferWireError {
@@ -121,22 +137,62 @@ actor Connection {
             await close()
             return
         } catch {
-            emit(.error(reason: "malformedMessage"))
+            emit(.error(reason: WireErrorReason.malformedMessage))
             return
         }
         guard let message else { return }   // chunk consumed / transfer opened / aborted
-        await dispatch(message)
+        await route(message, receivedAt: ContinuousClock.now)
     }
 
-    private func dispatch(_ message: ClientMessage) async {
+    /// Per-document work that is still running, in arrival order. See `route`.
+    private var docChains: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+
+    /// Runs a message now, or behind earlier work for the same document.
+    ///
+    /// A subscribe or watch can take ~50 s — fetching the document from a holder — and was
+    /// awaited inline here, so for that whole time this peer's pongs, its replies to relayed
+    /// agent ops and every other message sat unread: agent calls timed out, two devices opening
+    /// each other's documents deadlocked until the timeout, and the keepalive could drop the peer
+    /// that was waiting (review finding 12). So those two run as a task, and nothing else waits
+    /// for them — EXCEPT later messages for the same document, which must still see the
+    /// subscription (the app's create-push follows its subscribe at once) and are chained behind
+    /// it in order. With nothing pending for a document, every message runs inline exactly as
+    /// before.
+    private func route(_ message: ClientMessage, receivedAt: ContinuousClock.Instant) async {
+        guard helloed, let docId = message.documentScope else {
+            return await dispatch(message, receivedAt: receivedAt)
+        }
+        let previous = docChains[docId]
+        guard previous != nil || message.mayWaitOnAHolder else {
+            return await dispatch(message, receivedAt: receivedAt)
+        }
+        let id = UUID()
+        let task = Task {
+            await previous?.task.value
+            if !self.closed { await self.dispatch(message, receivedAt: receivedAt) }
+            self.chainFinished(docId: docId, id: id)
+        }
+        docChains[docId] = (id, task)
+    }
+
+    private func chainFinished(docId: String, id: UUID) {
+        if docChains[docId]?.id == id { docChains.removeValue(forKey: docId) }
+    }
+
+    private func dispatch(_ message: ClientMessage, receivedAt: ContinuousClock.Instant) async {
         switch message {
         case .hello(let version, let capabilities, let deviceId):
             guard version == WireProtocol.version else {
-                emit(.error(reason: "unsupportedVersion"))
+                // Names the server's own version after the colon, so a device can tell the person
+                // which side is behind — a mismatch that shows only a gray dot looks exactly like
+                // "offline" (review finding 14). Older servers sent the bare word; the app reads both.
+                emit(.error(reason: "unsupportedVersion:\(WireProtocol.version)"))
                 await close()
                 return
             }
             helloed = true
+            health.noteHello()
+            reassembler.acceptsTransfers = true
             self.deviceId = deviceId
             // Register with the broker whenever the connection advertises
             // any capability the broker brokers requests for — the broker
@@ -174,6 +230,13 @@ actor Connection {
             // never subscribes to document events, but `infsketch-demo` does — and it would take a
             // binary `StrippedDocument` for a document and be unable to read it.
             acceptsStrippedDocuments = caps.contains("blobOmission")
+            // The reply FIRST, before this device can be handed a request: the app reads the first
+            // message after its hello as the handshake reply, so a relay render or an agent op
+            // that reached it first failed the handshake and cost the connection (review finding
+            // 14a — the mirror image of the rule the app keeps for itself). `emit` does not
+            // suspend, so nothing can slip in between.
+            emit(.helloAck(protocolVersion: WireProtocol.version, serverId: manager.serverId,
+                           serverTimeMs: WSAdapter.nowMs()))
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
@@ -187,7 +250,6 @@ actor Connection {
                 // and must find this one.
                 await manager.deviceAppeared(capabilities: caps)
             }
-            emit(.helloAck(protocolVersion: WireProtocol.version))
 
         case .pong:
             // The liveness credit was already taken in `handle` — any inbound frame counts, so
@@ -199,16 +261,27 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, _, let createIfMissing):
-            // v0: fromSeq ignored — always a full snapshot.
+        case .subscribe(let docId, let createIfMissing):
+            // Always a full snapshot.
+            // Per-document, so it names its document: a docId-less `error` here failed EVERY
+            // pending subscribe on the connection, other documents' opens included.
             guard docSubscriptions[docId] == nil else {
-                return emit(.error(reason: "alreadySubscribed"))
+                return emit(.subscribeFailed(docId: docId, reason: "alreadySubscribed"))
             }
             do {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
-                    acceptsStrippedDocuments: acceptsStrippedDocuments)
-                emit(result.snapshot)
+                    acceptsStrippedDocuments: acceptsStrippedDocuments,
+                    connectionId: connectionId)
+                // The subscribe can take tens of seconds (a holder fetch), and this actor is
+                // reentrant: the connection may have closed meanwhile. `close()` has already
+                // released every subscription it knew of, so storing this one would leak it —
+                // the session could then never tear down.
+                guard !closed, docSubscriptions[docId] == nil else {
+                    await manager.unsubscribe(docId: docId, token: result.token)
+                    return
+                }
+                emit(result.snapshot.addressed(to: docId))
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {
                 // M2c-3 (F3): a DOCID-CARRYING failure, not a bare `.error`. The app's transport
@@ -234,17 +307,31 @@ actor Connection {
             do {
                 try await manager.deleteDoc(docId: docId)
                 emit(.docDeleted(docId: docId))
+            } catch DocumentStoreError.notFound {
+                // Deleting what is not there leaves the goal state holding: answer as if it had
+                // just been deleted. Idempotent, like the app's own "delete while offline" — and
+                // a docId-less `error` here would have failed every pending subscribe on the
+                // connection.
+                emit(.docDeleted(docId: docId))
             } catch {
-                emit(.error(reason: "unknownDoc"))
+                // A store failure, not an absence: the document may well still be there, so it is
+                // not reported deleted. Nothing waits on this reply (the app's delete is
+                // fire-and-forget), and a docId-less `error` would fail unrelated requests.
+                ServerLog.error("deleteDoc '\(docId)' failed: \(error)")
             }
 
         case .op(let docId, let opId, let payload, let expectation):
-            // Stamped HERE, the moment the op is a whole message and before anything can queue: the
-            // gap between this and the session actor picking it up is the QUEUE, and it is only
+            // `receivedAt` is stamped in `handle`, the moment the op is a whole message and before
+            // anything can queue — including behind this document's own pending subscribe: the gap
+            // between that and the session actor picking it up is the QUEUE, and it is only
             // knowable from outside the actor. Free when telemetry is off — a clock read.
-            let receivedAt = ContinuousClock.now
+            // A `reject` naming the op, not a docId-less `error`: the app waits for the answer to
+            // every push it sends, and an error with no opId answered nobody — a push sent into a
+            // refetch's unsubscribe→subscribe window waited for as long as the connection lived,
+            // wedging that document's pushes and, for a close push, its whole lifecycle chain
+            // (review finding 10). Seq 0: there is no subscription to report one from.
             guard docSubscriptions[docId] != nil else {
-                return emit(.error(reason: "notSubscribed"))
+                return emit(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
             }
             // WS submitters take their ack from the broadcast echo (which
             // carries the assigned seq), so only a rejection needs
@@ -257,12 +344,16 @@ actor Connection {
                 // is the entire point of recording this.
                 writer: deviceId ?? connectionId.uuidString
             ).rejectMessage {
-                emit(reject)
+                emit(reject.addressed(to: docId))
             }
 
         case .subscribeStatus:
             guard statusSubscription == nil else { return }
             let (events, token) = await manager.subscribeStatus()
+            guard !closed, statusSubscription == nil else {   // see `subscribe`
+                await manager.unsubscribeStatus(token)
+                return
+            }
             statusSubscription = (token, pump(events, docId: nil, token: token))
 
         case .unsubscribeStatus:
@@ -279,7 +370,7 @@ actor Connection {
                 emit(.error(reason: "listFailed"))
             }
 
-        case .transferEnd, .transferAbort:
+        case .transferEnd:
             // Unreachable: the reassembler consumes these or throws.
             emit(.error(reason: "transferViolation"))
             await close()
@@ -290,6 +381,10 @@ actor Connection {
             }
             do {
                 let result = try await manager.watch(docId: docId, framePx: framePx)
+                guard !closed, watchSubscriptions[docId] == nil else {   // see `subscribe`
+                    await manager.unwatch(docId: docId, token: result.token)
+                    return
+                }
                 watchSubscriptions[docId] = (result.token, pumpWatch(result.events, docId: docId, token: result.token))
             } catch {
                 emit(.error(reason: "unknownDoc"))
@@ -301,15 +396,20 @@ actor Connection {
                 await manager.unwatch(docId: docId, token: watch.token)
             }
 
-        case .frame(let docId, let payload, let canvasRect):
+        case .frame(let docId, let payload, let canvasRect, let seq):
+            // A frame is a fire-and-forget hint nobody waits on, so one that lands after the
+            // device unsubscribed (a render finishing across a close) is simply dropped. As an
+            // `error` it failed every pending subscribe on the connection.
             guard docSubscriptions[docId] != nil else {
-                return emit(.error(reason: "notSubscribed"))
+                ServerLog.verbose("[frame] ignored a frame for '\(docId)': not subscribed on this connection")
+                return
             }
             guard case .inline(let bytes) = payload else {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
-            if await manager.submitFrame(docId: docId, bytes: bytes, canvasRect: canvasRect) == false {
-                emit(.error(reason: "unknownDoc"))
+            if await manager.submitFrame(docId: docId, bytes: bytes, canvasRect: canvasRect,
+                                         atSeq: seq) == false {
+                ServerLog.verbose("[frame] ignored a frame for '\(docId)': no session")
             }
 
         case .createDocReply(let requestId, _, let payload, let failureReason):
@@ -375,7 +475,10 @@ actor Connection {
                 return emit(.error(reason: "unresolvedTransfer"))
             }
             guard let ads = try? JSONDecoder().decode([DocAdvertisement].self, from: bytes) else {
-                return emit(.error(reason: "malformedMessage"))
+                // Not `malformedMessage`, which the app reads as "a request of mine went
+                // unanswered" and reconnects on: an advertisement awaits no answer, so a bad
+                // one must cost the device nothing but the rows it advertised.
+                return emit(.error(reason: WireErrorReason.badAdvertisement))
             }
             await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
         }
@@ -447,7 +550,7 @@ actor Connection {
     ) -> Task<Void, Never> {
         Task {
             for await event in events {
-                self.emit(event)
+                self.emit(event.addressed(to: docId))
             }
             guard !Task.isCancelled else { return }
             await self.releaseWatchSubscription(docId: docId, token: token)
@@ -469,7 +572,7 @@ actor Connection {
             // compile (cross-actor isolated calls require await) instead of
             // silently losing the serialized-output guarantee.
             for await event in events {
-                self.emit(event)
+                self.emit(docId.map { event.addressed(to: $0) } ?? event)
             }
             guard !Task.isCancelled else { return }
             if let docId {
@@ -523,7 +626,7 @@ actor Connection {
         case .none:
             break
         case .ping:
-            emit(.ping)
+            emit(.ping(serverTimeMs: WSAdapter.nowMs()))
         case .drop:
             // A close code first, so the client learns why rather than seeing a bare EOF;
             // close() then releases every subscription, watcher, broker registration and
@@ -542,5 +645,56 @@ actor Connection {
     func setKeepaliveTask(_ task: Task<Void, Never>) {
         guard !closed else { return task.cancel() }
         keepaliveTask = task
+    }
+}
+
+extension ServerMessage {
+    /// The same message naming the document by `docId`.
+    ///
+    /// `SessionManager` keys a document by ONE spelling (see `canonicalDocId`), so two peers that
+    /// spell it differently share a session — but each keeps its own subscription under the name
+    /// IT used, and matches replies by that name. So what a session broadcasts is re-addressed
+    /// per connection on the way out.
+    func addressed(to docId: String) -> ServerMessage {
+        switch self {
+        case .subscribed(_, let seq, let snapshot):
+            return .subscribed(docId: docId, seq: seq, snapshot: snapshot)
+        case .event(_, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId, payload: payload)
+        case .reject(_, let opId, let reason, let seq):
+            return .reject(docId: docId, opId: opId, reason: reason, seq: seq)
+        case .frameAvailable(_, let seq):
+            return .frameAvailable(docId: docId, seq: seq)
+        case .watchers(_, let count, let framePx):
+            return .watchers(docId: docId, count: count, framePx: framePx)
+        case .subscribeFailed(_, let reason):
+            return .subscribeFailed(docId: docId, reason: reason)
+        case .docDeleted:
+            return .docDeleted(docId: docId)
+        default:
+            return self
+        }
+    }
+}
+
+extension ClientMessage {
+    /// The document a message acts on, for the messages whose order per document matters.
+    var documentScope: String? {
+        switch self {
+        case .subscribe(let docId, _), .unsubscribe(let docId), .deleteDoc(let docId),
+             .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
+             .frame(let docId, _, _, _):
+            return docId
+        default:
+            return nil
+        }
+    }
+
+    /// The two that can fetch the document from a holder, and so take tens of seconds.
+    var mayWaitOnAHolder: Bool {
+        switch self {
+        case .subscribe, .watchDoc: return true
+        default: return false
+        }
     }
 }

@@ -988,9 +988,15 @@ public actor MCPAdapter {
 
                 If the document changed after your write, it is MERGED rather than refused: your \
                 change is reversed and everything that happened since is kept. That path needs a \
-                connected device; an unchanged document does not. There is no redo — but an undo \
-                is itself a write, so undoing it again does the obvious thing. History is bounded \
-                and in memory, so a much older edit answers `nothingToUndo`.
+                connected device; an unchanged document does not. There is no redo: calling this \
+                again takes back the edit before that one, never the undo itself. History is \
+                bounded and in memory, so a much older edit answers `nothingToUndo`. If a \
+                multi-step undo fails part-way, the error says how many steps had already landed.
+
+                A change made through the user's live selection (transform_selection, \
+                duplicate_selection, delete_selection, draw_selection, restyle_selection) commits \
+                in the app and cannot be taken back here: an undo that reaches one refuses with \
+                `lastEditWasLiveSelection` rather than reverse an older write beneath it.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2899,8 +2905,51 @@ public actor MCPAdapter {
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
-        return await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
-                                   arguments: arguments)
+        let arguments = await canonicalisingDocIds(arguments)
+        let result = try await dispatchCallTool(name: name, arguments: arguments)
+        if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
+           let docId = arguments?["docId"]?.stringValue {
+            await history.recordLiveSelectionChange(docId: docId)
+        }
+        return await enrichedError(result, arguments: arguments)
+    }
+
+    /// Whether a live-selection write may have landed on the device. A success did; so may an op
+    /// whose device went quiet or away with it (`deviceTimeout` / `deviceDisconnected`) — the
+    /// device can still apply it until the request's `notAfter`. Recording a barrier for an op
+    /// that did NOT land only makes the next undo refuse; not recording one for an op that did
+    /// makes it reverse the older write beneath it.
+    static func mayHaveChangedTheDocument(_ result: CallTool.Result) -> Bool {
+        guard result.isError == true else { return true }
+        guard case .text(let text, _, _)? = result.content.first else { return false }
+        return text.hasPrefix("deviceTimeout") || text.hasPrefix("deviceDisconnected")
+    }
+
+    /// Tools that change the document through the user's LIVE selection. They commit in the
+    /// device's own session and reach the server as its ordinary push, so no agent write is
+    /// recorded for them — and without a record, an `undo_last_edit` after `draw_strokes` +
+    /// `transform_selection` reversed the DRAW (review finding 23). Each leaves a barrier in the
+    /// history instead, so that undo refuses and says why.
+    static let liveSelectionWriteTools: Set<String> = [
+        "transform_selection", "duplicate_selection", "delete_selection", "draw_selection",
+        "restyle_selection",
+    ]
+
+    /// Every argument that names a document, in the spelling the server keys it by.
+    ///
+    /// The store folds case, so `RAINFALL` finds `Rainfall` — but the sessions, the live index
+    /// and `AgentEditHistory` are keyed by one spelling. An agent writing in another case used to
+    /// open a second session on the same file, unseen by the app's, and the app's next push
+    /// overwrote the write it had just been told succeeded. Done once HERE so no tool can miss it.
+    static let docIdArgumentNames = ["docId", "source", "target", "into"]
+
+    private func canonicalisingDocIds(_ arguments: [String: Value]?) async -> [String: Value]? {
+        guard var arguments else { return nil }
+        for key in Self.docIdArgumentNames {
+            guard case .string(let given)? = arguments[key] else { continue }
+            arguments[key] = .string(await manager.canonicalDocId(given))
+        }
+        return arguments
     }
 
     /// Refuse an argument the named tool does not declare.
@@ -2963,22 +3012,34 @@ public actor MCPAdapter {
             return Self.errorResult("\(text) — \(clause)")
         }
 
+        if text == Self.documentNotOpenReason {
+            // The broker found no capable device with this document open, so no device was
+            // asked. Name what IS open: the usual cause is an id that is not the live one.
+            let live = await manager.liveInfo()
+                .filter { $0.value.subscriberCount > 0 }
+                .keys.sorted()
+            let clause = live.isEmpty
+                ? "no document is open on any connected device"
+                : "open on a connected device: " + live.map { "\"\($0)\"" }.joined(separator: ", ")
+            return Self.errorResult("\(text) — \(clause)")
+        }
+
         if text == "noSelectionActive" || text.hasSuffix("noSelectionActive") {
-            // The rule is about what the SERVER can verify, not about who produced the reason.
+            // A device ANSWERED `noSelectionActive`. Live-state ops are routed only to a device
+            // that has the named document open (the broker's `.requireOpen`), so the device that
+            // answered is the one the user is looking at, and it is authoritative: the document
+            // is open and nothing is selected. It used to be whichever device spoke last, and this
+            // branch then assured the agent "it IS open" on the strength of ANOTHER device's
+            // subscription (review finding 20).
             //
-            // A device answers `deviceFailed: noSelectionActive` in two very different
-            // situations: the document the agent named is open and nothing is selected (literal,
-            // and the device is authoritative — say nothing), or the agent named a document this
-            // device does not have open at all (the renamed-document case — say which one it
-            // does). Only the server can tell those apart, from its own subscriber set, and
-            // getting this backwards means either lying about an open document or staying silent
-            // in exactly the case the message exists for. Both were live at different points
-            // while writing this.
+            // The one case left to explain is an op that names no open document at all — the
+            // device answered for an id it does not have (a race with a close, or a document
+            // opened under another spelling).
             let live = await manager.liveInfo()
                 .filter { $0.value.subscriberCount > 0 }
                 .keys.sorted()
             if let named = arguments?["docId"]?.stringValue, live.contains(named) {
-                return result          // it IS open: `noSelectionActive` means what it says
+                return result          // it is open there: `noSelectionActive` means what it says
             }
             let clause = live.isEmpty
                 ? "no document is open on any connected device"
@@ -3487,6 +3548,14 @@ public actor MCPAdapter {
     /// Unlike every other write tool this takes no CAS: the caller asked for the document to be
     /// gone, so a write that landed a moment earlier does not make the request stale. The bytes
     /// are recoverable from the server's .trash directory either way.
+    /// Registered with `SessionManager` so EVERY delete — an in-app delete, a rename (the WS
+    /// `deleteDoc` the app sends for the old name), `delete_doc` — forgets the document's agent
+    /// history. Only `delete_doc` did, so a recycled name inherited the old document's edits and
+    /// the next undo merged old content into the new document (review finding 23).
+    func forgetHistory(docId: String) async {
+        await history.forget(docId: docId)
+    }
+
     private func callDeleteDoc(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -3629,8 +3698,21 @@ public actor MCPAdapter {
             // `.absent` create-CAS above ("never silently overwrite a different doc of the same
             // name") for a metadata-only doc. A metadata-only doc reads nil here → `.absent`.
             let currentBytes = await manager.currentBytes(docId: docId)
+            // …but a metadata-only doc EXISTS: a connected device holds it. Creating it here from
+            // the agent's bytes meant the user's own copy was unioned with them when opened — or,
+            // with a stale base on the device, deleted (review finding 23). Reading it first
+            // (`fetch_doc`) makes it resident, and then this is an ordinary replace.
+            if currentBytes == nil, await manager.liveEntry(docId: docId) != nil {
+                return Self.errorResult(
+                    "docExists: a connected device holds \"\(docId)\"; read it with fetch_doc before replacing it")
+            }
+            // The identity belongs to the DOCUMENT, not to the bytes (`DocumentIdentity`): a
+            // replace keeps the current document's id, a create gets a fresh one — the agent's
+            // bytes are often another document's raw read, and must not bring its id along.
+            let identity = currentBytes.flatMap(DocumentIdentity.documentId(of:)) ?? DocumentIdentity.newId()
+            let stored = DocumentIdentity.replacingDocumentId(in: bytes, with: identity)
             return await submitAndRespond(
-                docId: docId, createIfMissing: true, fullDoc: bytes,
+                docId: docId, createIfMissing: true, fullDoc: stored,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
             ) { seq in
                 "replaced \(docId) at seq \(seq)"
@@ -3652,7 +3734,12 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            if await manager.currentBytes(docId: docId) != nil {
+            // A name a connected device advertises is taken too, though the server holds no
+            // bytes for it: the user's own document would otherwise be merged with this one the
+            // moment they opened it (review finding 23).
+            let resident = await manager.currentBytes(docId: docId) != nil
+            let advertised = await manager.liveEntry(docId: docId) != nil
+            if resident || advertised {
                 return Self.errorResult("docExists")
             }
 
@@ -3668,6 +3755,8 @@ public actor MCPAdapter {
                 // `.requestInFlight`.
                 case .requestInFlight: return Self.errorResult("creationInProgress")
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
+                case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
+                case .documentNotOpen: return Self.errorResult("noDeviceAvailable")   // creation routes to any device
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
                 }
             } catch {
@@ -3769,9 +3858,6 @@ public actor MCPAdapter {
                     }
                     let keys: [String]?
                     let resolvedTool: Tool?
-                    /// Parallel to `keys`; an empty entry means that stroke's name displaced
-                    /// nothing. Absent entirely when no supplied name took over.
-                    let displacedNames: [String]?
                     let clampedWidths: [Double]?
                     /// What was actually STORED (light-canonical), one entry per created stroke,
                     /// in order — present only when this call went through the dark door
@@ -3796,9 +3882,6 @@ public actor MCPAdapter {
                     if let tool = decoded.resolvedTool {
                         summary += "\ninherited from the user's tool: inkType \(tool.inkType), drawnWidth \(Self.trimmed(tool.width)), color \(tool.color)"
                     }
-                    // A name that was already taken MOVES to the new stroke. The element it came
-                    // from is still on the canvas, now unnamed — reported so you can delete it if
-                    // this draw was meant to replace it.
                     // A width below the ink's floor renders as almost nothing, so it is raised
                     // rather than silently drawn invisible (art-session finding 12).
                     if let clamped = decoded.clampedWidths, !clamped.isEmpty {
@@ -3807,11 +3890,6 @@ public actor MCPAdapter {
                                  + "outside what that ink can draw, and were drawn at the nearest end — "
                                  + "the ink's thinnest (below it a stroke is effectively invisible) or widest. "
                                  + "list_strokes reports the drawnWidth each stroke got."
-                    }
-                    if let displaced = decoded.displacedNames {
-                        for taken in displaced where !taken.isEmpty {
-                            summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
-                        }
                     }
                     // Only present when colorAppearance: "dark" converted at least one colour —
                     // what actually landed on disk, light-canonical, one entry per created stroke.
@@ -5563,8 +5641,11 @@ public actor MCPAdapter {
             //  - `into` absent: unchanged — write in place into `target`
             //    under the byte-CAS every other write tool uses.
             if let into {
+                // A NEW document: the union carries `target`'s identity, which must not be shared
+                // with `target` itself (`DocumentIdentity`).
+                let stored = DocumentIdentity.replacingDocumentId(in: out.bytes, with: DocumentIdentity.newId())
                 return await submitAndRespond(
-                    docId: into, createIfMissing: true, fullDoc: out.bytes, expectation: .absent
+                    docId: into, createIfMissing: true, fullDoc: stored, expectation: .absent
                 ) { seq in
                     "merged \(source) and \(target) into \(into) at seq \(seq)"
                 }
@@ -5694,9 +5775,17 @@ public actor MCPAdapter {
         case .noDeviceAvailable: return Self.errorResult("noDeviceAvailable")
         case .requestInFlight: return Self.errorResult("opInProgress")
         case .deviceTimeout: return Self.errorResult("deviceTimeout")
+        case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
+        case .documentNotOpen: return Self.errorResult(Self.documentNotOpenReason)
         case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
         }
     }
+
+    /// A live-state op with no capable device that has the document open. The token stays
+    /// `noSelectionActive` — nothing can be selected in a document nobody has open — and the rest
+    /// says why, which `enrichedError` completes with what IS open.
+    static let documentNotOpenReason = "noSelectionActive: no connected device has this document open"
+
 
     /// Shared submit tail for every write tool (add/edit/remove_text — plain
     /// AND styled, replace_doc, create_doc, draw/delete_strokes): opens a session on demand,
@@ -5794,6 +5883,17 @@ public actor MCPAdapter {
 
             var undone = 0
             var lastSeqText = ""
+            // A failure after some steps have LANDED must say so: the document has already moved,
+            // and a bare error reads as "nothing happened". The reason token stays first.
+            func failed(_ result: CallTool.Result) -> CallTool.Result {
+                guard undone > 0 else { return result }
+                let reason = result.content.compactMap { content -> String? in
+                    if case .text(let text, _, _) = content { return text }
+                    return nil
+                }.joined(separator: " ")
+                return Self.errorResult("\(reason) — \(undone) of \(steps) edit(s) were undone before this "
+                                        + "(document now at \(lastSeqText))")
+            }
             for _ in 0..<steps {
                 guard let entry = await history.mostRecent(docId: docId) else {
                     // Some steps may already have landed; say how far it got rather than
@@ -5801,8 +5901,11 @@ public actor MCPAdapter {
                     if undone > 0 { break }
                     return Self.errorResult("nothingToUndo: no recorded edit for \"\(docId)\"")
                 }
+                guard !entry.isLiveSelectionChange else {
+                    return failed(Self.errorResult(Self.lastEditWasLiveSelectionReason))
+                }
                 guard let current = await manager.currentBytesOrFetch(docId: docId) else {
-                    return Self.errorResult("unknownDoc")
+                    return failed(Self.errorResult("unknownDoc"))
                 }
 
                 let restored: Data
@@ -5819,7 +5922,7 @@ public actor MCPAdapter {
                     switch await revertMerge(docId: docId, base: entry.after, mine: current,
                                              theirs: entry.before) {
                     case .merged(let merged): restored = merged
-                    case .failed(let result): return result
+                    case .failed(let result): return failed(result)
                     }
                 }
 
@@ -5827,10 +5930,10 @@ public actor MCPAdapter {
                     docId: docId, createIfMissing: false, fullDoc: restored,
                     expectation: .matchBytes(current), recordForUndo: false
                 ) { seq in "seq \(seq)" }
-                if result.isError == true { return result }
+                if result.isError == true { return failed(result) }
                 // Consumed only once the undo has actually landed, so a rejected write or an
                 // unreachable device leaves the history intact and the agent can try again.
-                await history.consumeMostRecent(docId: docId)
+                await history.consume(docId: docId, id: entry.id)
                 undone += 1
                 for content in result.content {
                     if case .text(let text, _, _) = content { lastSeqText = text }
@@ -5843,6 +5946,11 @@ public actor MCPAdapter {
             return Self.errorResult("invalidArguments")
         }
     }
+
+    static let lastEditWasLiveSelectionReason = "lastEditWasLiveSelection: the last edit was a "
+        + "live-selection change (transform/duplicate/delete/draw/restyle_selection), which "
+        + "undo_last_edit cannot take back — use the user's Undo in the app, or make the inverse "
+        + "change yourself"
 
     /// The contended path: hand all three versions to the device and let `DocMergeEngine` reverse
     /// the agent's change without discarding what landed since.

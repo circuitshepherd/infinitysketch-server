@@ -38,7 +38,7 @@ task.resume()
 
 // Chunked-transfer plumbing: bulk payloads travel as binary chunk messages,
 // so no single WS message ever approaches URLSession's 1 MiB default cap.
-var sender = TransferSender<ClientMessage>(inlineLimit: 256 * 1024, chunkSize: 512 * 1024)
+var sender = TransferSender<ClientMessage>(inlineLimit: TransferDefaults.inlineLimit, chunkSize: TransferDefaults.chunkSize)
 var reassembler = TransferReassembler<ServerMessage>()
 
 @MainActor
@@ -71,7 +71,7 @@ guard case .helloAck = try await receive() else {
 }
 print("connected to \(urlText)")
 
-try await send(.subscribe(docId: docId, fromSeq: nil, createIfMissing: false))
+try await send(.subscribe(docId: docId, createIfMissing: false))
 guard case .subscribed(_, let seq, .inline(let snapshot)) = try await receive() else {
     print("subscribe failed (does doc '\(docId)' exist?)")
     exit(1)
