@@ -150,6 +150,36 @@ import InfSketchWire
         #expect(docs.contains { $0.name == "Chart" && $0.docId != "Chart" })
     }
 
+    /// A file left behind for a PERMANENT reason (it cannot carry an id) still lets the migration
+    /// finish: the marker is written, so it is not retried at every start.
+    @Test func aFileThatCannotCarryAnIdStillCompletesTheMigration() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        try write(Data([0xFF, 0x00, 0x7B]), "Broken", in: dir, age: 30)
+        _ = DirectoryDocumentStore(directory: dir)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(IdentityMigration.markerName).path))
+    }
+
+    /// A write that FAILED (a full disk) is not a reason to give up on the document: no marker is
+    /// written, the old file stays, and the next start migrates it.
+    @Test func aFailedWriteLeavesTheMarkerUnwrittenAndTheNextStartMigrates() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        try write(#"{"aaa001_thumbnailData":""}"#, "Chart", in: dir, age: 10)
+        struct DiskFull: Error {}
+        IdentityMigration.run(in: dir, labels: DocumentLabels(directory: dir)) { data, url in
+            guard url.lastPathComponent == IdentityMigration.markerName else { throw DiskFull() }
+            try data.write(to: url, options: .atomic)
+        }
+        let marker = dir.appendingPathComponent(IdentityMigration.markerName)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("Chart.infsketch").path))
+
+        let docs = try DirectoryDocumentStore(directory: dir).list()
+        #expect(docs.count == 1)
+        #expect(docs.first?.name == "Chart")
+        #expect(docs.first?.docId != "Chart")
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     /// Everything in the folder that is not a top-level `<stem>.infsketch` document is not the
     /// migration's business: the trash, the server id, atomic-write leftovers, hidden files.
     @Test func theTrashTheServerIdAndLeftoversAreUntouched() throws {

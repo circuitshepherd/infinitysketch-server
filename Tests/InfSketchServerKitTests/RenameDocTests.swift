@@ -70,4 +70,48 @@ import InfSketchWire
         #expect(await manager.resolveDocRef("Old") == .id("ID-1"))
         #expect(await manager.resolveDocRef("id-1") == .id("ID-1"))
     }
+
+    /// A rename of an ADVERTISED-ONLY document is the label, and a later advertisement under the
+    /// device's old name does not take it back — a device offline across the rename, or one holding
+    /// a locally suffixed copy, re-advertises its own stem every time it connects.
+    @Test func aReAdvertisementDoesNotRevertARename() async throws {
+        let (manager, _) = try manager()
+        let ad = { (date: Date) in
+            DocAdvertisement(docId: "ID-9", name: "Plan", modifiedAt: date, sizeBytes: 1, thumbnail: nil)
+        }
+        await manager.applyAdvertisements([ad(Date(timeIntervalSinceNow: -60))], connectionId: UUID(), deviceId: "ipad")
+        try await manager.renameDoc(docId: "ID-9", name: "Budget")
+        await manager.applyAdvertisements([ad(Date())], connectionId: UUID(), deviceId: "iphone")
+        #expect(try await manager.listDocuments().first { $0.id == "ID-9" }?.name == "Budget")
+        #expect(await manager.liveEntry(docId: "ID-9")?.name == "Budget")
+    }
+
+    @Test func aWhitespaceOnlyNameIsRefused() async throws {
+        let (manager, store) = try manager()
+        await #expect(throws: DocumentStoreError.invalidDocId) { try await manager.renameDoc(docId: "ID-1", name: "  \n ") }
+        #expect(store.name(of: "ID-1") == "Old")
+    }
+
+    @Test func aRenameIsTrimmedAndEchoedTrimmed() async throws {
+        let (manager, store) = try manager()
+        let (events, _) = await manager.subscribeStatus()
+        try await manager.renameDoc(docId: "ID-1", name: "  X ")
+        #expect(store.name(of: "ID-1") == "X")
+        for await event in events {
+            if case .docRenamed(_, let name) = event { #expect(name == "X"); break }
+        }
+    }
+
+    /// The label restore reaches the stored document even when the device advertises its id in
+    /// another letter case.
+    @Test func anAdvertisementRestoresALostLabelInAnyLetterCase() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        try store.save(docId: "ID-5", bytes: Fixtures.docBytes)
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "id-5", name: "Recovered", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        #expect(store.name(of: "ID-5") == "Recovered")
+        #expect(store.name(of: "id-5") == "Recovered")
+    }
 }

@@ -475,10 +475,7 @@ public enum WebUI {
     /// LABEL — shown in the `<title>` and the bar, HTML-escaped, and never sent to the script.
     public static func docHTML(docId: String, name: String) -> String {
         let jsonId = Self.scriptSafeJSON(docId)
-        let htmlName = name
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
+        let htmlName = HTML.escape(name)
         return #"""
         <!doctype html>
         <html>

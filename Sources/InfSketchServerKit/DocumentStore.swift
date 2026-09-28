@@ -216,7 +216,7 @@ public struct DirectoryDocumentStore: DocumentStore {
         let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let stamped = "\(stem)__\(Self.trashStamp())"
+            let stamped = "\(Self.trashedStem(docId: stem, name: labels.name(of: stem)))__\(Self.trashStamp())"
             try FileManager.default.moveItem(
                 at: url,
                 to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))
@@ -226,6 +226,39 @@ public struct DirectoryDocumentStore: DocumentStore {
         labels.remove(stem)
         // Tidying, after the part the user actually asked for. Never allowed to fail the delete.
         pruneTrash()
+    }
+
+    /// The trashed file's name before its stamp: `<docId> (<name>)`, or the bare docId when the
+    /// document has no label or is labelled by its own id. The label is dropped with the document,
+    /// and a docId (a UUID) says nothing to a person looking for what they deleted — so the name
+    /// travels in the file name, readable in any file browser. Characters no file system accepts
+    /// become `_`, and a very long name is cut.
+    static func trashedStem(docId: String, name: String?) -> String {
+        guard let name else { return docId }
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters)
+        var readable = String(String.UnicodeScalarView(name.unicodeScalars.map {
+            forbidden.contains($0) ? "_" : $0
+        })).trimmingCharacters(in: .whitespaces)
+        while readable.hasPrefix(".") { readable.removeFirst() }
+        if readable.count > 100 { readable = String(readable.prefix(100)) }
+        guard !readable.isEmpty, readable != docId else { return docId }
+        return "\(docId) (\(readable))"
+    }
+
+    /// What a trashed file's basename says: the document's id, its name when the file carries one,
+    /// and when it was deleted. Read from the RIGHT like `trashDate`: the stamp after the last
+    /// `__`, then `<docId> (<name>)` split at the FIRST ` (` — an id never contains one, a name may.
+    /// A file trashed before names were kept parses with `name` nil.
+    static func trashedDocument(fromTrashedBasename basename: String)
+        -> (docId: String, name: String?, deletedAt: Date)? {
+        guard let separator = basename.range(of: "__", options: .backwards),
+              let deletedAt = trashDate(fromTrashedBasename: basename) else { return nil }
+        let head = String(basename[..<separator.lowerBound])
+        if head.hasSuffix(")"), let open = head.range(of: " (") {
+            let name = String(head[open.upperBound..<head.index(before: head.endIndex)])
+            return (String(head[..<open.lowerBound]), name, deletedAt)
+        }
+        return (head, nil, deletedAt)
     }
 
     /// Remove trashed documents past `trashRetention`

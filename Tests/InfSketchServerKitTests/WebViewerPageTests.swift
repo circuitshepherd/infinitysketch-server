@@ -8,6 +8,16 @@ import InfSketchWire
 @Suite struct WebViewerPageTests {
     let html = WebUI.docHTML(docId: "Doc & Co", name: "Doc & Co")
 
+    /// A document NAME is whatever a person typed, markup included: it reaches the page's
+    /// `<title>` and bar escaped, never as markup.
+    @Test func aMarkupBearingNameIsEscapedInTheTitleAndTheBar() {
+        let page = WebUI.docHTML(docId: "ID-1", name: "<script>alert('x')</script> & \"Co\"")
+        let escaped = "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; &quot;Co&quot;"
+        #expect(page.contains("<title>\(escaped) — infsketch</title>"))
+        #expect(page.contains("<h1>\(escaped)</h1>"))
+        #expect(!page.contains("<script>alert"))
+    }
+
     @Test func theStageOwnsItsGestures() {
         // touch-action: none is the mechanism the whole touch story rests on —
         // without it the browser starts its own gesture and preventDefault is ignored.

@@ -17,7 +17,11 @@ import InfSketchWire
 ///  - The old file is removed only after the target has been read back byte-identical and the label
 ///    is on disk, and never when the two names reach the same file (a case-insensitive disk).
 ///  - A file the migration cannot give an id to (not a JSON object, a `documentId` that is not a
-///    string, unreadable) is LEFT WHERE IT IS: it stays a document under its old name.
+///    string) is LEFT WHERE IT IS: it stays a document under its old name.
+///  - The marker is written only when every file left behind was left for a PERMANENT reason (it
+///    cannot carry an id). A write or read that failed (a full disk, a file that would not read)
+///    leaves the marker unwritten, so the next start tries that document again — with the marker
+///    written it would stay under its old name for good.
 ///  - Only top-level, non-hidden `<stem>.infsketch` files are considered: the trash, `.server-id`,
 ///    the labels file and atomic-write leftovers are not documents and are not touched.
 enum IdentityMigration {
@@ -35,8 +39,13 @@ enum IdentityMigration {
         var isIdNamed: Bool { id.map { $0.lowercased() == stem.lowercased() } ?? false }
     }
 
-    static func run(in directory: URL, labels: DocumentLabels) {
+    /// `write` is every file write the migration makes (the old file, the target, the marker) —
+    /// injectable so a test can make one fail the way a full disk does.
+    static func run(in directory: URL, labels: DocumentLabels,
+                    write: (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) {
         let fm = FileManager.default
+        // Set when a document was left behind for a reason that may pass (see the type's comment).
+        var retryNeeded = false
         let marker = directory.appendingPathComponent(markerName)
         guard !fm.fileExists(atPath: marker.path) else { return }
 
@@ -45,9 +54,13 @@ enum IdentityMigration {
             let url = directory.appendingPathComponent(name)
             guard url.pathExtension == fileExtension, !name.hasPrefix(".") else { return nil }
             var isDirectory: ObjCBool = false
-            guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue,
-                  let bytes = try? Data(contentsOf: url) else {
-                ServerLog.error("identity migration: left \(name) in place (not a readable file)")
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+                ServerLog.error("identity migration: left \(name) in place (not a file)")
+                return nil
+            }
+            guard let bytes = try? Data(contentsOf: url) else {
+                ServerLog.error("identity migration: left \(name) in place (could not be read), will retry")
+                retryNeeded = true
                 return nil
             }
             let modified = (try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
@@ -86,8 +99,9 @@ enum IdentityMigration {
                     ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place (cannot carry a documentId)")
                     continue
                 }
-                do { try rewritten.write(to: candidate.url, options: .atomic) } catch {
-                    ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place: \(error)")
+                do { try write(rewritten, candidate.url) } catch {
+                    ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place, will retry: \(error)")
+                    retryNeeded = true
                     continue
                 }
                 candidate.bytes = rewritten
@@ -99,14 +113,16 @@ enum IdentityMigration {
                 target = existing   // checked above: this document's own finished target
             } else {
                 target = directory.appendingPathComponent(id).appendingPathExtension(fileExtension)
-                do { try candidate.bytes.write(to: target, options: .atomic) } catch {
-                    ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place: \(error)")
+                do { try write(candidate.bytes, target) } catch {
+                    ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place, will retry: \(error)")
+                    retryNeeded = true
                     continue
                 }
             }
             // The old file goes only once its content is verifiably stored under the id.
             guard (try? Data(contentsOf: target)) == candidate.bytes else {
-                ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place (\(target.lastPathComponent) does not read back)")
+                ServerLog.error("identity migration: left \(candidate.url.lastPathComponent) in place (\(target.lastPathComponent) does not read back), will retry")
+                retryNeeded = true
                 continue
             }
             let storedId = target.deletingPathExtension().lastPathComponent
@@ -128,7 +144,8 @@ enum IdentityMigration {
             ServerLog.error("identity migration: could not write the document names, will retry: \(error)")
             return
         }
-        do { try Data().write(to: marker) } catch {
+        guard !retryNeeded else { return }
+        do { try write(Data(), marker) } catch {
             ServerLog.error("identity migration: could not write \(markerName), will run again: \(error)")
         }
     }

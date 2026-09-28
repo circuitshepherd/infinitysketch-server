@@ -314,12 +314,12 @@ public enum DocJSON {
         // `.sortedKeys` (2026-09-28 review, round 1, item 1c): this was the one writer of
         // `.infsketch` bytes that did NOT sort its top-level keys, and a document this writes can
         // land back in `Documents/` (an agent's `replace_doc`/`add_text`/… on a synced document).
-        // `SketchDocData.extractDocumentId(from:)`'s streaming reader relies on sorted order to stop
-        // early, so an unsorted `documentId` — physically after a key that sorts before it, e.g.
-        // `drawingData` — read as "no id" and the launch migration would mint and stamp a SECOND id
-        // over the one already there, forking the document's identity. `aaa001_thumbnailData` is
-        // removed just above, so there is no thumbnail key left to keep first here — the app's own
-        // writers are what keeps that invariant where a thumbnail IS present.
+        // The app's `SketchDocData.extractDocumentId(from:)` no longer depends on the order — it
+        // reads every top-level key — so this is about keeping every writer's bytes in one shape
+        // (a stable layout diffs and hashes the same way whichever side wrote it), not about
+        // correctness of that reader. `aaa001_thumbnailData` is removed just above, so there is no
+        // thumbnail key left to keep first here — the app's own writers keep that invariant where
+        // a thumbnail IS present.
         return try JSONSerialization.data(withJSONObject: doc, options: [.sortedKeys])
     }
 

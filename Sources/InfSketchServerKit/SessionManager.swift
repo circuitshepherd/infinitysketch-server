@@ -328,11 +328,6 @@ public actor SessionManager {
                 emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
             }
         }
-        // A creating subscribe carries the document's name: label it, unless it already has one —
-        // a name is changed only by `renameDoc`, never overwritten by a later subscribe.
-        if createIfMissing, let name, store.name(of: docId) == nil {
-            try? store.setName(name, for: docId)
-        }
         let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments)
         // Reentrancy: a delete may have ended this session while we awaited it. Registering the
         // token then counted a subscriber no release would ever uncount, so the next session of
@@ -340,6 +335,13 @@ public actor SessionManager {
         guard sessions[docId] === session else {
             await session.unsubscribe(result.token)
             throw DocumentStoreError.notFound
+        }
+        // A creating subscribe carries the document's name: label it, unless it already has one —
+        // a name is changed only by `renameDoc`, never overwritten by a later subscribe. AFTER the
+        // guard above: labelling first left a label behind for a document a racing delete had
+        // already removed (and whose label the delete had already dropped).
+        if createIfMissing, let name, store.name(of: docId) == nil {
+            try? store.setName(name, for: docId)
         }
         tokenDocs[result.token] = (docId, session, connectionId)
         let newCount = counts[docId, default: 0] + 1
@@ -733,7 +735,7 @@ public actor SessionManager {
         let contentIds = Set(entries.map { $0.id.lowercased() })
         for (docId, entry) in liveIndex where !contentIds.contains(docId.lowercased()) {
             entries.append(DocListEntry(
-                id: docId, name: entry.name, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
+                id: docId, name: store.name(of: docId) ?? entry.name, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
                 seq: nil, subscriberCount: nil, hasContent: false))
         }
         return entries.sorted { $0.id < $1.id }
@@ -757,11 +759,20 @@ public actor SessionManager {
         // local-only, and would keep offering that device as a fetch source for it — a stale
         // holder that sorts first is asked first and burns the full device timeout.
         dropDeviceFromHolders(deviceId)
+        var unlabelled: [DocAdvertisement] = []
         for ad in ads {
+            // A LABEL (set by `renameDoc`, a creating subscribe, or stored) wins over the name a
+            // device advertises: a device offline across a rename, one holding a locally suffixed
+            // "Plan 1", or one whose case-only rename failed re-advertises its OWN stem on every
+            // connect, and taking that would revert the rename for everybody. An advertisement
+            // only fills a missing label.
+            let label = store.name(of: ad.docId)
+            if label == nil { unlabelled.append(ad) }
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)
+                if let label { existing.name = label }
                 if ad.modifiedAt >= existing.modifiedAt {
-                    existing.name = ad.name
+                    if label == nil { existing.name = ad.name }
                     existing.sizeBytes = ad.sizeBytes
                     existing.modifiedAt = ad.modifiedAt
                     existing.thumbnail = ad.thumbnail
@@ -769,15 +780,17 @@ public actor SessionManager {
                 liveIndex[ad.docId] = existing
             } else {
                 liveIndex[ad.docId] = LiveDocEntry(
-                    name: ad.name, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
+                    name: label ?? ad.name, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
                     thumbnail: ad.thumbnail, holders: [deviceId])
             }
         }
         // A STORED document without a label takes the advertised name — what restores the labels
         // after `.names.json` was lost. A labelled document keeps its label: a name changes only
         // through `renameDoc`.
-        for ad in ads where store.name(of: ad.docId) == nil && ((try? store.exists(docId: ad.docId)) ?? false) {
-            try? store.setName(ad.name, for: ad.docId)
+        for ad in unlabelled {
+            let docId = canonicalDocId(ad.docId)
+            guard store.name(of: docId) == nil, (try? store.exists(docId: docId)) ?? false else { continue }
+            try? store.setName(ad.name, for: docId)
         }
         announceLiveIndexChange(from: before)
     }

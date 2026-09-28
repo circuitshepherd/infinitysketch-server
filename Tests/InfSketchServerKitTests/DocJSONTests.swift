@@ -577,10 +577,10 @@ import Testing
 
     /// This was the one writer of `.infsketch` bytes that did NOT sort its top-level keys. A
     /// document it writes can land back in `Documents/` (an agent's `replace_doc`/`add_text`/… on a
-    /// synced document), and the app's `SketchDocData.extractDocumentId(from:)` relies on sorted
-    /// order to stop early — an unsorted `documentId`, physically AFTER a key that sorts before it
-    /// (`drawingData` here), read as "no id" and let the app's launch migration mint and stamp a
-    /// SECOND id over the one already there, forking the document's identity.
+    /// synced document). When this was written the app's `SketchDocData.extractDocumentId(from:)`
+    /// stopped early on sorted order, so an unsorted `documentId` read as "no id"; that reader now
+    /// reads every top-level key and no longer depends on the order. The sort stays so every
+    /// writer's bytes have one shape.
     @Test func serializedOutputSortsItsTopLevelKeys() throws {
         let unsorted = Data(#"""
         {
