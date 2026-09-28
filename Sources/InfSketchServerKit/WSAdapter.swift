@@ -129,10 +129,45 @@ actor Connection {
             return
         }
         guard let message else { return }   // chunk consumed / transfer opened / aborted
-        await dispatch(message)
+        await route(message, receivedAt: ContinuousClock.now)
     }
 
-    private func dispatch(_ message: ClientMessage) async {
+    /// Per-document work that is still running, in arrival order. See `route`.
+    private var docChains: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+
+    /// Runs a message now, or behind earlier work for the same document.
+    ///
+    /// A subscribe or watch can take ~50 s — fetching the document from a holder — and was
+    /// awaited inline here, so for that whole time this peer's pongs, its replies to relayed
+    /// agent ops and every other message sat unread: agent calls timed out, two devices opening
+    /// each other's documents deadlocked until the timeout, and the keepalive could drop the peer
+    /// that was waiting (review finding 12). So those two run as a task, and nothing else waits
+    /// for them — EXCEPT later messages for the same document, which must still see the
+    /// subscription (the app's create-push follows its subscribe at once) and are chained behind
+    /// it in order. With nothing pending for a document, every message runs inline exactly as
+    /// before.
+    private func route(_ message: ClientMessage, receivedAt: ContinuousClock.Instant) async {
+        guard helloed, let docId = message.documentScope else {
+            return await dispatch(message, receivedAt: receivedAt)
+        }
+        let previous = docChains[docId]
+        guard previous != nil || message.mayWaitOnAHolder else {
+            return await dispatch(message, receivedAt: receivedAt)
+        }
+        let id = UUID()
+        let task = Task {
+            await previous?.task.value
+            if !self.closed { await self.dispatch(message, receivedAt: receivedAt) }
+            self.chainFinished(docId: docId, id: id)
+        }
+        docChains[docId] = (id, task)
+    }
+
+    private func chainFinished(docId: String, id: UUID) {
+        if docChains[docId]?.id == id { docChains.removeValue(forKey: docId) }
+    }
+
+    private func dispatch(_ message: ClientMessage, receivedAt: ContinuousClock.Instant) async {
         switch message {
         case .hello(let version, let capabilities, let deviceId):
             guard version == WireProtocol.version else {
@@ -253,10 +288,10 @@ actor Connection {
             }
 
         case .op(let docId, let opId, let payload, let expectation):
-            // Stamped HERE, the moment the op is a whole message and before anything can queue: the
-            // gap between this and the session actor picking it up is the QUEUE, and it is only
+            // `receivedAt` is stamped in `handle`, the moment the op is a whole message and before
+            // anything can queue — including behind this document's own pending subscribe: the gap
+            // between that and the session actor picking it up is the QUEUE, and it is only
             // knowable from outside the actor. Free when telemetry is off — a clock read.
-            let receivedAt = ContinuousClock.now
             guard docSubscriptions[docId] != nil else {
                 return emit(.error(reason: "notSubscribed"))
             }
@@ -594,6 +629,28 @@ extension ServerMessage {
             return .docDeleted(docId: docId)
         default:
             return self
+        }
+    }
+}
+
+extension ClientMessage {
+    /// The document a message acts on, for the messages whose order per document matters.
+    var documentScope: String? {
+        switch self {
+        case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
+             .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
+             .frame(let docId, _, _):
+            return docId
+        default:
+            return nil
+        }
+    }
+
+    /// The two that can fetch the document from a holder, and so take tens of seconds.
+    var mayWaitOnAHolder: Bool {
+        switch self {
+        case .subscribe, .watchDoc: return true
+        default: return false
         }
     }
 }
