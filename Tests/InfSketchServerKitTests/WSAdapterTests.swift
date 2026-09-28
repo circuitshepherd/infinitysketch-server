@@ -95,6 +95,21 @@ private struct ServerMessageReader {
         #expect(try await reader.next() == .event(docId: "d", seq: 1, kind: "op", opId: "o1", payload: payload))
     }
 
+    /// A peer is answered in ITS spelling of the document even though the server keys the
+    /// document by the stored one — the app matches its pending subscribe by docId.
+    @Test func aPeerIsAnsweredInItsOwnSpellingOfTheDocument() async throws {
+        let harness = try await Harness(manager: try makeManager())   // stores "d"
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
+        _ = try await reader.next()
+        try harness.send(.subscribe(docId: "D", fromSeq: nil, createIfMissing: false))
+        #expect(try await reader.next() == .subscribed(docId: "D", seq: 0, snapshot: .inline(Fixtures.docBytes)))
+        let payload = OpPayload(type: "fullDoc", data: Data([7]))
+        try harness.send(.op(docId: "D", opId: "o1", payload: payload))
+        #expect(try await reader.next() == .event(docId: "D", seq: 1, kind: "op", opId: "o1", payload: payload))
+        #expect(await harness.manager.liveInfo().keys.sorted() == ["d"])
+    }
+
     @Test func messagesBeforeHelloAreRejected() async throws {
         let harness = try await Harness(manager: try makeManager())
         var reader = ServerMessageReader(harness.output)

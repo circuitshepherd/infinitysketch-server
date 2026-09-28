@@ -2899,8 +2899,26 @@ public actor MCPAdapter {
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
+        let arguments = await canonicalisingDocIds(arguments)
         return await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
                                    arguments: arguments)
+    }
+
+    /// Every argument that names a document, in the spelling the server keys it by.
+    ///
+    /// The store folds case, so `RAINFALL` finds `Rainfall` — but the sessions, the live index
+    /// and `AgentEditHistory` are keyed by one spelling. An agent writing in another case used to
+    /// open a second session on the same file, unseen by the app's, and the app's next push
+    /// overwrote the write it had just been told succeeded. Done once HERE so no tool can miss it.
+    static let docIdArgumentNames = ["docId", "source", "target", "into"]
+
+    private func canonicalisingDocIds(_ arguments: [String: Value]?) async -> [String: Value]? {
+        guard var arguments else { return nil }
+        for key in Self.docIdArgumentNames {
+            guard case .string(let given)? = arguments[key] else { continue }
+            arguments[key] = .string(await manager.canonicalDocId(given))
+        }
+        return arguments
     }
 
     /// Refuse an argument the named tool does not declare.

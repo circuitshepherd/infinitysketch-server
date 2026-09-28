@@ -34,6 +34,18 @@ public protocol DocumentStore: Sendable {
     /// Nothing is retained afterwards: no tombstone, no record that the id ever existed. A device
     /// that still holds a copy may re-create it on its next push, which is accepted.
     func delete(docId: String) throws
+    /// The spelling a stored document goes by when `docId` names it in any letter case, or nil
+    /// when nothing is stored under it. What `SessionManager` canonicalises docIds to, so one
+    /// document is one session however a caller spells it.
+    func storedDocId(matching docId: String) -> String?
+}
+
+extension DocumentStore {
+    /// For stores with no case folding of their own (the test stores): a document exists under
+    /// exactly the spelling asked for, or not at all.
+    public func storedDocId(matching docId: String) -> String? {
+        (try? exists(docId: docId)) == true ? docId : nil
+    }
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -89,6 +101,15 @@ public struct DirectoryDocumentStore: DocumentStore {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
     }
 
+    public func storedDocId(matching docId: String) -> String? {
+        guard let stored = try? list().map(\.docId) else { return nil }
+        if stored.contains(docId) { return docId }
+        let wanted = docId.lowercased()
+        // `.min()`: two files differing only in case can exist on a case-sensitive filesystem, and
+        // the same one must win every time (the rule `resolvedFileURL` follows).
+        return stored.filter { $0.lowercased() == wanted }.min()
+    }
+
     /// Name of the trash subdirectory. It has no `.infsketch` extension and `list()` enumerates
     /// non-recursively, so trashed documents can never appear in a listing.
     public static let trashDirectoryName = ".trash"
@@ -103,14 +124,19 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// Falls back to an outright removal if the move fails — deleting must still work, and leaving
     /// the document in place would mean the caller's delete silently did nothing.
     public func delete(docId: String) throws {
-        let url = try fileURL(for: docId)
+        // Resolved like `load` and `exists`: on a case-sensitive filesystem the exact spelling
+        // missed a document every other call found, and the trashed copy must carry the name the
+        // document was stored under, not the caller's spelling of it.
+        _ = try fileURL(for: docId)   // validates
+        let stem = storedDocId(matching: docId) ?? docId
+        let url = try fileURL(for: stem)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw DocumentStoreError.notFound
         }
         let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let stamped = "\(docId)__\(Self.trashStamp())"
+            let stamped = "\(stem)__\(Self.trashStamp())"
             try FileManager.default.moveItem(
                 at: url,
                 to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))

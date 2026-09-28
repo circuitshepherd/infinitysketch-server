@@ -63,6 +63,37 @@ public actor SessionManager {
         self.config = config
     }
 
+    // MARK: - docId letter case
+
+    /// The one spelling a document goes by inside this actor.
+    ///
+    /// The store folds case (`RAINFALL` finds `Rainfall`) but the tables below were keyed by the
+    /// exact spelling, so an agent writing `RAINFALL` opened a SECOND session on the same file:
+    /// the app's session never heard of the write, and the app's next push — its base equal to
+    /// its stale session's bytes — was accepted and overwrote the agent's edit on disk. Every
+    /// public entry therefore canonicalises first: the spelling on disk when the document is
+    /// stored, else a live session's or an advertisement's spelling, else the caller's own.
+    ///
+    /// An exact session hit returns at once (no directory listing), which is every op on an open
+    /// document. Callers that talk back to a peer in the peer's own spelling (the WebSocket
+    /// connection) map outgoing messages themselves.
+    public func canonicalDocId(_ docId: String) -> String {
+        if sessions[docId] != nil { return docId }
+        if let stored = store.storedDocId(matching: docId) { return stored }
+        let wanted = docId.lowercased()
+        if let live = sessions.keys.filter({ $0.lowercased() == wanted }).min() { return live }
+        if liveIndex[docId] != nil { return docId }
+        if let advertised = liveIndex.keys.filter({ $0.lowercased() == wanted }).min() { return advertised }
+        return docId
+    }
+
+    /// The live-index entry for a canonical docId, whatever spelling the device advertised it in.
+    private func liveIndexEntry(_ docId: String) -> LiveDocEntry? {
+        if let exact = liveIndex[docId] { return exact }
+        let wanted = docId.lowercased()
+        return liveIndex.keys.filter { $0.lowercased() == wanted }.min().flatMap { liveIndex[$0] }
+    }
+
     public func setContentProvider(_ provider: @escaping @Sendable (String, String) async throws -> Data) {
         contentProvider = provider
     }
@@ -195,6 +226,7 @@ public actor SessionManager {
     /// said so keeps receiving whole documents.
     public func subscribe(docId: String, createIfMissing: Bool = false,
                           acceptsStrippedDocuments: Bool = false) async throws -> SubscribeResult {
+        let docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -265,6 +297,7 @@ public actor SessionManager {
     }
 
     public func unsubscribe(docId: String, token: UUID) async {
+        let docId = canonicalDocId(docId)
         guard tokenDocs.removeValue(forKey: token) == docId,
               let session = sessions[docId] else { return }
         await session.unsubscribe(token)
@@ -292,8 +325,9 @@ public actor SessionManager {
     /// list. A device that still holds a copy may re-advertise or re-push it and bring it back,
     /// which is accepted behaviour rather than a bug to design against.
     public func deleteDoc(docId: String) async throws {
+        let docId = canonicalDocId(docId)
         let hadContent = (try? store.exists(docId: docId)) ?? false
-        let hadAdvertisement = liveIndex[docId] != nil
+        let hadAdvertisement = liveIndexEntry(docId) != nil
         guard hadContent || hadAdvertisement else { throw DocumentStoreError.notFound }
 
         if hadContent { try store.delete(docId: docId) }
@@ -302,7 +336,8 @@ public actor SessionManager {
         // Drop the advertisement so the deleting device's own browser does not keep showing the
         // document as a remote row until the next advertisement refresh. A device that still holds
         // it re-advertises on its next push, which is the accepted resurrection path.
-        liveIndex.removeValue(forKey: docId)
+        let wanted = docId.lowercased()
+        for key in liveIndex.keys where key.lowercased() == wanted { liveIndex.removeValue(forKey: key) }
 
         if let session = sessions.removeValue(forKey: docId) {
             await session.announceDeleted()
@@ -321,6 +356,7 @@ public actor SessionManager {
     /// Register a viewer. Opens the session from the store if needed (no
     /// createIfMissing analog — you can't watch a doc that doesn't exist).
     public func watch(docId: String, framePx: Int? = nil) async throws -> WatchResult {
+        let docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -356,6 +392,7 @@ public actor SessionManager {
     }
 
     public func unwatch(docId: String, token: UUID) async {
+        let docId = canonicalDocId(docId)
         guard tokenWatchDocs.removeValue(forKey: token) == docId,
               let session = sessions[docId] else { return }
         await session.unwatch(token)
@@ -367,12 +404,14 @@ public actor SessionManager {
 
     /// Returns false when the doc has no live session (frame dropped).
     public func submitFrame(docId: String, bytes: Data, canvasRect: [Double]?) async -> Bool {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else { return false }
         await session.submitFrame(bytes: bytes, canvasRect: canvasRect)
         return true
     }
 
     public func latestFrame(docId: String) async -> (png: Data, seq: Int, receivedAt: Date, canvasRect: [Double]?, px: Int)? {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else { return nil }
         return await session.latestFrame
     }
@@ -388,6 +427,7 @@ public actor SessionManager {
         submitter: UUID? = nil, receivedAt: ContinuousClock.Instant? = nil,
         writer: String? = nil
     ) async -> SubmitOutcome {
+        let docId = canonicalDocId(docId)
         guard let session = sessions[docId] else {
             return .rejected(.reject(docId: docId, opId: opId, reason: "notSubscribed", seq: 0))
         }
@@ -420,6 +460,7 @@ public actor SessionManager {
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
         expectation: WriteExpectation = .none, writer: String = "agent"
     ) async -> SubmitOutcome {
+        let docId = canonicalDocId(docId)
         if sessions[docId] == nil {
             let session: DocumentSession
             do {
@@ -447,6 +488,7 @@ public actor SessionManager {
     /// Live session bytes when a session is open, else the store's on-disk
     /// copy. `nil` only when neither exists (unknown doc).
     public func currentBytes(docId: String) async -> Data? {
+        let docId = canonicalDocId(docId)
         if let live = await sessions[docId]?.currentBytes {
             return live
         }
@@ -459,6 +501,7 @@ public actor SessionManager {
     /// when there is nothing here and no holder can supply it. This is the ONE fetch path shared by
     /// the transparent tool reads and the explicit `fetch_doc` tool — never a second mechanism.
     public func currentBytesOrFetch(docId: String) async -> Data? {
+        let docId = canonicalDocId(docId)
         // An EMPTY `createIfMissing` placeholder is not content — it is a slot the app opened
         // moments before pushing (M2c-1 review F4). Treating it as resident is what made an agent
         // read a BLANK document while a holder had the real thing, and it disagreed with
@@ -482,7 +525,7 @@ public actor SessionManager {
         // From here a placeholder must never be worse off than before: every failure path below
         // falls back to it, so a doc mid-creation still reads as the empty doc it is rather than
         // turning a working call into `unknownDoc`.
-        guard liveIndex[docId] != nil else { return await currentBytes(docId: docId) }
+        guard liveIndexEntry(docId) != nil else { return await currentBytes(docId: docId) }
         guard let bytes = try? await fetchFromHolders(docId: docId) else {
             return await currentBytes(docId: docId)
         }
@@ -566,8 +609,9 @@ public actor SessionManager {
                 subscriberCount: live[info.docId]?.subscriberCount,
                 hasContent: true)
         }
-        let contentIds = Set(entries.map(\.id))
-        for (docId, entry) in liveIndex where !contentIds.contains(docId) {
+        // Case-insensitively: a device advertising `rainfall` names the stored `Rainfall`.
+        let contentIds = Set(entries.map { $0.id.lowercased() })
+        for (docId, entry) in liveIndex where !contentIds.contains(docId.lowercased()) {
             entries.append(DocListEntry(
                 id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
                 seq: nil, subscriberCount: nil, hasContent: false))
@@ -668,7 +712,7 @@ public actor SessionManager {
 
     public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
 
-    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndex[docId] }
+    public func liveEntry(docId: String) -> LiveDocEntry? { liveIndexEntry(canonicalDocId(docId)) }
 
     /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
     /// origin — so a failure (offline, doc deleted, timeout) just moves to the next. Throws the
@@ -714,7 +758,7 @@ public actor SessionManager {
     }
 
     private func fetchFromHolders(docId: String) async throws -> Data {
-        guard let contentProvider, let entry = liveIndex[docId], !entry.holders.isEmpty else {
+        guard let contentProvider, let entry = liveIndexEntry(docId), !entry.holders.isEmpty else {
             throw DocumentStoreError.notFound
         }
         if let existing = inFlightFetches[docId] { return try await existing.value }

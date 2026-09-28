@@ -214,7 +214,7 @@ actor Connection {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
                     acceptsStrippedDocuments: acceptsStrippedDocuments)
-                emit(result.snapshot)
+                emit(result.snapshot.addressed(to: docId))
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
             } catch {
                 // M2c-3 (F3): a DOCID-CARRYING failure, not a bare `.error`. The app's transport
@@ -263,7 +263,7 @@ actor Connection {
                 // is the entire point of recording this.
                 writer: deviceId ?? connectionId.uuidString
             ).rejectMessage {
-                emit(reject)
+                emit(reject.addressed(to: docId))
             }
 
         case .subscribeStatus:
@@ -453,7 +453,7 @@ actor Connection {
     ) -> Task<Void, Never> {
         Task {
             for await event in events {
-                self.emit(event)
+                self.emit(event.addressed(to: docId))
             }
             guard !Task.isCancelled else { return }
             await self.releaseWatchSubscription(docId: docId, token: token)
@@ -475,7 +475,7 @@ actor Connection {
             // compile (cross-actor isolated calls require await) instead of
             // silently losing the serialized-output guarantee.
             for await event in events {
-                self.emit(event)
+                self.emit(docId.map { event.addressed(to: $0) } ?? event)
             }
             guard !Task.isCancelled else { return }
             if let docId {
@@ -548,5 +548,36 @@ actor Connection {
     func setKeepaliveTask(_ task: Task<Void, Never>) {
         guard !closed else { return task.cancel() }
         keepaliveTask = task
+    }
+}
+
+extension ServerMessage {
+    /// The same message naming the document by `docId`.
+    ///
+    /// `SessionManager` keys a document by ONE spelling (see `canonicalDocId`), so two peers that
+    /// spell it differently share a session — but each keeps its own subscription under the name
+    /// IT used, and matches replies by that name. So what a session broadcasts is re-addressed
+    /// per connection on the way out.
+    func addressed(to docId: String) -> ServerMessage {
+        switch self {
+        case .subscribed(_, let seq, let snapshot):
+            return .subscribed(docId: docId, seq: seq, snapshot: snapshot)
+        case .event(_, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId, payload: payload)
+        case .reject(_, let opId, let reason, let seq):
+            return .reject(docId: docId, opId: opId, reason: reason, seq: seq)
+        case .resyncRequired(_, let seq):
+            return .resyncRequired(docId: docId, seq: seq)
+        case .frameAvailable(_, let seq):
+            return .frameAvailable(docId: docId, seq: seq)
+        case .watchers(_, let count, let framePx):
+            return .watchers(docId: docId, count: count, framePx: framePx)
+        case .subscribeFailed(_, let reason):
+            return .subscribeFailed(docId: docId, reason: reason)
+        case .docDeleted:
+            return .docDeleted(docId: docId)
+        default:
+            return self
+        }
     }
 }

@@ -189,8 +189,10 @@ public final class InfSketchServer: Sendable {
             }
             // M2c-1: metadata-only documents come from the LIVE index (connected devices'
             // advertisements). Content always beats metadata, so skip any docId with bytes.
-            let contentIds = Set(summaries.map(\.id))
-            for (docId, entry) in await manager.liveDocs() where !contentIds.contains(docId) {
+            // Case-insensitively, as `SessionManager.listDocuments` does: an advertised
+            // `rainfall` IS the stored `Rainfall`.
+            let contentIds = Set(summaries.map { $0.id.lowercased() })
+            for (docId, entry) in await manager.liveDocs() where !contentIds.contains(docId.lowercased()) {
                 summaries.append(DocSummary(
                     id: docId, name: entry.name, sizeBytes: entry.sizeBytes,
                     modifiedAt: entry.modifiedAt, seq: nil, subscriberCount: nil,
@@ -306,7 +308,7 @@ public final class InfSketchServer: Sendable {
             //     `IntegrationTests.percentNamedDocServesPageAndFrame`);
             //   - a connected device's advertisement (M2c metadata-only: no bytes here at all,
             //     and the frame route serves the thumbnail its holder advertised).
-            let hasSession = await manager.liveInfo()[docId] != nil
+            let hasSession = await manager.liveInfo()[manager.canonicalDocId(docId)] != nil
             let advertised = await manager.liveEntry(docId: docId) != nil
             let known = ((try? store.exists(docId: docId)) ?? false) || hasSession || advertised
             guard known else { return HTTPResponse(statusCode: .notFound) }

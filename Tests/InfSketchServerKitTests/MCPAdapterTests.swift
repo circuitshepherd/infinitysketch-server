@@ -6275,6 +6275,33 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// The history is keyed by the document's ONE spelling, so an agent that writes `RAINFALL` and
+    /// undoes `rainfall` takes back its own write on the stored `Rainfall` (review finding 5).
+    @Test func aWriteAndItsUndoInOtherLetterCasesReachTheSameDocument() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "Rainfall")
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"agent wrote this"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified),
+                                                  capabilities: ["authorStrokes", "mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let before = try await rawDocument(client, "Rainfall")
+        let (_, drewError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "RAINFALL", "strokes": [["canvasPoints": [[0, 0], [10, 10]]]]])
+        #expect(drewError != true)
+        #expect(Array(await server.manager.liveInfo().keys) == ["Rainfall"])
+
+        let (content, isError) = try await client.callTool(
+            name: "undo_last_edit", arguments: ["docId": "rainfall"])
+        #expect(isError != true, "\(toolResultText(content))")
+        #expect(try await rawDocument(client, "Rainfall") == before)
+
+        await server.stop()
+    }
+
     /// Repeated undo WALKS BACK — it does not ping-pong. The undo's own write is deliberately
     /// not recorded: recording it would make this second call reverse the FIRST UNDO instead of
     /// the edit before it, which contradicts one-undo-is-one-tool-call. Found by testing.
