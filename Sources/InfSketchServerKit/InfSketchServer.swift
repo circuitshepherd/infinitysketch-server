@@ -67,9 +67,12 @@ public final class InfSketchServer: Sendable {
     /// tool handler's read and the session-open behind its submit see
     /// DIFFERENT content with no timing involved at all — see
     /// `StaleReadStore` in MCPAdapterTests.
+    ///
+    /// `socketPool` replaces FlyingFox's default event pool (still wrapped in
+    /// `WriteStallTimeoutPool`) — for the test that makes `accept` fail on a real server.
     init(
         port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
-        renderFileStore: RenderFileStore? = nil
+        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil
     ) {
         self.store = store
         self.renderFileStore = renderFileStore
@@ -87,9 +90,11 @@ public final class InfSketchServer: Sendable {
         #else
         let address = sockaddr_in6.inet6(port: port)
         #endif
+        let pool = WriteStallTimeoutPool(inner: socketPool ?? HTTPServer.defaultPool(),
+                                         timeout: config.writeStallTimeout)
         self.http = HTTPServer(config: HTTPServer.Configuration(
             address: address,
-            pool: WriteStallTimeoutPool(inner: HTTPServer.defaultPool(), timeout: config.writeStallTimeout),
+            pool: pool,
             logger: ServerLogHTTPLogging()))
         self.config = config
         self.requestedPort = port
@@ -329,7 +334,8 @@ public final class InfSketchServer: Sendable {
         await http.appendRoute(
             "GET /ws",
             to: OriginCheckedHTTPHandler(
-                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker))))
+                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)),
+                allowedHostNames: Set(config.allowedHostNames)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like
         // /ws. See Sources/InfSketchServerKit/MCP/MCPMount.swift for the

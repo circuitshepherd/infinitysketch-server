@@ -1477,6 +1477,34 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Round 5, item 6: a document CREATED from an agent's bytes gets its own identity — the
+    /// bytes are usually another document's raw read — while a REPLACE keeps the identity of the
+    /// document being replaced. Everything else is stored byte for byte.
+    @Test func replaceDocMintsAnIdentityOnCreateAndKeepsItOnReplace() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let copied = Data(#"{"aaa001_thumbnailData":"T","documentId":"COPIED","placedTextsData":[]}"#.utf8)
+        _ = try await client.callTool(
+            name: "replace_doc", arguments: ["docId": "made", "bytes": .string(copied.base64EncodedString())])
+        let stored = Data(base64Encoded: try #require(
+            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+        let minted = try #require(DocumentIdentity.documentId(of: stored))
+        #expect(minted != "COPIED")
+        #expect(stored == DocumentIdentity.replacingDocumentId(in: copied, with: minted))
+
+        let other = Data(#"{"aaa001_thumbnailData":"","documentId":"OTHER","marker":1}"#.utf8)
+        _ = try await client.callTool(
+            name: "replace_doc", arguments: ["docId": "made", "bytes": .string(other.base64EncodedString())])
+        let replaced = Data(base64Encoded: try #require(
+            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+        #expect(DocumentIdentity.documentId(of: replaced) == minted)
+
+        await server.stop()
+    }
+
     @Test func replaceDocRoundTripsRawBytes() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
@@ -4818,6 +4846,28 @@ private actor FakeStrokeOpDevice {
         let tRaw = try await client.readResource(uri: "infsketch://doc/T/raw")
         #expect(Data(base64Encoded: try #require(tRaw[0].blob)) == targetBytes)
 
+        await server.stop()
+    }
+
+    /// Round 5, item 6: the union the device returns carries TARGET's identity; the new
+    /// document must not share it with `target`.
+    @Test func mergeDocsIntoGivesTheNewDocumentItsOwnIdentity() async throws {
+        let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocViaReplaceDoc(client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8))
+        let union = Data(#"{"aaa001_thumbnailData":"","documentId":"TARGET-ID","marker":"merged"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(union), capabilities: ["mergeDocs"])
+        defer { Task { await device.close() } }
+
+        let (_, isError) = try await client.callTool(
+            name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
+        #expect(isError != true)
+        let stored = Data(base64Encoded: try #require(try await client.readResource(uri: "infsketch://doc/C/raw")[0].blob))!
+        let id = try #require(DocumentIdentity.documentId(of: stored))
+        #expect(id != "TARGET-ID")
+        #expect(stored == DocumentIdentity.replacingDocumentId(in: union, with: id))
         await server.stop()
     }
 

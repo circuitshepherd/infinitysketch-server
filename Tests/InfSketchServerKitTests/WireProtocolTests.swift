@@ -367,7 +367,7 @@ import InfSketchWire
 /// `makeResponseFrames` both return nil for it).
 struct WirePingPongTests {
     @Test func serverPingRoundTrips() throws {
-        let json = try ServerMessage.ping.jsonText()
+        let json = try ServerMessage.ping().jsonText()
         #expect(json.contains("\"type\":\"ping\""))
         let decoded = try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
         guard case .ping = decoded else {
@@ -390,7 +390,7 @@ struct WirePingPongTests {
     /// connection and ANY inbound message clears it. Pinning the exact wire text keeps the
     /// hand-written web-UI and demo clients honest.
     @Test func thePingAndPongWireTextIsExactlyTheTypeTag() throws {
-        #expect(try ServerMessage.ping.jsonText() == #"{"type":"ping"}"#)
+        #expect(try ServerMessage.ping().jsonText() == #"{"type":"ping"}"#)
         #expect(try ClientMessage.pong.jsonText() == #"{"type":"pong"}"#)
     }
 }

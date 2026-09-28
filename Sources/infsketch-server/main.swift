@@ -59,6 +59,7 @@ func die(_ message: String) -> Never {
     exit(1)
 }
 
+var allowedHostNames: [String] = []
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
     switch argument {
@@ -84,6 +85,14 @@ while let argument = arguments.next() {
             die("--telemetry requires a path")
         }
         telemetryPath = value
+    case "--allow-host":
+        // A browser page may open /ws only under a name that can mean nothing but this server
+        // (DNS rebinding — see `WebSocketOriginPolicy`). A reverse proxy under a public name, or a
+        // name in /etc/hosts, is added here. Repeatable.
+        guard let value = arguments.next(), !value.isEmpty else {
+            die("--allow-host requires a host name")
+        }
+        allowedHostNames.append(value)
     case "--verbose":
         // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
         // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
@@ -92,7 +101,7 @@ while let argument = arguments.next() {
         ServerLog.isVerbose = true
     default:
         let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
-            + " [--telemetry FILE]"
+            + " [--telemetry FILE] [--allow-host NAME]"
         // `--help` is a request, not a failure: it exits 0 and never holds the window.
         if argument == "--help" { print(usage); exit(0) }
         die(usage)
@@ -117,12 +126,13 @@ if let telemetryPath {
     }
 }
 
-// Before the socket exists: the macOS default soft limit of 256 descriptors was measured running
-// out at ~250 idle connections, which used to end the process.
+// Before the socket exists: with the macOS default soft limit of 256 descriptors, `accept` was
+// measured failing at the 251st idle connection, which used to end the process.
 if let limit = AcceptResilience.raiseFileDescriptorLimit(), limit.new != limit.old {
     ServerLog.verbose("[server] open-file limit raised from \(limit.old) to \(limit.new)")
 }
-let server = InfSketchServer(port: port, docsDirectory: docsDirectory)
+let server = InfSketchServer(port: port, docsDirectory: docsDirectory,
+                             config: SessionConfig(allowedHostNames: allowedHostNames))
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 
 // MARK: - scan to join, and the agent address beside it

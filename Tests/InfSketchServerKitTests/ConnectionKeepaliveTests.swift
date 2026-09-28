@@ -25,7 +25,7 @@ struct ConnectionKeepaliveTests {
     /// the test was flaky by margin. Suite duration is set by `keepaliveIdleInterval`, which is
     /// what paces the pings, so widening the grace costs nothing.
     private static func fastConfig(
-        budget: Int = 64, idle: Duration = .milliseconds(60)
+        budget: Int = 160, idle: Duration = .milliseconds(60)
     ) -> SessionConfig {
         SessionConfig(
             outboundByteBudget: budget,
@@ -218,8 +218,8 @@ struct ConnectionKeepaliveTests {
     }
 
     /// The BUDGET path, end to end and in isolation. Both other integration tests reach their
-    /// ping through the IDLE timer (`aSilentPeerIsPingedThenDropped` emits only a 39-byte
-    /// `helloAck` against its 64-byte budget, so it never crosses it;
+    /// ping through the IDLE timer (`aSilentPeerIsPingedThenDropped` emits only its `helloAck`,
+    /// ~80 bytes with the server's clock, against a 160-byte budget, so it never crosses it;
     /// `droppingAPeerReleasesItsSubscription` does cross it but asserts nothing about which path
     /// fired) — so a regression that broke `noteEmitted`'s ping and left `tick`'s intact used to
     /// pass every integration test.
@@ -231,13 +231,13 @@ struct ConnectionKeepaliveTests {
     @Test func crossingTheByteBudgetPingsEvenWhenTheIdleTimerCannotFire() async throws {
         let manager = try Self.makeManager()
         let harness = try await Harness(
-            manager: manager, config: Self.fastConfig(budget: 100, idle: .seconds(60)))
+            manager: manager, config: Self.fastConfig(budget: 160, idle: .seconds(60)))
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
 
         #expect(await harness.wait { await $0.messages.isEmpty == false }, "expected a helloAck")
         #expect(await harness.collector.pingCount == 0,
-                "the 39-byte helloAck is under the 100-byte budget — nothing should have pinged yet")
+                "the helloAck (~80 bytes with its serverTimeMs) is under the 160-byte budget — nothing should have pinged yet")
 
         try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(await harness.wait { await $0.pingCount > 0 },

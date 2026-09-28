@@ -9,6 +9,10 @@ public struct WSAdapter: WSMessageHandler, Sendable {
     private let config: SessionConfig
     private let broker: DeviceCommandBroker
 
+    /// This machine's clock, Unix ms — what `helloAck` and every `ping` carry as `serverTimeMs`, so
+    /// a device can compare a request's `notAfter` against the clock that WROTE it.
+    static func nowMs(_ now: Date = Date()) -> Int { Int(now.timeIntervalSince1970 * 1000) }
+
     public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker) {
         self.manager = manager
         self.config = config
@@ -231,7 +235,8 @@ actor Connection {
             // that reached it first failed the handshake and cost the connection (review finding
             // 14a — the mirror image of the rule the app keeps for itself). `emit` does not
             // suspend, so nothing can slip in between.
-            emit(.helloAck(protocolVersion: WireProtocol.version, serverId: manager.serverId))
+            emit(.helloAck(protocolVersion: WireProtocol.version, serverId: manager.serverId,
+                           serverTimeMs: WSAdapter.nowMs()))
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
@@ -618,7 +623,7 @@ actor Connection {
         case .none:
             break
         case .ping:
-            emit(.ping)
+            emit(.ping(serverTimeMs: WSAdapter.nowMs()))
         case .drop:
             // A close code first, so the client learns why rather than seeing a bare EOF;
             // close() then releases every subscription, watcher, broker registration and

@@ -373,3 +373,36 @@ import InfSketchWire
         }
     }
 }
+
+/// Round 5, item 3: every WebSocket message either end sends by default stays small enough to
+/// arrive inside the app's 60 s silence window on a slow link. At 512 KB chunks a link below
+/// ~8.7 KB/s never delivered one; the defaults are 64 KB now, inline included.
+@Suite struct TransferDefaultsTests {
+    @Test func noDefaultMessageIsLargerThanAboutNinetyKilobytes() throws {
+        #expect(TransferDefaults.chunkSize == 64 * 1024)
+        #expect(TransferDefaults.inlineLimit == 64 * 1024)
+        #expect(SessionConfig().chunkSize == TransferDefaults.chunkSize)
+        #expect(SessionConfig().inlineLimit == TransferDefaults.inlineLimit)
+        var sender = TransferSender<ServerMessage>(inlineLimit: TransferDefaults.inlineLimit,
+                                                   chunkSize: TransferDefaults.chunkSize)
+        for size in [TransferDefaults.inlineLimit, TransferDefaults.inlineLimit + 1, 5_000_000] {
+            let frames = try sender.frames(for: .subscribed(docId: "d", seq: 1,
+                                                            snapshot: .inline(Data(repeating: 0x41, count: size))))
+            let largest = frames.map { frame -> Int in
+                switch frame { case .text(let t): t.utf8.count; case .binary(let d): d.count }
+            }.max() ?? 0
+            // Inline base64 is 4/3 of the payload; a chunk is the payload plus a 9-byte header.
+            #expect(largest <= 90 * 1024, "a \(size)-byte payload produced a \(largest)-byte message")
+        }
+        // …and a receiver still accepts any self-consistent chunk size a peer chooses.
+        var old = TransferSender<ServerMessage>(inlineLimit: 256 * 1024, chunkSize: 512 * 1024)
+        var receiver = TransferReassembler<ServerMessage>()
+        let big = Data(repeating: 0x42, count: 1_300_000)
+        var out: ServerMessage?
+        for frame in try old.frames(for: .subscribed(docId: "d", seq: 1, snapshot: .inline(big))) {
+            if let message = try receiver.consume(frame) { out = message }
+        }
+        #expect(out == .subscribed(docId: "d", seq: 1, snapshot: .inline(big)))
+    }
+}
+

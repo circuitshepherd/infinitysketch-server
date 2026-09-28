@@ -101,6 +101,17 @@ public actor SessionManager {
         return docId
     }
 
+    /// The live session for `docId` in ANY letter case — exact spelling first — with the key it is
+    /// registered under. For the re-checks after an await: the spelling a caller canonicalised to
+    /// before suspending may not be the one a racing opener registered.
+    private func sessionMatching(_ docId: String) -> (key: String, session: DocumentSession)? {
+        if let exact = sessions[docId] { return (docId, exact) }
+        let wanted = docId.lowercased()
+        guard let key = sessions.keys.filter({ $0.lowercased() == wanted }).min(),
+              let session = sessions[key] else { return nil }
+        return (key, session)
+    }
+
     /// The live-index entry for a canonical docId, whatever spelling the device advertised it in.
     private func liveIndexEntry(_ docId: String) -> LiveDocEntry? {
         if let exact = liveIndex[docId] { return exact }
@@ -249,7 +260,7 @@ public actor SessionManager {
     public func subscribe(docId: String, createIfMissing: Bool = false,
                           acceptsStrippedDocuments: Bool = false,
                           connectionId: UUID? = nil) async throws -> SubscribeResult {
-        let docId = canonicalDocId(docId)
+        var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -301,8 +312,15 @@ public actor SessionManager {
             // freezes at its initial snapshot (and `sessionOpened` fires twice for one document).
             // For the two non-fetch branches there is no suspension, so `sessions[docId]` is still
             // nil here and this re-check is a no-op — their behaviour is unchanged.
-            if let raced = sessions[docId] {
-                session = raced
+            //
+            // The re-check is CASE-FOLDED, and it re-canonicalises: the spelling was chosen BEFORE
+            // the await, so two peers asking for a not-yet-stored document in different spellings
+            // (each advertised by a different device, say) both reached here, and an exact-key
+            // check let the second register a second session for the same document (round 5,
+            // item 7) — the split `canonicalDocId` exists to prevent.
+            if let raced = sessionMatching(docId) {
+                session = raced.session
+                docId = raced.key
             } else {
                 session = opened
                 sessions[docId] = opened
@@ -416,7 +434,7 @@ public actor SessionManager {
     /// Register a viewer. Opens the session from the store if needed (no
     /// createIfMissing analog — you can't watch a doc that doesn't exist).
     public func watch(docId: String, framePx: Int? = nil) async throws -> WatchResult {
-        let docId = canonicalDocId(docId)
+        var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
         if let existing = sessions[docId] {
@@ -435,9 +453,10 @@ public actor SessionManager {
                 opened = try await openSessionFetchingFromHolders(docId: docId)
             }
             // The fetch arm suspends and this actor is reentrant — a second watch or a subscribe
-            // may have registered a session meanwhile; adopt it (see `subscribe`).
-            if let raced = sessions[docId] {
-                session = raced
+            // may have registered a session meanwhile, in any spelling; adopt it (see `subscribe`).
+            if let raced = sessionMatching(docId) {
+                session = raced.session
+                docId = raced.key
             } else {
                 session = opened
                 sessions[docId] = opened
@@ -816,7 +835,7 @@ public actor SessionManager {
         // invisible until the session recycles and reloads from the store. An adopting caller
         // must therefore persist nothing at all. Nothing below suspends, so once these checks
         // pass the save/open sequence completes without further reentrancy.
-        if let raced = sessions[docId] { return raced }
+        if let raced = sessionMatching(docId) { return raced.session }
         // …and a session is not the only thing that can have landed content while we awaited: a
         // writer may have opened a session, written, and then had it GRACE TORN DOWN, leaving
         // durable bytes with NO session behind them (the same store-only state

@@ -111,6 +111,26 @@ public protocol TransferCarrying: Sendable {
     func jsonText() throws -> String
 }
 
+/// The sizes BOTH ends send with. A sender's choice, not part of the wire format: every descriptor
+/// states its own `chunkSize` and the reassembler accepts any self-consistent one, so either end
+/// may change these without the other.
+///
+/// Why 64 KB, and not the 256 KB inline / 512 KB chunks both ends used before: the app treats a
+/// connection that delivered no WHOLE message for 60 s as dead (`MirrorTransport`'s silence
+/// watchdog), and a WebSocket message is only delivered once it has fully arrived. At 512 KB a
+/// link slower than ~8.7 KB/s could never deliver one chunk inside that window, so a healthy but
+/// slow transfer was torn down and retried from the start — forever. At 64 KB the floor is ~1.1
+/// KB/s. The inline limit moves with it for the same reason: an inline payload is base64 inside
+/// one text message (~4/3 of its size), so a 256 KB one was a ~341 KB message with the same
+/// problem. The cost is more frames per document (a 5 MB document is ~80 chunks instead of 10),
+/// each with a 9-byte header.
+public enum TransferDefaults {
+    /// Bulk payloads at or below this many raw bytes travel inline.
+    public static let inlineLimit = 64 * 1024
+    /// Payload bytes per binary chunk message.
+    public static let chunkSize = 64 * 1024
+}
+
 /// Sender-side expansion: one semantic message → one or more wire frames.
 /// Owned by a single serialized writer (an actor); not thread-safe on its own.
 public struct TransferSender<Message: TransferCarrying>: Sendable {

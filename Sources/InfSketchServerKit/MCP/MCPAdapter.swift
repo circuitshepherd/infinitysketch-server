@@ -3695,8 +3695,13 @@ public actor MCPAdapter {
                 return Self.errorResult(
                     "docExists: a connected device holds \"\(docId)\"; read it with fetch_doc before replacing it")
             }
+            // The identity belongs to the DOCUMENT, not to the bytes (`DocumentIdentity`): a
+            // replace keeps the current document's id, a create gets a fresh one — the agent's
+            // bytes are often another document's raw read, and must not bring its id along.
+            let identity = currentBytes.flatMap(DocumentIdentity.documentId(of:)) ?? DocumentIdentity.newId()
+            let stored = DocumentIdentity.replacingDocumentId(in: bytes, with: identity)
             return await submitAndRespond(
-                docId: docId, createIfMissing: true, fullDoc: bytes,
+                docId: docId, createIfMissing: true, fullDoc: stored,
                 expectation: currentBytes.map(WriteExpectation.matchBytes) ?? .absent
             ) { seq in
                 "replaced \(docId) at seq \(seq)"
@@ -5625,8 +5630,11 @@ public actor MCPAdapter {
             //  - `into` absent: unchanged — write in place into `target`
             //    under the byte-CAS every other write tool uses.
             if let into {
+                // A NEW document: the union carries `target`'s identity, which must not be shared
+                // with `target` itself (`DocumentIdentity`).
+                let stored = DocumentIdentity.replacingDocumentId(in: out.bytes, with: DocumentIdentity.newId())
                 return await submitAndRespond(
-                    docId: into, createIfMissing: true, fullDoc: out.bytes, expectation: .absent
+                    docId: into, createIfMissing: true, fullDoc: stored, expectation: .absent
                 ) { seq in
                     "merged \(source) and \(target) into \(into) at seq \(seq)"
                 }

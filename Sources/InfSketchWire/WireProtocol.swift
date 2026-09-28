@@ -249,7 +249,11 @@ public enum ClientMessage: Equatable, Sendable {
     /// `nil` when the document draws nothing, so nothing is covered.
     /// `seq` is the seq of the document bytes the frame was rendered FROM, when the device knows
     /// it; the server then stamps the frame with it instead of the seq current on arrival, which a
-    /// render that finished after a write would otherwise claim.
+    /// render that finished after a write would otherwise claim. The app does NOT send it today —
+    /// it renders its own frames from its live document, which holds no server seq — so every
+    /// device frame is stamped with the seq current on arrival. The frames that need the exact seq
+    /// are the RELAYED renders (a watched document nobody has open), and those carry it on the
+    /// server side (`SessionManager.submitFrame(atSeq:)`), not on this message.
     case frame(docId: String, payload: BulkPayload, canvasRect: [Double]?, seq: Int? = nil)
     case createDocReply(requestId: UInt32, docId: String, payload: BulkPayload?, failureReason: String?)
     /// `meta` (additive) rides small JSON inline — never chunked — alongside
@@ -451,7 +455,12 @@ public enum ServerMessage: Equatable, Sendable {
     /// (persisted beside the documents), different for a different server at the same address. It
     /// is what a device keys "what this server and I last agreed on" by: a lineage agreed with one
     /// server is not a lineage with another.
-    case helloAck(protocolVersion: Int, serverId: String)
+    /// `serverTimeMs` (v12) is this server's clock at the moment the ack was sent, Unix ms. A
+    /// device compares a request's `notAfter` against the SERVER's clock, estimated from this (and
+    /// refreshed by every `ping`), never against its own: a device clock off by more than the
+    /// deadline's skew allowance otherwise refused every live-state op, or applied stale ones.
+    /// nil from a server that does not send it (the device then falls back to its own clock).
+    case helloAck(protocolVersion: Int, serverId: String, serverTimeMs: Int? = nil)
     case subscribed(docId: String, seq: Int, snapshot: BulkPayload)
     case event(docId: String, seq: Int, kind: String, opId: String, payload: OpPayload)
     case reject(docId: String, opId: String, reason: String, seq: Int)
@@ -460,7 +469,10 @@ public enum ServerMessage: Equatable, Sendable {
     /// Asks the peer to prove it is still reading. Sent when a connection has been emitted more
     /// than `SessionConfig.outboundByteBudget` since its last inbound message, or when it has
     /// been silent for `SessionConfig.keepaliveIdleInterval`. See `ConnectionHealth`.
-    case ping
+    /// `serverTimeMs` (v12): the server's clock when the ping was sent, Unix ms — a fresh sample
+    /// for the device's estimate of the server clock (see `helloAck`). Optional, so a ping from a
+    /// server that omits it is still a ping.
+    case ping(serverTimeMs: Int? = nil)
     case docList(docs: [DocListEntry])
     case transferEnd(transferId: UInt32)
     case frameAvailable(docId: String, seq: Int)
@@ -489,7 +501,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter, serverTimeMs
     }
 
     public init(from decoder: any Decoder) throws {
@@ -497,7 +509,8 @@ extension ServerMessage: Codable {
         switch try c.decode(String.self, forKey: .type) {
         case "helloAck":
             self = .helloAck(protocolVersion: try c.decode(Int.self, forKey: .protocolVersion),
-                             serverId: try c.decode(String.self, forKey: .serverId))
+                             serverId: try c.decode(String.self, forKey: .serverId),
+                             serverTimeMs: try c.decodeIfPresent(Int.self, forKey: .serverTimeMs))
         case "subscribed":
             let snapshot: BulkPayload
             if let descriptor = try c.decodeIfPresent(TransferDescriptor.self, forKey: .transfer) {
@@ -527,7 +540,7 @@ extension ServerMessage: Codable {
         case "error":
             self = .error(reason: try c.decode(String.self, forKey: .reason))
         case "ping":
-            self = .ping
+            self = .ping(serverTimeMs: try c.decodeIfPresent(Int.self, forKey: .serverTimeMs))
         case "docList":
             self = .docList(docs: try c.decode([DocListEntry].self, forKey: .docs))
         case "transferEnd":
@@ -574,10 +587,11 @@ extension ServerMessage: Codable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .helloAck(let v, let serverId):
+        case .helloAck(let v, let serverId, let serverTimeMs):
             try c.encode("helloAck", forKey: .type)
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(serverId, forKey: .serverId)
+            try c.encodeIfPresent(serverTimeMs, forKey: .serverTimeMs)
         case .subscribed(let docId, let seq, let snapshot):
             try c.encode("subscribed", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -605,8 +619,9 @@ extension ServerMessage: Codable {
         case .error(let reason):
             try c.encode("error", forKey: .type)
             try c.encode(reason, forKey: .reason)
-        case .ping:
+        case .ping(let serverTimeMs):
             try c.encode("ping", forKey: .type)
+            try c.encodeIfPresent(serverTimeMs, forKey: .serverTimeMs)
         case .docList(let docs):
             try c.encode("docList", forKey: .type)
             try c.encode(docs, forKey: .docs)

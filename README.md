@@ -43,7 +43,10 @@ instead, or enter the address in the app. The web overview is at `http://localho
 
 Flags: `--port N` (default 8080), `--docs DIR` (default `./docs` — created if missing; documents
 are stored there as plain `.infsketch` files, deletions go to a `.trash/` folder pruned after 30
-days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a browser at startup).
+days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a browser at startup),
+`--allow-host NAME` (repeatable: a host name under which a browser page may open the live channel —
+IP addresses, `localhost`, `*.local` names and this machine's own name are allowed already; add the
+name of a reverse proxy or an `/etc/hosts` entry you browse to. A proxy must pass `Host` through).
 
 ### Windows
 

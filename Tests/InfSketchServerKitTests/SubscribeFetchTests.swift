@@ -193,6 +193,36 @@ final class SubscribeFetchTests: XCTestCase {
         XCTAssertTrue(gotB, "subscriber B missed the broadcast (orphaned session)")
     }
 
+    /// Round 5, item 7: the same race in two SPELLINGS. Each subscribe canonicalises before its
+    /// fetch suspends; with the document advertised as "doc" by one device and "DOC" by another,
+    /// the two resolve to different keys, and an exact-key re-check after the fetch registered a
+    /// second session for one document. Both subscribers must end on ONE session.
+    func testConcurrentSubscribesInTwoSpellingsShareOneSession() async throws {
+        let (manager, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await manager.applyAdvertisements([ad("doc")], connectionId: UUID(), deviceId: "devA")
+        await manager.setContentProvider { _, _ in
+            try? await Task.sleep(for: .milliseconds(80))
+            return Data("PULLED".utf8)
+        }
+        async let a = manager.subscribe(docId: "doc")
+        try await Task.sleep(for: .milliseconds(20))   // a is suspended in its fetch
+        await manager.applyAdvertisements([ad("DOC")], connectionId: UUID(), deviceId: "devB")
+        let second = await manager.canonicalDocId("Doc")
+        XCTAssertEqual(second, "DOC", "the second spelling resolves elsewhere")
+        async let b = manager.subscribe(docId: "Doc")
+        let (subA, subB) = try await (a, b)
+
+        let sessions = await manager.liveInfo().count
+        XCTAssertEqual(sessions, 1, "one document, one session")
+        _ = await manager.submit(docId: "doc", opId: "op1",
+                                 payload: OpPayload(type: "fullDoc", data: Data("v2".utf8)))
+        let gotA = await Self.receivesEvent(subA)
+        let gotB = await Self.receivesEvent(subB)
+        XCTAssertTrue(gotA)
+        XCTAssertTrue(gotB)
+    }
+
     /// An adopting (losing) racer must persist NOTHING. The byte fetch is coalesced, but each
     /// racer resumes from it holding those bytes — and by then the winner's session may already
     /// have accepted a write. A second `store.save` of the fetched bytes would silently revert

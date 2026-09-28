@@ -1,6 +1,10 @@
 import Foundation
 import Testing
 import FlyingSocks
+import FlyingFox
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import InfSketchServerKit
 
 /// Descriptor exhaustion on `accept` used to end the process: FlyingFox rethrows it out of `run()`.
@@ -13,9 +17,25 @@ import FlyingSocks
 
     @Test func acceptAndExhaustionFailuresAreTransient() {
         #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 24, message: "")))
+        #if canImport(Darwin)
         #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 53, message: "")))
+        #endif
         #expect(AcceptResilience.isTransient(SocketError.failed(type: "CreateSocket", errno: 23, message: "")))
         #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 10024, message: "")))
+    }
+
+    /// Transience is the ERRNO, not the call: an `Accept` failure that is not a shortage (EBADF
+    /// from a closed listener, EINVAL) would otherwise be retried forever (round 5, item 4).
+    @Test func anAcceptFailureThatIsNotAShortageIsNotTransient() {
+        #expect(!AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 9, message: "")))
+        #expect(!AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 22, message: "")))
+        #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 12, message: "")))
+        #if canImport(Darwin)
+        #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 55, message: "")))
+        #elseif canImport(Glibc)
+        #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 103, message: "")))
+        #expect(AcceptResilience.isTransient(SocketError.failed(type: "Accept", errno: 105, message: "")))
+        #endif
     }
 
     /// A port already in use is a startup error the caller must report, never a retry loop.
@@ -66,4 +86,65 @@ import FlyingSocks
         #expect(result.new >= min(1024, result.old), "the soft limit may only go up")
     }
     #endif
+
+    // MARK: - on a real server
+
+    /// A pool whose FIRST wait for an incoming connection fails the way descriptor exhaustion
+    /// does, then behaves normally. The accept loop's first wait is on the listening socket, before
+    /// any client exists, so the failure lands exactly where EMFILE would.
+    private final class AcceptFailsOncePool: AsyncSocketPool, @unchecked Sendable {
+        let inner: any AsyncSocketPool = HTTPServer.defaultPool()
+        private let lock = NSLock()
+        private var failed = 0
+        var failures: Int { lock.lock(); defer { lock.unlock() }; return failed }
+
+        func prepare() async throws { try await inner.prepare() }
+        func run() async throws { try await inner.run() }
+        func suspendSocket(_ socket: Socket, untilReadyFor events: Socket.Events) async throws {
+            if events != .write {
+                let fail: Bool = { lock.lock(); defer { lock.unlock() }
+                    if failed == 0 { failed = 1; return true }; return false }()
+                if fail { throw SocketError.failed(type: "Accept", errno: 24, message: "Too many open files") }
+            }
+            try await inner.suspendSocket(socket, untilReadyFor: events)
+        }
+    }
+
+    /// A free TCP port: listening again binds the configured port, and port 0 would come back on
+    /// a different one.
+    private func freePort() throws -> UInt16 {
+        let socket = try Socket(domain: AF_INET6)
+        try socket.bind(to: sockaddr_in6.inet6(port: 0))
+        guard case .ip6(_, let port) = try socket.sockname() else { throw SocketError.disconnected }
+        try socket.close()
+        return port
+    }
+
+    /// End to end (round 5, item 4): an `accept` that fails with EMFILE on a REAL `HTTPServer`
+    /// does not end `run()` — the server listens again and answers the next request.
+    @Test func aRealServerListensAgainAfterAnAcceptFailure() async throws {
+        let pool = AcceptFailsOncePool()
+        let port = try freePort()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("accept-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let server = InfSketchServer(port: port, store: DirectoryDocumentStore(directory: dir), socketPool: pool)
+        let task = Task { try await server.run() }
+        defer { task.cancel() }
+
+        let deadline = ContinuousClock.now + .seconds(10)
+        var answered = false
+        while ContinuousClock.now < deadline {
+            if pool.failures == 1,
+               let (_, response) = try? await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/api/docs")!),
+               (response as? HTTPURLResponse)?.statusCode == 200 {
+                answered = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(pool.failures == 1, "the injected accept failure happened")
+        #expect(answered, "the server listened again and answered after it")
+        await server.stop()
+        _ = await task.result
+    }
 }

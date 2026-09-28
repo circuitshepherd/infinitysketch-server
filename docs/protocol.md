@@ -11,22 +11,29 @@ One WebSocket per client, at `GET /ws`. Messages are JSON text frames. Bulk byte
 snapshots, op payloads, PNG frames) above an inline threshold travel as **chunked binary frames**
 instead: the JSON message carries a `TransferDescriptor` announcing a transfer id, the bytes follow
 as binary chunks, and `transferEnd` closes it (a sender that fails mid-transfer closes the
-connection; there is no abort message). Session-layer code never sees a
+connection; there is no abort message). Both ends send with `TransferDefaults`: payloads up to 64 KiB
+inline, larger ones in 64 KiB chunks — small enough that one message arrives inside the app's 60 s
+silence window on a slow link (at 512 KiB a link under ~8.7 KB/s never delivered one). The chunk
+size is the sender's choice, stated in every descriptor; a receiver accepts any consistent one. Session-layer code never sees a
 transfer — the WS adapter reassembles before messages reach `SessionManager`. Sender/reassembler
 live in `InfSketchWire` (`TransferSender`, `TransferReassembler`); both directions use them.
 
 ## Handshake and versioning
 
 The first message must be `hello(protocolVersion, capabilities, deviceId)`; the server answers
-`helloAck(protocolVersion, serverId)` or refuses with `error(unsupportedVersion:<server version>)`.
+`helloAck(protocolVersion, serverId, serverTimeMs)` or refuses with `error(unsupportedVersion:<server version>)`.
 **Nothing else may be sent before `helloAck`** — a request sent early draws
 `error(helloRequired)` and costs the connection. `serverId` names the server INSTANCE: persistent
 per documents directory (`.server-id` beside the documents), random per process for an injected
-store — a device keys what it last agreed with a server by it.
+store — a device keys what it last agreed with a server by it. `serverTimeMs` is the server's clock
+(Unix ms) when the ack was sent; every `ping` carries it too. A device judges a request's `notAfter`
+by its estimate of the SERVER's clock built from these, never by its own.
 
 A docId-less `error` is reserved for failures of the CONNECTION (`helloRequired`,
-`unsupportedVersion`, `malformedMessage`, `transferViolation`, and `listFailed` for a `listDocs`
-the store could not answer). Everything about one document names it: an op on a document the
+`unsupportedVersion`, `transferViolation`), plus two that answer one message and leave the
+connection up: `listFailed` for a `listDocs` the store could not answer, and `malformedMessage` for
+a message (in practice an advertisement) the server could not decode — the app logs it and carries
+on, since reconnecting would re-send the same bytes. Everything about one document names it: an op on a document the
 connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a second subscribe is
 `subscribeFailed(docId, "alreadySubscribed")`, deleting an absent document answers
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
@@ -87,7 +94,8 @@ inherits; its viewport is what `render_sketch` reports) and falls back to any ca
 equals the device that spoke most recently wins.
 
 **Deadline.** `strokeOpRequest` carries `notAfter`, Unix milliseconds: the request's timeout plus a
-10 s clock-skew allowance. A device that reaches a live-selection op after it — it was suspended
+10 s clock-skew allowance, in the SERVER's clock (the device compares it with its estimate of that
+clock — see `helloAck`). A device that reaches a live-selection op after it — it was suspended
 with the request queued — answers `requestExpired` instead of applying it: the agent was long ago
 told `deviceTimeout` and may have retried. Byte ops may ignore it; a late reply to one is dropped.
 
@@ -106,7 +114,8 @@ any op handler sees the spec. A text frame over 1 MiB drops the app's socket out
   web overview and the app's browser refresh from.
 - `watchDoc` / `unwatchDoc` — a browser viewing a document's page makes the device render live
   frames (`frame`, ephemeral PNG, no persistence; an optional `seq` names the document seq the
-  device rendered, which the server stamps the frame with instead of the arrival seq); `watchers` tells the device someone is
+  device rendered, which the server stamps the frame with instead of the arrival seq — the app does
+  not send it today, so its frames carry the arrival seq); `watchers` tells the device someone is
   looking, `frameAvailable` tells watchers a new frame exists.
 
 ## Keepalive and backpressure
@@ -126,7 +135,7 @@ than buffered without bound. See `ConnectionHealth`.
 | `GET /api/docs` | JSON document listing |
 | `GET /api/docs/<id>/frame` | Preview PNG — latest live frame, else the stored thumbnail |
 | `GET /join` | Scan-to-join landing page; hands the address to the app via a custom URL scheme |
-| `GET /ws` | The device WebSocket channel |
+| `GET /ws` | The device WebSocket channel. A handshake carrying an `Origin` (a browser page) must be same-origin AND name the server by an IP literal, `localhost`, a `*.local` name, the machine's host name or an `--allow-host` name — DNS rebinding otherwise passes a same-origin check. `X-Forwarded-Host` is ignored: a reverse proxy must preserve `Host`. |
 | `/mcp` | The MCP endpoint for agents (streaming HTTP + SSE) |
 
 ## MCP

@@ -9,7 +9,8 @@ public struct SessionConfig: Sendable {
     /// larger ones become chunked binary transfers.
     public var inlineLimit: Int
     /// Payload bytes per binary chunk message. Header + payload stays under
-    /// URLSessionWebSocketTask's 1 MiB default receive cap.
+    /// URLSessionWebSocketTask's 1 MiB default receive cap. See `TransferDefaults` for why the
+    /// default is 64 KB.
     public var chunkSize: Int
     /// MCP sessions idle longer than this are reaped (the SDK's own client
     /// never sends `DELETE /mcp`, so idle reaping is the ORDINARY teardown
@@ -89,11 +90,15 @@ public struct SessionConfig: Sendable {
     /// See `WriteStallTimeoutPool`: it is the only way a peer that stopped reading actually loses
     /// its socket rather than just its subscriptions.
     public var writeStallTimeout: Duration
+    /// Host names a browser page may use to open `/ws`, beyond the built-in trusted ones (IP
+    /// literals, `localhost`, `*.local`, this machine's name) — `--allow-host`. See
+    /// `WebSocketOriginPolicy` for why a name has to be trusted at all.
+    public var allowedHostNames: [String]
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
-        inlineLimit: Int = 256 * 1024,
-        chunkSize: Int = 512 * 1024,
+        inlineLimit: Int = TransferDefaults.inlineLimit,
+        chunkSize: Int = TransferDefaults.chunkSize,
         mcpSessionIdleTimeout: Duration = .seconds(3600),
         mcpSessionCleanupInterval: Duration = .seconds(60),
         createDocTimeout: Duration = .seconds(10),
@@ -107,8 +112,10 @@ public struct SessionConfig: Sendable {
         relayRetryDelays: [Duration] = [.seconds(2), .seconds(6), .seconds(18), .seconds(60)],
         helloDeadline: Duration = .seconds(10),
         maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes,
-        writeStallTimeout: Duration = .seconds(30)
+        writeStallTimeout: Duration = .seconds(30),
+        allowedHostNames: [String] = []
     ) {
+        self.allowedHostNames = allowedHostNames
         self.writeStallTimeout = writeStallTimeout
         self.maxTransferBytes = maxTransferBytes
         self.helloDeadline = helloDeadline

@@ -1021,6 +1021,6 @@ private struct ServerMessageReader {
 /// A `helloAck` at the current wire version carrying a server id. The id itself is per server
 /// instance, so tests that only need "the handshake was accepted" check its shape, not its value.
 func isCurrentHelloAck(_ message: ServerMessage?) -> Bool {
-    if case .helloAck(WireProtocol.version, let serverId)? = message { return !serverId.isEmpty }
+    if case .helloAck(WireProtocol.version, let serverId, _)? = message { return !serverId.isEmpty }
     return false
 }

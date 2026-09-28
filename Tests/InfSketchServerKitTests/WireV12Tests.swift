@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import InfSketchWire
+import FlyingFox
 @testable import InfSketchServerKit
 
 /// Wire v12: the server names its instance, an oversized op-spec rides the chunked payload, and a
@@ -36,6 +37,39 @@ import InfSketchWire
     @Test func helloAckRoundTripsItsServerId() throws {
         let ack = ServerMessage.helloAck(protocolVersion: WireProtocol.version, serverId: "abc")
         #expect(try ServerMessage(jsonText: ack.jsonText()) == ack)
+    }
+
+    /// The server's clock rides `helloAck` and every `ping` (round 5, item 10), so a device can
+    /// judge a request's `notAfter` by the clock that wrote it. Optional both ways.
+    @Test func helloAckAndPingCarryTheServersClock() throws {
+        let ack = ServerMessage.helloAck(protocolVersion: WireProtocol.version, serverId: "abc",
+                                         serverTimeMs: 1_790_000_000_123)
+        #expect(try ServerMessage(jsonText: ack.jsonText()) == ack)
+        let ping = ServerMessage.ping(serverTimeMs: 42)
+        #expect(try ServerMessage(jsonText: ping.jsonText()) == ping)
+        #expect(try ServerMessage(jsonText: #"{"type":"ping"}"#) == .ping(serverTimeMs: nil))
+        #expect(try ServerMessage(jsonText: #"{"type":"helloAck","protocolVersion":12,"serverId":"x"}"#)
+                == .helloAck(protocolVersion: 12, serverId: "x", serverTimeMs: nil))
+    }
+
+    /// The server actually SENDS its clock, on the hello and on a keepalive ping.
+    @Test func theServerSendsItsClockOnHello() async throws {
+        let before = WSAdapter.nowMs()
+        let manager = SessionManager(store: DirectoryDocumentStore(directory: try temporaryDirectory()))
+        let adapter = WSAdapter(manager: manager, broker: DeviceCommandBroker())
+        let (input, cont) = AsyncStream<WSMessage>.makeStream()
+        let output = try await adapter.makeMessages(for: input)
+        cont.yield(.text(try ClientMessage.hello(protocolVersion: WireProtocol.version, capabilities: [],
+                                                 deviceId: nil).jsonText()))
+        var ack: ServerMessage?
+        for await message in output {
+            if case .text(let text) = message { ack = try ServerMessage(jsonText: text); break }
+        }
+        cont.finish()
+        guard case .helloAck(_, _, let serverTimeMs?)? = ack else {
+            Issue.record("expected a helloAck carrying the server's clock, got \(String(describing: ack))"); return
+        }
+        #expect(serverTimeMs >= before && serverTimeMs <= WSAdapter.nowMs())
     }
 
     // MARK: op-spec as a bundle part
