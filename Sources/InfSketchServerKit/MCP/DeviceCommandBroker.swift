@@ -383,7 +383,7 @@ public actor DeviceCommandBroker {
         // bytes go on to be stored under a compare-and-swap. A rebuild that does not match the
         // device's own hash of its result is a failure, never a document.
         var resolved = bytes ?? Data()
-        if payloadKind == "strippedDoc" {
+        if payloadKind == BlobOmissionWire.strippedDocKind {
             guard let stripped = try? StrippedDocument(encoded: resolved),
                   stripped.basedOn == entry.sentDoc.hash,
                   let rebuilt = try? stripped.restore(usingRuns: entry.sentDoc.runs),

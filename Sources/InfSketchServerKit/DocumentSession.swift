@@ -475,7 +475,7 @@ actor DocumentSession {
         switch payload.type {
         case "fullDoc":
             newBytes = inline
-        case "strippedDoc":
+        case BlobOmissionWire.strippedDocKind:
             func refuseRebuild(_ why: String) -> SubmitOutcome {
                 Self.report("\(docId): \(why)")
                 recordTelemetry(kind: payload.type, payloadBytes: inline.count,
@@ -667,7 +667,7 @@ actor DocumentSession {
         // Encoded ONCE — it is a multi-megabyte copy, and the second call existed only to count
         // its bytes for the line below.
         let encoded = candidate.encoded()
-        let stripped = event(OpPayload(type: "strippedDoc", data: encoded))
+        let stripped = event(OpPayload(type: BlobOmissionWire.strippedDocKind, data: encoded))
         Self.report("\(docId): broadcasting \(encoded.count) B instead of "
                     + "\(newBytes.count) B to \(audience.count) subscriber(s)")
         for (token, continuation) in subscribers {

@@ -64,6 +64,18 @@ public struct DirectoryDocumentStore: DocumentStore {
         // Sweep once here as well as after each delete, so a server that runs for weeks without
         // deleting anything still clears out what expired while it was up.
         pruneTrash()
+        sweepAtomicWriteLeftovers()
+    }
+
+    /// A process killed during `save` leaves the `.atomic` write's temporary file behind —
+    /// `<name>.sb-<hash>-<random>` beside the document on Darwin — and nothing ever removed one.
+    /// At startup nothing of ours is writing, so any such file is an abandoned half-write. It can
+    /// never surface as a document (`list()` filters on the extension); this only reclaims space.
+    private func sweepAtomicWriteLeftovers() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names where name.contains(".\(Self.fileExtension).sb-") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
     }
 
     public func list() throws -> [StoredDocInfo] {
