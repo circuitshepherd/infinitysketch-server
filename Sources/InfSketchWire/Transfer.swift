@@ -88,10 +88,10 @@ public enum ChunkFraming {
     }
 }
 
-/// end/abort control extracted from a wire message.
+/// The control message that closes a transfer. There is only `end`: an abort message existed and
+/// nothing ever sent one — a sender that fails mid-transfer closes the connection instead.
 public enum TransferControl: Equatable, Sendable {
     case end(UInt32)
-    case abort(UInt32, reason: String)
 }
 
 /// A wire message that can carry one bulk byte field. Adopted by both
@@ -193,12 +193,6 @@ public struct TransferReassembler<Message: TransferCarrying>: Sendable {
                 guard current.isComplete else { throw TransferWireError.endBeforeComplete }
                 pending = nil
                 return current.owner.resolvingBulk(with: current.buffer)
-            case .abort(let id, _):
-                guard id == current.descriptor.transferId else {
-                    throw TransferWireError.wrongTransferId(expected: current.descriptor.transferId, got: id)
-                }
-                pending = nil   // owner voided
-                return nil
             }
         }
         if let descriptor = message.openingDescriptor {

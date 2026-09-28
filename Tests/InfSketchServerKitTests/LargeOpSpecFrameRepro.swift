@@ -82,7 +82,7 @@ import MCP
             @unknown default: continue
             }
             guard let message = (try? reassembler.consume(wireFrame)) ?? nil else { continue }
-            if case .strokeOpRequest(_, _, let payload, let spec, let kind) = message {
+            if case .strokeOpRequest(_, _, let payload, let spec, let kind, _) = message {
                 guard kind == OpSpecBundleWire.kind, let bytes = payload.inlineData,
                       let bundle = try? OpSpecBundle(encoded: bytes) else {
                     return .received(specBytes: spec.count)

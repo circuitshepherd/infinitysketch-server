@@ -211,18 +211,6 @@ import InfSketchWire
         let done = try reassembler.consume(frames[4])   // end
         #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(payload)))
     }
-    @Test func abortDiscardsPendingTransfer() throws {
-        var reassembler = TransferReassembler<ServerMessage>()
-        let d = TransferDescriptor(transferId: 0, totalBytes: 8, chunkSize: 8)
-        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
-        let aborted = try reassembler.consume(.text(try ServerMessage.transferAbort(transferId: 0, reason: "storeFailure").jsonText()))
-        #expect(aborted == nil)   // owner voided
-        // A fresh transfer with the same shape must now be accepted.
-        _ = try reassembler.consume(.text(try ServerMessage.subscribed(docId: "d", seq: 0, snapshot: .transfer(d)).jsonText()))
-        _ = try reassembler.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
-        let done = try reassembler.consume(.text(try ServerMessage.transferEnd(transferId: 0).jsonText()))
-        #expect(done == .subscribed(docId: "d", seq: 0, snapshot: .inline(Data(count: 8))))
-    }
     @Test func zeroByteTransferCompletes() throws {
         var reassembler = TransferReassembler<ServerMessage>()
         let d = TransferDescriptor(transferId: 0, totalBytes: 0, chunkSize: 8)
@@ -315,13 +303,6 @@ import InfSketchWire
         _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
         #expect(throws: TransferWireError.nonContiguousChunk(expected: 1, got: 0)) {
             _ = try r.consume(.binary(ChunkFraming.encode(transferId: 0, index: 0, payload: Data(count: 8))))
-        }
-    }
-    @Test func abortWithWrongIdIsFatal() throws {
-        let d = TransferDescriptor(transferId: 5, totalBytes: 8, chunkSize: 8)
-        var r = try opened(d)
-        #expect(throws: TransferWireError.wrongTransferId(expected: 5, got: 9)) {
-            _ = try r.consume(.text(try ServerMessage.transferAbort(transferId: 9, reason: "oops").jsonText()))
         }
     }
     @Test func malformedJSONThrowsDecodingErrorNotTransferError() throws {

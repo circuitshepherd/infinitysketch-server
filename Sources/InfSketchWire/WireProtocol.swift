@@ -27,7 +27,10 @@ public enum WireProtocol {
     // docId-less `error` that no push waiter ever heard, so a push sent into a refetch's
     // unsubscribe→subscribe window waited forever); `alreadySubscribed` became a `subscribeFailed`;
     // an oversized op-spec rides the chunked payload as an `OpSpecBundle` `spec` part; and a
-    // device's `frame` may say which seq it rendered.
+    // device's `frame` may say which seq it rendered; a `strokeOpRequest` carries a `notAfter`
+    // deadline a device honours for live-state ops; and three things nothing ever used went away —
+    // `subscribe.fromSeq` (always nil, always ignored), `resyncRequired` and `transferAbort` (never
+    // sent by anyone).
     public static let version = 12
 }
 
@@ -41,6 +44,11 @@ public enum BulkPayload: Equatable, Sendable {
 
     public var inlineData: Data? {
         if case .inline(let data) = self { return data }
+        return nil
+    }
+
+    public var transferDescriptor: TransferDescriptor? {
+        if case .transfer(let descriptor) = self { return descriptor }
         return nil
     }
 }
@@ -214,7 +222,7 @@ public struct DocAdvertisement: Codable, Equatable, Sendable {
 
 public enum ClientMessage: Equatable, Sendable {
     case hello(protocolVersion: Int, capabilities: [String], deviceId: String?)
-    case subscribe(docId: String, fromSeq: Int?, createIfMissing: Bool)
+    case subscribe(docId: String, createIfMissing: Bool)
     case unsubscribe(docId: String)
     /// Remove the document from the server's store outright.
     ///
@@ -232,7 +240,6 @@ public enum ClientMessage: Equatable, Sendable {
     /// nothing else to say can still prove it is reading.
     case pong
     case transferEnd(transferId: UInt32)
-    case transferAbort(transferId: UInt32, reason: String)
     case watchDoc(docId: String, framePx: Int?)
     case unwatchDoc(docId: String)
     /// `canvasRect` is `[x, y, width, height]`: the canvas region the WHOLE square
@@ -261,7 +268,7 @@ public enum ClientMessage: Equatable, Sendable {
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, fromSeq, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq
+        case type, protocolVersion, capabilities, deviceId, docId, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq
     }
 
     public init(from decoder: any Decoder) throws {
@@ -275,7 +282,6 @@ extension ClientMessage: Codable {
         case "subscribe":
             self = .subscribe(
                 docId: try c.decode(String.self, forKey: .docId),
-                fromSeq: try c.decodeIfPresent(Int.self, forKey: .fromSeq),
                 createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false)
         case "unsubscribe":
             self = .unsubscribe(docId: try c.decode(String.self, forKey: .docId))
@@ -297,10 +303,6 @@ extension ClientMessage: Codable {
             self = .pong
         case "transferEnd":
             self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
-        case "transferAbort":
-            self = .transferAbort(
-                transferId: try c.decode(UInt32.self, forKey: .transferId),
-                reason: try c.decode(String.self, forKey: .reason))
         case "watchDoc":
             self = .watchDoc(docId: try c.decode(String.self, forKey: .docId),
                              framePx: try c.decodeIfPresent(Int.self, forKey: .framePx))
@@ -368,10 +370,9 @@ extension ClientMessage: Codable {
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(caps, forKey: .capabilities)
             try c.encodeIfPresent(deviceId, forKey: .deviceId)
-        case .subscribe(let docId, let fromSeq, let createIfMissing):
+        case .subscribe(let docId, let createIfMissing):
             try c.encode("subscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
-            try c.encodeIfPresent(fromSeq, forKey: .fromSeq)
             if createIfMissing { try c.encode(true, forKey: .createIfMissing) }
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
@@ -396,10 +397,6 @@ extension ClientMessage: Codable {
         case .transferEnd(let transferId):
             try c.encode("transferEnd", forKey: .type)
             try c.encode(transferId, forKey: .transferId)
-        case .transferAbort(let transferId, let reason):
-            try c.encode("transferAbort", forKey: .type)
-            try c.encode(transferId, forKey: .transferId)
-            try c.encode(reason, forKey: .reason)
         case .watchDoc(let docId, let framePx):
             try c.encode("watchDoc", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -458,7 +455,6 @@ public enum ServerMessage: Equatable, Sendable {
     case subscribed(docId: String, seq: Int, snapshot: BulkPayload)
     case event(docId: String, seq: Int, kind: String, opId: String, payload: OpPayload)
     case reject(docId: String, opId: String, reason: String, seq: Int)
-    case resyncRequired(docId: String, seq: Int)
     case statusEvent(payload: StatusPayload)
     case error(reason: String)
     /// Asks the peer to prove it is still reading. Sent when a connection has been emitted more
@@ -467,7 +463,6 @@ public enum ServerMessage: Equatable, Sendable {
     case ping
     case docList(docs: [DocListEntry])
     case transferEnd(transferId: UInt32)
-    case transferAbort(transferId: UInt32, reason: String)
     case frameAvailable(docId: String, seq: Int)
     case watchers(docId: String, count: Int, framePx: Int?)
     case createDocRequest(requestId: UInt32, docId: String)
@@ -476,8 +471,15 @@ public enum ServerMessage: Equatable, Sendable {
     /// stripped against the bytes this connection was last sent for this doc (M4). The version
     /// gate makes an absent kind from an older peer unreachable, but nil stays the whole-document
     /// meaning regardless.
+    ///
+    /// `notAfter` (v12) is a deadline in Unix milliseconds: the request's timeout on the server,
+    /// plus an allowance for clock skew. A device that sees it only after that moment — it was
+    /// suspended with the request queued in its socket — must not apply a LIVE-state op (a
+    /// transform of the user's selection): the agent has long been told `deviceTimeout` and may
+    /// have retried. Ops that only turn bytes into bytes may ignore it; their late reply is
+    /// dropped on the server. nil = no deadline.
     case strokeOpRequest(requestId: UInt32, docId: String, payload: BulkPayload, spec: Data,
-                         payloadKind: String? = nil)
+                         payloadKind: String? = nil, notAfter: Int? = nil)
     case subscribeFailed(docId: String, reason: String)
     /// The document was deleted on the server (by another device). Pushed to every live
     /// subscriber so a device holding the document can keep its copy as a LOCAL-ONLY document
@@ -487,7 +489,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter
     }
 
     public init(from decoder: any Decoder) throws {
@@ -520,10 +522,6 @@ extension ServerMessage: Codable {
                 opId: try c.decode(String.self, forKey: .opId),
                 reason: try c.decode(String.self, forKey: .reason),
                 seq: try c.decode(Int.self, forKey: .seq))
-        case "resyncRequired":
-            self = .resyncRequired(
-                docId: try c.decode(String.self, forKey: .docId),
-                seq: try c.decode(Int.self, forKey: .seq))
         case "statusEvent":
             self = .statusEvent(payload: try c.decode(StatusPayload.self, forKey: .payload))
         case "error":
@@ -534,10 +532,6 @@ extension ServerMessage: Codable {
             self = .docList(docs: try c.decode([DocListEntry].self, forKey: .docs))
         case "transferEnd":
             self = .transferEnd(transferId: try c.decode(UInt32.self, forKey: .transferId))
-        case "transferAbort":
-            self = .transferAbort(
-                transferId: try c.decode(UInt32.self, forKey: .transferId),
-                reason: try c.decode(String.self, forKey: .reason))
         case "frameAvailable":
             self = .frameAvailable(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -563,7 +557,8 @@ extension ServerMessage: Codable {
             let spec = try c.decode(Data.self, forKey: .spec)
             let payloadKind = try c.decodeIfPresent(String.self, forKey: .payloadKind)
             self = .strokeOpRequest(requestId: requestId, docId: docId, payload: payload,
-                                    spec: spec, payloadKind: payloadKind)
+                                    spec: spec, payloadKind: payloadKind,
+                                    notAfter: try c.decodeIfPresent(Int.self, forKey: .notAfter))
         case "docDeleted":
             self = .docDeleted(docId: try c.decode(String.self, forKey: .docId))
         case "subscribeFailed":
@@ -604,10 +599,6 @@ extension ServerMessage: Codable {
             try c.encode(opId, forKey: .opId)
             try c.encode(reason, forKey: .reason)
             try c.encode(seq, forKey: .seq)
-        case .resyncRequired(let docId, let seq):
-            try c.encode("resyncRequired", forKey: .type)
-            try c.encode(docId, forKey: .docId)
-            try c.encode(seq, forKey: .seq)
         case .statusEvent(let payload):
             try c.encode("statusEvent", forKey: .type)
             try c.encode(payload, forKey: .payload)
@@ -622,10 +613,6 @@ extension ServerMessage: Codable {
         case .transferEnd(let transferId):
             try c.encode("transferEnd", forKey: .type)
             try c.encode(transferId, forKey: .transferId)
-        case .transferAbort(let transferId, let reason):
-            try c.encode("transferAbort", forKey: .type)
-            try c.encode(transferId, forKey: .transferId)
-            try c.encode(reason, forKey: .reason)
         case .frameAvailable(let docId, let seq):
             try c.encode("frameAvailable", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -639,7 +626,8 @@ extension ServerMessage: Codable {
             try c.encode("createDocRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
-        case .strokeOpRequest(let requestId, let docId, let payload, let spec, let payloadKind):
+        case .strokeOpRequest(let requestId, let docId, let payload, let spec, let payloadKind,
+                              let notAfter):
             try c.encode("strokeOpRequest", forKey: .type)
             try c.encode(requestId, forKey: .requestId)
             try c.encode(docId, forKey: .docId)
@@ -649,6 +637,7 @@ extension ServerMessage: Codable {
             }
             try c.encode(spec, forKey: .spec)
             try c.encodeIfPresent(payloadKind, forKey: .payloadKind)
+            try c.encodeIfPresent(notAfter, forKey: .notAfter)
         case .docDeleted(let docId):
             try c.encode("docDeleted", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -678,92 +667,62 @@ public extension ServerMessage {
     }
 }
 
+// The chunk swap. Each message that can carry bulk bytes names WHERE they sit exactly once — in
+// `bulk` (read) and `mapBulk` (rewrite) — and the four `TransferCarrying` requirements are derived
+// from those two. They used to be four hand-written switches per direction, each re-listing every
+// field of every case: a field forgotten in one of them was lost only for a message big enough to
+// chunk (above 256 KiB), which no small test reaches. `mapBulk` rebuilds a case with EVERY label
+// spelled out (no default arguments relied on), and `WireProtocolTests` round-trips every bulk
+// message with every field set through the swap.
+
 extension ClientMessage: TransferCarrying {
-    public var bulkBytes: Data? {
+    /// The message's bulk field, when it has one.
+    public var bulk: BulkPayload? {
         switch self {
-        case .op(_, _, let payload, _): return payload.bulk.inlineData
-        case .frame(_, let payload, _, _): return payload.inlineData
-        case .advertiseDocs(let payload): return payload.inlineData
-        case .createDocReply(_, _, let payload, _): return payload?.inlineData
-        case .strokeOpReply(_, _, let payload, _, _, _): return payload?.inlineData
+        case .op(_, _, let payload, _): return payload.bulk
+        case .frame(_, let payload, _, _): return payload
+        case .advertiseDocs(let payload): return payload
+        case .createDocReply(_, _, let payload, _): return payload
+        case .strokeOpReply(_, _, let payload, _, _, _): return payload
         default: return nil
         }
     }
-    public func replacingBulk(with descriptor: TransferDescriptor) -> ClientMessage {
+
+    /// The same message with its bulk field rewritten and every other field kept. A message with
+    /// no bulk field (or an absent optional one) is returned unchanged.
+    public func mapBulk(_ transform: (BulkPayload) -> BulkPayload) -> ClientMessage {
         switch self {
         case .op(let docId, let opId, let payload, let expectation):
             return .op(docId: docId, opId: opId,
-                       payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)),
+                       payload: OpPayload(type: payload.type, bulk: transform(payload.bulk)),
                        expectation: expectation)
-        case .frame(let docId, _, let canvasRect, let seq):
-            // canvasRect (and seq) ride through the swap for the same reason `meta` does below:
-            // chunking changes how the bytes travel, never what they are. Dropping either
-            // here would be silent — the viewer's fallback is simply the old behaviour.
-            return .frame(docId: docId, payload: .transfer(descriptor), canvasRect: canvasRect,
-                          seq: seq)
-        case .advertiseDocs:
-            return .advertiseDocs(payload: .transfer(descriptor))
-        case .createDocReply(let requestId, let docId, _, let failureReason):
-            return .createDocReply(requestId: requestId, docId: docId,
-                                    payload: .transfer(descriptor), failureReason: failureReason)
-        case .strokeOpReply(let requestId, let docId, _, let meta, let failureReason, let kind):
-            // meta is PRESERVED through this swap, exactly like failureReason
-            // — a dropped meta here would silently lose the render metadata
-            // for any reply large enough to chunk.
-            // `payloadKind` rides through the bulk swap for the same reason `meta` does: chunking
-            // changes how the bytes travel, never what they are.
-            return .strokeOpReply(requestId: requestId, docId: docId,
-                                   payload: .transfer(descriptor), meta: meta,
-                                   failureReason: failureReason, payloadKind: kind)
+        case .frame(let docId, let payload, let canvasRect, let seq):
+            return .frame(docId: docId, payload: transform(payload), canvasRect: canvasRect, seq: seq)
+        case .advertiseDocs(let payload):
+            return .advertiseDocs(payload: transform(payload))
+        case .createDocReply(let requestId, let docId, let payload?, let failureReason):
+            return .createDocReply(requestId: requestId, docId: docId, payload: transform(payload),
+                                   failureReason: failureReason)
+        case .strokeOpReply(let requestId, let docId, let payload?, let meta, let failureReason,
+                            let payloadKind):
+            return .strokeOpReply(requestId: requestId, docId: docId, payload: transform(payload),
+                                  meta: meta, failureReason: failureReason, payloadKind: payloadKind)
         default:
             return self
         }
     }
-    public var openingDescriptor: TransferDescriptor? {
-        switch self {
-        case .op(_, _, let payload, _):
-            if case .transfer(let d) = payload.bulk { return d }
-            return nil
-        case .frame(_, .transfer(let d), _, _):
-            return d
-        case .advertiseDocs(.transfer(let d)):
-            return d
-        case .createDocReply(_, _, let payload, _):
-            if case .transfer(let d) = payload { return d }
-            return nil
-        case .strokeOpReply(_, _, let payload, _, _, _):
-            if case .transfer(let d) = payload { return d }
-            return nil
-        default: return nil
-        }
+
+    public var bulkBytes: Data? { bulk?.inlineData }
+    public func replacingBulk(with descriptor: TransferDescriptor) -> ClientMessage {
+        mapBulk { _ in .transfer(descriptor) }
     }
+    public var openingDescriptor: TransferDescriptor? { bulk?.transferDescriptor }
     public func resolvingBulk(with bytes: Data) -> ClientMessage {
-        switch self {
-        case .op(let docId, let opId, let payload, let expectation):
-            return .op(docId: docId, opId: opId, payload: OpPayload(type: payload.type, data: bytes),
-                       expectation: expectation)
-        case .frame(let docId, _, let canvasRect, let seq):
-            return .frame(docId: docId, payload: .inline(bytes), canvasRect: canvasRect, seq: seq)
-        case .advertiseDocs:
-            return .advertiseDocs(payload: .inline(bytes))
-        case .createDocReply(let requestId, let docId, _, let failureReason):
-            return .createDocReply(requestId: requestId, docId: docId,
-                                    payload: .inline(bytes), failureReason: failureReason)
-        case .strokeOpReply(let requestId, let docId, _, let meta, let failureReason, let kind):
-            // meta is PRESERVED through this swap too — see replacingBulk above.
-            return .strokeOpReply(requestId: requestId, docId: docId,
-                                   payload: .inline(bytes), meta: meta,
-                                   failureReason: failureReason, payloadKind: kind)
-        default:
-            return self
-        }
+        mapBulk { _ in .inline(bytes) }
     }
     public var transferControl: TransferControl? {
-        switch self {
-        case .transferEnd(let id): return .end(id)
-        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
-        default: return nil
-        }
+        if case .transferEnd(let id) = self { return .end(id) }
+        return nil
     }
     public static func makeTransferEnd(transferId: UInt32) -> ClientMessage {
         .transferEnd(transferId: transferId)
@@ -771,65 +730,44 @@ extension ClientMessage: TransferCarrying {
 }
 
 extension ServerMessage: TransferCarrying {
-    public var bulkBytes: Data? {
+    /// The message's bulk field, when it has one.
+    public var bulk: BulkPayload? {
         switch self {
-        case .subscribed(_, _, let snapshot): return snapshot.inlineData
-        case .event(_, _, _, _, let payload): return payload.bulk.inlineData
-        case .strokeOpRequest(_, _, let payload, _, _): return payload.inlineData
+        case .subscribed(_, _, let snapshot): return snapshot
+        case .event(_, _, _, _, let payload): return payload.bulk
+        case .strokeOpRequest(_, _, let payload, _, _, _): return payload
         default: return nil
         }
     }
+
+    /// The same message with its bulk field rewritten and every other field kept.
+    public func mapBulk(_ transform: (BulkPayload) -> BulkPayload) -> ServerMessage {
+        switch self {
+        case .subscribed(let docId, let seq, let snapshot):
+            return .subscribed(docId: docId, seq: seq, snapshot: transform(snapshot))
+        case .event(let docId, let seq, let kind, let opId, let payload):
+            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
+                          payload: OpPayload(type: payload.type, bulk: transform(payload.bulk)))
+        case .strokeOpRequest(let requestId, let docId, let payload, let spec, let payloadKind,
+                              let notAfter):
+            return .strokeOpRequest(requestId: requestId, docId: docId, payload: transform(payload),
+                                    spec: spec, payloadKind: payloadKind, notAfter: notAfter)
+        default:
+            return self
+        }
+    }
+
+    public var bulkBytes: Data? { bulk?.inlineData }
     public func replacingBulk(with descriptor: TransferDescriptor) -> ServerMessage {
-        switch self {
-        case .subscribed(let docId, let seq, _):
-            return .subscribed(docId: docId, seq: seq, snapshot: .transfer(descriptor))
-        case .event(let docId, let seq, let kind, let opId, let payload):
-            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
-                          payload: OpPayload(type: payload.type, bulk: .transfer(descriptor)))
-        case .strokeOpRequest(let requestId, let docId, _, let spec, let payloadKind):
-            // The kind names what the payload IS and must survive the move to a transfer
-            // descriptor — dropped here, a chunked stripped request would be read as a whole
-            // document and fail at decode (the reply's kind survives chunking the same way).
-            return .strokeOpRequest(requestId: requestId, docId: docId,
-                                     payload: .transfer(descriptor), spec: spec,
-                                     payloadKind: payloadKind)
-        default:
-            return self
-        }
+        mapBulk { _ in .transfer(descriptor) }
     }
-    public var openingDescriptor: TransferDescriptor? {
-        switch self {
-        case .subscribed(_, _, .transfer(let d)): return d
-        case .event(_, _, _, _, let payload):
-            if case .transfer(let d) = payload.bulk { return d }
-            return nil
-        case .strokeOpRequest(_, _, .transfer(let d), _, _): return d
-        default: return nil
-        }
-    }
+    public var openingDescriptor: TransferDescriptor? { bulk?.transferDescriptor }
     public func resolvingBulk(with bytes: Data) -> ServerMessage {
-        switch self {
-        case .subscribed(let docId, let seq, _):
-            return .subscribed(docId: docId, seq: seq, snapshot: .inline(bytes))
-        case .event(let docId, let seq, let kind, let opId, let payload):
-            return .event(docId: docId, seq: seq, kind: kind, opId: opId,
-                          payload: OpPayload(type: payload.type, data: bytes))
-        case .strokeOpRequest(let requestId, let docId, _, let spec, let payloadKind):
-            // The RESOLVED side of the chunking round trip: the kind rode the descriptor message
-            // and must land back beside the reassembled bytes.
-            return .strokeOpRequest(requestId: requestId, docId: docId,
-                                     payload: .inline(bytes), spec: spec,
-                                     payloadKind: payloadKind)
-        default:
-            return self
-        }
+        mapBulk { _ in .inline(bytes) }
     }
     public var transferControl: TransferControl? {
-        switch self {
-        case .transferEnd(let id): return .end(id)
-        case .transferAbort(let id, let reason): return .abort(id, reason: reason)
-        default: return nil
-        }
+        if case .transferEnd(let id) = self { return .end(id) }
+        return nil
     }
     public static func makeTransferEnd(transferId: UInt32) -> ServerMessage {
         .transferEnd(transferId: transferId)

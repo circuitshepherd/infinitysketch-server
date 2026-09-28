@@ -10,7 +10,8 @@ right source file without reverse-engineering the design.
 One WebSocket per client, at `GET /ws`. Messages are JSON text frames. Bulk byte fields (document
 snapshots, op payloads, PNG frames) above an inline threshold travel as **chunked binary frames**
 instead: the JSON message carries a `TransferDescriptor` announcing a transfer id, the bytes follow
-as binary chunks, and `transferEnd` / `transferAbort` close it. Session-layer code never sees a
+as binary chunks, and `transferEnd` closes it (a sender that fails mid-transfer closes the
+connection; there is no abort message). Session-layer code never sees a
 transfer — the WS adapter reassembles before messages reach `SessionManager`. Sender/reassembler
 live in `InfSketchWire` (`TransferSender`, `TransferReassembler`); both directions use them.
 
@@ -44,7 +45,7 @@ transport features (`blobOmission`).
 
 ## Document sessions
 
-- `subscribe(docId, fromSeq, createIfMissing)` → `subscribed(docId, seq, snapshot)` or
+- `subscribe(docId, createIfMissing)` → `subscribed(docId, seq, snapshot)` or
   `subscribeFailed`. The snapshot is the full document; there is no history replay.
 - Writes are `op(docId, opId, payload, expectation)`. An accepted op is broadcast to every
   subscriber as `event` with a per-session increasing `seq`; the writer's own op comes back as its
@@ -76,6 +77,19 @@ the current document bytes plus an op-spec JSON; the device computes and answers
 are pure functions on the bytes — the document need not be open on the device and nothing touches
 its disk. The broker (`DeviceCommandBroker`) enforces per-kind timeouts; a request whose device
 disconnects fails `deviceDisconnected` (and, for a pure op, is retried once on another device).
+
+**Which device.** The live-selection ops (`controlSelection`: get/transform/duplicate/delete/draw/
+restyle a selection, `get_tool`, the viewport) act on state that exists only on a device that has
+the document OPEN, so they go only to a connection subscribed to that docId — none means
+`noSelectionActive: no connected device has this document open`, and they are never retried
+elsewhere. Every other op PREFERS a subscribed device (its pen is what an omitted colour/width/ink
+inherits; its viewport is what `render_sketch` reports) and falls back to any capable one; among
+equals the device that spoke most recently wins.
+
+**Deadline.** `strokeOpRequest` carries `notAfter`, Unix milliseconds: the request's timeout plus a
+10 s clock-skew allowance. A device that reaches a live-selection op after it — it was suspended
+with the request queued — answers `requestExpired` instead of applying it: the agent was long ago
+told `deviceTimeout` and may have retried. Byte ops may ignore it; a late reply to one is dropped.
 
 Only `payload` is chunked, so nothing bulky may sit in `spec`: bulk op-spec fields, and since v12
 the WHOLE spec once it passes `OpSpecBundleWire.inlineSpecLimit` (64 KiB), travel inside the

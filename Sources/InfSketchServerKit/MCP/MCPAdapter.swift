@@ -992,6 +992,11 @@ public actor MCPAdapter {
                 again takes back the edit before that one, never the undo itself. History is \
                 bounded and in memory, so a much older edit answers `nothingToUndo`. If a \
                 multi-step undo fails part-way, the error says how many steps had already landed.
+
+                A change made through the user's live selection (transform_selection, \
+                duplicate_selection, delete_selection, draw_selection, restyle_selection) commits \
+                in the app and cannot be taken back here: an undo that reaches one refuses with \
+                `lastEditWasLiveSelection` rather than reverse an older write beneath it.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2901,9 +2906,23 @@ public actor MCPAdapter {
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
         let arguments = await canonicalisingDocIds(arguments)
-        return await enrichedError(try await dispatchCallTool(name: name, arguments: arguments),
-                                   arguments: arguments)
+        let result = try await dispatchCallTool(name: name, arguments: arguments)
+        if Self.liveSelectionWriteTools.contains(name), result.isError != true,
+           let docId = arguments?["docId"]?.stringValue {
+            await history.recordLiveSelectionChange(docId: docId)
+        }
+        return await enrichedError(result, arguments: arguments)
     }
+
+    /// Tools that change the document through the user's LIVE selection. They commit in the
+    /// device's own session and reach the server as its ordinary push, so no agent write is
+    /// recorded for them — and without a record, an `undo_last_edit` after `draw_strokes` +
+    /// `transform_selection` reversed the DRAW (review finding 23). Each leaves a barrier in the
+    /// history instead, so that undo refuses and says why.
+    static let liveSelectionWriteTools: Set<String> = [
+        "transform_selection", "duplicate_selection", "delete_selection", "draw_selection",
+        "restyle_selection",
+    ]
 
     /// Every argument that names a document, in the spelling the server keys it by.
     ///
@@ -2982,22 +3001,34 @@ public actor MCPAdapter {
             return Self.errorResult("\(text) — \(clause)")
         }
 
+        if text == Self.documentNotOpenReason {
+            // The broker found no capable device with this document open, so no device was
+            // asked. Name what IS open: the usual cause is an id that is not the live one.
+            let live = await manager.liveInfo()
+                .filter { $0.value.subscriberCount > 0 }
+                .keys.sorted()
+            let clause = live.isEmpty
+                ? "no document is open on any connected device"
+                : "open on a connected device: " + live.map { "\"\($0)\"" }.joined(separator: ", ")
+            return Self.errorResult("\(text) — \(clause)")
+        }
+
         if text == "noSelectionActive" || text.hasSuffix("noSelectionActive") {
-            // The rule is about what the SERVER can verify, not about who produced the reason.
+            // A device ANSWERED `noSelectionActive`. Live-state ops are routed only to a device
+            // that has the named document open (the broker's `.requireOpen`), so the device that
+            // answered is the one the user is looking at, and it is authoritative: the document
+            // is open and nothing is selected. It used to be whichever device spoke last, and this
+            // branch then assured the agent "it IS open" on the strength of ANOTHER device's
+            // subscription (review finding 20).
             //
-            // A device answers `deviceFailed: noSelectionActive` in two very different
-            // situations: the document the agent named is open and nothing is selected (literal,
-            // and the device is authoritative — say nothing), or the agent named a document this
-            // device does not have open at all (the renamed-document case — say which one it
-            // does). Only the server can tell those apart, from its own subscriber set, and
-            // getting this backwards means either lying about an open document or staying silent
-            // in exactly the case the message exists for. Both were live at different points
-            // while writing this.
+            // The one case left to explain is an op that names no open document at all — the
+            // device answered for an id it does not have (a race with a close, or a document
+            // opened under another spelling).
             let live = await manager.liveInfo()
                 .filter { $0.value.subscriberCount > 0 }
                 .keys.sorted()
             if let named = arguments?["docId"]?.stringValue, live.contains(named) {
-                return result          // it IS open: `noSelectionActive` means what it says
+                return result          // it is open there: `noSelectionActive` means what it says
             }
             let clause = live.isEmpty
                 ? "no document is open on any connected device"
@@ -3709,6 +3740,7 @@ public actor MCPAdapter {
                 case .requestInFlight: return Self.errorResult("creationInProgress")
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
                 case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
+                case .documentNotOpen: return Self.errorResult("noDeviceAvailable")   // creation routes to any device
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
                 }
             } catch {
@@ -3810,9 +3842,6 @@ public actor MCPAdapter {
                     }
                     let keys: [String]?
                     let resolvedTool: Tool?
-                    /// Parallel to `keys`; an empty entry means that stroke's name displaced
-                    /// nothing. Absent entirely when no supplied name took over.
-                    let displacedNames: [String]?
                     let clampedWidths: [Double]?
                     /// What was actually STORED (light-canonical), one entry per created stroke,
                     /// in order — present only when this call went through the dark door
@@ -3837,9 +3866,6 @@ public actor MCPAdapter {
                     if let tool = decoded.resolvedTool {
                         summary += "\ninherited from the user's tool: inkType \(tool.inkType), drawnWidth \(Self.trimmed(tool.width)), color \(tool.color)"
                     }
-                    // A name that was already taken MOVES to the new stroke. The element it came
-                    // from is still on the canvas, now unnamed — reported so you can delete it if
-                    // this draw was meant to replace it.
                     // A width below the ink's floor renders as almost nothing, so it is raised
                     // rather than silently drawn invisible (art-session finding 12).
                     if let clamped = decoded.clampedWidths, !clamped.isEmpty {
@@ -3848,11 +3874,6 @@ public actor MCPAdapter {
                                  + "outside what that ink can draw, and were drawn at the nearest end — "
                                  + "the ink's thinnest (below it a stroke is effectively invisible) or widest. "
                                  + "list_strokes reports the drawnWidth each stroke got."
-                    }
-                    if let displaced = decoded.displacedNames {
-                        for taken in displaced where !taken.isEmpty {
-                            summary += "\nthe name moved from \(taken), which is still on the canvas and now unnamed"
-                        }
                     }
                     // Only present when colorAppearance: "dark" converted at least one colour —
                     // what actually landed on disk, light-canonical, one entry per created stroke.
@@ -5736,9 +5757,16 @@ public actor MCPAdapter {
         case .requestInFlight: return Self.errorResult("opInProgress")
         case .deviceTimeout: return Self.errorResult("deviceTimeout")
         case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
+        case .documentNotOpen: return Self.errorResult(Self.documentNotOpenReason)
         case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
         }
     }
+
+    /// A live-state op with no capable device that has the document open. The token stays
+    /// `noSelectionActive` — nothing can be selected in a document nobody has open — and the rest
+    /// says why, which `enrichedError` completes with what IS open.
+    static let documentNotOpenReason = "noSelectionActive: no connected device has this document open"
+
 
     /// Shared submit tail for every write tool (add/edit/remove_text — plain
     /// AND styled, replace_doc, create_doc, draw/delete_strokes): opens a session on demand,
@@ -5854,6 +5882,9 @@ public actor MCPAdapter {
                     if undone > 0 { break }
                     return Self.errorResult("nothingToUndo: no recorded edit for \"\(docId)\"")
                 }
+                guard !entry.isLiveSelectionChange else {
+                    return failed(Self.errorResult(Self.lastEditWasLiveSelectionReason))
+                }
                 guard let current = await manager.currentBytesOrFetch(docId: docId) else {
                     return failed(Self.errorResult("unknownDoc"))
                 }
@@ -5883,7 +5914,7 @@ public actor MCPAdapter {
                 if result.isError == true { return failed(result) }
                 // Consumed only once the undo has actually landed, so a rejected write or an
                 // unreachable device leaves the history intact and the agent can try again.
-                await history.consumeMostRecent(docId: docId)
+                await history.consume(docId: docId, id: entry.id)
                 undone += 1
                 for content in result.content {
                     if case .text(let text, _, _) = content { lastSeqText = text }
@@ -5896,6 +5927,11 @@ public actor MCPAdapter {
             return Self.errorResult("invalidArguments")
         }
     }
+
+    static let lastEditWasLiveSelectionReason = "lastEditWasLiveSelection: the last edit was a "
+        + "live-selection change (transform/duplicate/delete/draw/restyle_selection), which "
+        + "undo_last_edit cannot take back — use the user's Undo in the app, or make the inverse "
+        + "change yourself"
 
     /// The contended path: hand all three versions to the device and let `DocMergeEngine` reverse
     /// the agent's change without discarding what landed since.

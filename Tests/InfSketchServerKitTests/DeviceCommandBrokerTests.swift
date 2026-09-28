@@ -184,7 +184,7 @@ private actor SentBox {
             retried = await sentA.all().first
             try await Task.sleep(for: .milliseconds(10))
         }
-        guard case .strokeOpRequest(let rid, "D", _, _, _)? = retried else {
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = retried else {
             Issue.record("the op must be retried on the other device, got \(String(describing: retried))"); return
         }
         await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)
@@ -204,6 +204,87 @@ private actor SentBox {
                                                  capability: "controlSelection")
         }
         #expect(await sentA.all().isEmpty, "a live-state op must not be sent to a second device")
+    }
+
+    // MARK: - Routing to the device with the document open (review finding 20)
+
+    /// A live-state op goes to the device that has the document OPEN, even when another device
+    /// spoke more recently: the selection exists only on the first.
+    @Test func aLiveStateOpGoesToTheDeviceWithTheDocumentOpen() async throws {
+        let broker = DeviceCommandBroker()
+        let sentOpen = SentBox()
+        let sentOther = SentBox()
+        let open = UUID()
+        await broker.register(connectionId: open, capabilities: ["controlSelection"]) { msg in Task { await sentOpen.set(msg) } }
+        let other = UUID()
+        await broker.register(connectionId: other, capabilities: ["controlSelection"]) { msg in Task { await sentOther.set(msg) } }
+        await broker.noteActivity(connectionId: other)   // the other one is newest AND most active
+        await broker.setSubscriberLookup { docId in docId == "D" ? [open] : [] }
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                           capability: "controlSelection") }
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sentOpen.awaitMessage() else {
+            Issue.record("the op must reach the device with the document open"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await sentOther.all().isEmpty)
+    }
+
+    /// No capable device has it open: a distinct error, and nothing is sent anywhere.
+    @Test func aLiveStateOpWithTheDocumentOpenNowhereIsRefused() async throws {
+        let broker = DeviceCommandBroker()
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { msg in Task { await sent.set(msg) } }
+        await broker.setSubscriberLookup { _ in [] }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.documentNotOpen) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                 capability: "controlSelection")
+        }
+        #expect(await sent.all().isEmpty)
+    }
+
+    /// An op on bytes prefers the device with the document open — its pen is the one an omitted
+    /// colour inherits, its viewport the one a render reports — and falls back to any device.
+    @Test func anOpOnBytesPrefersTheOpenDeviceAndFallsBackToAny() async throws {
+        let broker = DeviceCommandBroker()
+        let sentOpen = SentBox()
+        let sentOther = SentBox()
+        let open = UUID()
+        await broker.register(connectionId: open, capabilities: ["authorStrokes"]) { msg in Task { await sentOpen.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentOther.set(msg) } }
+        await broker.setSubscriberLookup { docId in docId == "D" ? [open] : [] }
+
+        let onOpen = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sentOpen.awaitMessage() else {
+            Issue.record("preferred the device with the document open"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: Data("x".utf8), failureReason: nil)
+        _ = try await onOpen.value
+
+        let elsewhere = Task { try await broker.requestStrokeOp(docId: "E", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let rid2, "E", _, _, _, _)? = await sentOther.awaitMessage() else {
+            Issue.record("a document open nowhere still goes to a capable device (the newest)"); return
+        }
+        await broker.handleReply(requestId: rid2, bytes: Data("y".utf8), failureReason: nil)
+        #expect(try await elsewhere.value.bytes == Data("y".utf8))
+    }
+
+    /// Every op request carries a deadline: its timeout plus the skew allowance, in Unix ms.
+    @Test func anOpRequestCarriesItsDeadline() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .seconds(20))
+        let sent = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { msg in Task { await sent.set(msg) } }
+        let before = Int(Date().timeIntervalSince1970 * 1000)
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                           capability: "controlSelection") }
+        guard case .strokeOpRequest(let rid, _, _, _, _, let notAfter)? = await sent.awaitMessage(),
+              let notAfter else {
+            Issue.record("the request must carry notAfter"); return
+        }
+        let after = Int(Date().timeIntervalSince1970 * 1000)
+        #expect(notAfter >= before + 30_000 && notAfter <= after + 30_000)
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
     }
 
     @Test func retryAfterCompletionWorks() async throws {
@@ -238,7 +319,7 @@ private actor SentBox {
         let spec = Data("spec-bytes".utf8)
         async let result = broker.requestStrokeOp(docId: "D", docBytes: docBytes, spec: spec)
         let request = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, "D", .inline(let sentBytes), let sentSpec, _) = request else {
+        guard case .strokeOpRequest(let rid, "D", .inline(let sentBytes), let sentSpec, _, _) = request else {
             Issue.record("wrong msg: \(request)"); return
         }
         #expect(sentBytes == docBytes)
@@ -287,7 +368,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
-        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
         await broker.handleReply(requestId: strokeRid, bytes: Data("stroke".utf8), failureReason: nil)
@@ -324,7 +405,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, "D", _, _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
 
@@ -352,7 +433,7 @@ private actor SentBox {
                                              capability: "render", takesDocumentLock: false)
         }
         let relayRequest = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let relayId, "D", _, _, _) = relayRequest else {
+        guard case .strokeOpRequest(let relayId, "D", _, _, _, _) = relayRequest else {
             Issue.record("wrong msg: \(relayRequest)"); return
         }
         // The agent's op on the same document is sent, not refused.
@@ -360,7 +441,7 @@ private actor SentBox {
         var agentId: UInt32?
         for _ in 0..<100 where agentId == nil {
             for message in await sent.all() {
-                if case .strokeOpRequest(let id, "D", _, _, _) = message, id != relayId { agentId = id }
+                if case .strokeOpRequest(let id, "D", _, _, _, _) = message, id != relayId { agentId = id }
             }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -380,7 +461,7 @@ private actor SentBox {
         }
         let agent = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
         let agentRequest = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let agentId, "D", _, _, _) = agentRequest else {
+        guard case .strokeOpRequest(let agentId, "D", _, _, _, _) = agentRequest else {
             Issue.record("wrong msg: \(agentRequest)"); return
         }
         let relay = Task {
@@ -390,7 +471,7 @@ private actor SentBox {
         var relayId: UInt32?
         for _ in 0..<100 where relayId == nil {
             for message in await sent.all() {
-                if case .strokeOpRequest(let id, "D", _, _, _) = message, id != agentId { relayId = id }
+                if case .strokeOpRequest(let id, "D", _, _, _, _) = message, id != agentId { relayId = id }
             }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -447,7 +528,7 @@ private actor SentBox {
         }
         async let strokeResult: DeviceCommandBroker.StrokeOpReply = broker.requestStrokeOp(docId: "D2", docBytes: Data(), spec: Data())
         let strokeRequest = try #require(await sent2.awaitMessage())
-        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _) = strokeRequest else {
+        guard case .strokeOpRequest(let strokeRid, "D2", _, _, _, _) = strokeRequest else {
             Issue.record("wrong msg: \(strokeRequest)"); return
         }
 
@@ -489,7 +570,7 @@ private actor SentBox {
             try await broker.requestStrokeOp(docId: "D", docBytes: sentBytes, spec: Data("{}".utf8))
         }
         let request = try #require(await sent.awaitMessage())
-        guard case .strokeOpRequest(let rid, _, _, _, _) = request else {
+        guard case .strokeOpRequest(let rid, _, _, _, _, _) = request else {
             Issue.record("wrong message"); return .failure(DeviceCommandBroker.DeviceCommandError.deviceTimeout)
         }
         let reply = makeReply(rid)
@@ -631,7 +712,7 @@ private actor SentBox {
     }
 
     private func completeRequest(_ broker: DeviceCommandBroker, _ message: ServerMessage?) async -> UInt32? {
-        guard case .strokeOpRequest(let rid, _, _, _, _) = message else { return nil }
+        guard case .strokeOpRequest(let rid, _, _, _, _, _) = message else { return nil }
         await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), meta: nil,
                                  failureReason: nil, payloadKind: nil)
         return rid
@@ -648,7 +729,7 @@ private actor SentBox {
 
         let t1 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc1, spec: Data("{}".utf8)) }
         let first = await outbox.message(at: 0)
-        guard case .strokeOpRequest(_, _, .inline(let bytes1), _, let kind1) = first else {
+        guard case .strokeOpRequest(_, _, .inline(let bytes1), _, let kind1, _) = first else {
             Issue.record("no first request"); return
         }
         #expect(kind1 == nil, "the first request has no shared base and must be whole")
@@ -658,7 +739,7 @@ private actor SentBox {
 
         let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc2, spec: Data("{}".utf8)) }
         let second = await outbox.message(at: 1)
-        guard case .strokeOpRequest(_, _, .inline(let bytes2), _, let kind2) = second else {
+        guard case .strokeOpRequest(_, _, .inline(let bytes2), _, let kind2, _) = second else {
             Issue.record("no second request"); return
         }
         _ = await completeRequest(broker, second)
@@ -680,7 +761,7 @@ private actor SentBox {
             let doc = document(blobId: id, tail: tail)
             let t = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc, spec: Data("{}".utf8)) }
             let msg = await outbox.message(at: i)
-            guard case .strokeOpRequest(_, _, .inline(let bytes), _, let kind) = msg else {
+            guard case .strokeOpRequest(_, _, .inline(let bytes), _, let kind, _) = msg else {
                 Issue.record("no request \(i)"); return
             }
             #expect(kind == nil)
@@ -705,7 +786,7 @@ private actor SentBox {
 
         let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc2, spec: Data("{}".utf8)) }
         let strippedReq = await outbox.message(at: 1)
-        guard case .strokeOpRequest(let rid2, _, _, _, "strippedDoc") = strippedReq else {
+        guard case .strokeOpRequest(let rid2, _, _, _, "strippedDoc", _) = strippedReq else {
             Issue.record("second request was not stripped"); return
         }
         // The device cannot rebuild — relaunched, cache gone.
@@ -714,7 +795,7 @@ private actor SentBox {
                                  payloadKind: nil)
         // The broker must retry the SAME op, whole, without surfacing anything.
         let retry = await outbox.message(at: 2)
-        guard case .strokeOpRequest(_, _, .inline(let retryBytes), _, let retryKind) = retry else {
+        guard case .strokeOpRequest(_, _, .inline(let retryBytes), _, let retryKind, _) = retry else {
             Issue.record("no whole retry was sent"); return
         }
         #expect(retryKind == nil, "the retry must be whole")
@@ -739,7 +820,7 @@ private actor SentBox {
 
         let t2 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data("{}".utf8)) }
         let empty = await outbox.message(at: 1)
-        guard case .strokeOpRequest(_, _, .inline(let emptyBytes), _, let emptyKind) = empty else {
+        guard case .strokeOpRequest(_, _, .inline(let emptyBytes), _, let emptyKind, _) = empty else {
             Issue.record("no empty request"); return
         }
         #expect(emptyBytes.isEmpty)
@@ -749,7 +830,7 @@ private actor SentBox {
 
         let t3 = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc3, spec: Data("{}".utf8)) }
         let third = await outbox.message(at: 2)
-        guard case .strokeOpRequest(_, _, .inline(let bytes3), _, let kind3) = third else {
+        guard case .strokeOpRequest(_, _, .inline(let bytes3), _, let kind3, _) = third else {
             Issue.record("no third request"); return
         }
         _ = await completeRequest(broker, third)

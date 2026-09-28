@@ -37,7 +37,59 @@ public actor DeviceCommandBroker {
         /// not slow, and a socket the device dropped (an oversized frame, the app backgrounded)
         /// used to be reported as a timeout that nobody could explain.
         case deviceDisconnected
+        /// A live-state op (the user's selection) and no capable connected device has the
+        /// document open. Distinct from `noDeviceAvailable`: a device is there, the document is
+        /// not open on it, and sending the op to it anyway could only answer "nothing selected".
+        case documentNotOpen
         case deviceFailed(String)
+    }
+
+    /// Which devices a request may go to, relative to the ones that have its document OPEN.
+    ///
+    /// The broker used to pick by capability alone — the device that most recently spoke — so
+    /// with an iPad holding a selection and a Mac connected later, `transform_selection` went to
+    /// the Mac and failed `noSelectionActive`, an omitted colour came from the Mac's pen and
+    /// `render_sketch` lost the iPad's viewport (review finding 20).
+    enum Routing: Equatable {
+        /// Any capable device: the op names no open document (creating one, fetching from a
+        /// named holder).
+        case any
+        /// A device with the document open when there is one, else any capable device. For ops
+        /// on bytes whose answer is better from the device the user is looking at — the pen an
+        /// omitted colour inherits, the viewport a render reports — but valid from any.
+        case preferOpen
+        /// Only a device with the document open: the op acts on LIVE state that exists only
+        /// there.
+        case requireOpen
+
+        static func `for`(capability: String) -> Routing {
+            switch capability {
+            case "controlSelection": return .requireOpen
+            case "createDoc", "provideContent": return .any
+            default: return .preferOpen
+            }
+        }
+    }
+
+    /// The connections subscribed to a document — `SessionManager.subscribedConnections`, set by
+    /// `InfSketchServer`. Unset (a broker in a unit test), every request routes as `.any`.
+    public typealias SubscriberLookup = @Sendable (String) async -> Set<UUID>
+    private var subscriberLookup: SubscriberLookup?
+
+    public func setSubscriberLookup(_ lookup: @escaping SubscriberLookup) {
+        subscriberLookup = lookup
+    }
+
+    /// How long past its timeout a request stays valid on the device, as clock-skew allowance
+    /// between this machine and the device. The failure the deadline exists for is MINUTES late (a
+    /// suspended iPad waking up), so a generous allowance costs nothing.
+    static let deadlineSkewAllowance: Duration = .seconds(10)
+
+    /// `notAfter` for a request sent now with `timeout`: Unix milliseconds.
+    static func deadline(after timeout: Duration, now: Date = Date()) -> Int {
+        let seconds = Double((timeout + deadlineSkewAllowance).components.seconds)
+            + Double((timeout + deadlineSkewAllowance).components.attoseconds) / 1e18
+        return Int((now.timeIntervalSince1970 + seconds) * 1000)
     }
 
     /// `requestStrokeOp`'s result: the reply's bytes (doc bytes for
@@ -175,12 +227,16 @@ public actor DeviceCommandBroker {
     /// idle and able (measured: `render_sketch` failed `deviceTimeout` after 20.3 s; review
     /// finding 21). A live device answers the keepalive at least every ~30 s, so it stays ahead
     /// of one that has gone quiet.
+    ///
+    /// `within`, when given, narrows the candidates to those connections (the ones with the
+    /// document open).
     private func pickConnection(capability: String, deviceId: String?,
-                                excluding: Set<UUID> = []) -> Connection? {
+                                excluding: Set<UUID> = [], within: Set<UUID>? = nil) -> Connection? {
         connections.enumerated()
             .filter { $0.element.capabilities.contains(capability)
                 && (deviceId == nil || $0.element.deviceId == deviceId)
-                && !excluding.contains($0.element.id) }
+                && !excluding.contains($0.element.id)
+                && (within == nil || within!.contains($0.element.id)) }
             .max { ($0.element.lastActivity, $0.offset) < ($1.element.lastActivity, $1.offset) }?
             .element
     }
@@ -300,7 +356,8 @@ public actor DeviceCommandBroker {
             }
             connection.send(.strokeOpRequest(requestId: requestId, docId: docId,
                                              payload: .inline(payload.bytes), spec: inlineSpec,
-                                             payloadKind: payload.kind))
+                                             payloadKind: payload.kind,
+                                             notAfter: Self.deadline(after: broker.strokeOpTimeout)))
         }
     }
 
@@ -430,7 +487,26 @@ public actor DeviceCommandBroker {
         sentBytes: Data = Data(), takesDocumentLock: Bool = true,
         send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
-        guard let first = pickConnection(capability: capability, deviceId: deviceId) else {
+        let routing = deviceId == nil ? Routing.for(capability: capability) : .any
+        var open: Set<UUID>?
+        if routing != .any, let subscriberLookup {
+            open = await subscriberLookup(docId)
+        }
+        // A device with the document open first; for `.preferOpen`, any capable one after that.
+        func pick(excluding: Set<UUID>) -> Connection? {
+            if let open, let preferred = pickConnection(capability: capability, deviceId: deviceId,
+                                                        excluding: excluding, within: open) {
+                return preferred
+            }
+            if routing == .requireOpen, open != nil { return nil }
+            return pickConnection(capability: capability, deviceId: deviceId, excluding: excluding)
+        }
+        guard let first = pick(excluding: []) else {
+            // "Nothing can do this at all" and "something could, but not with this document
+            // open" have different cures, so they are different errors.
+            if pickConnection(capability: capability, deviceId: deviceId) != nil {
+                throw DeviceCommandError.documentNotOpen
+            }
             throw DeviceCommandError.noDeviceAvailable
         }
         do {
@@ -443,8 +519,7 @@ public actor DeviceCommandBroker {
             // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
             // device that answers late (or went away) costs nothing but a discarded reply. A
             // request addressed to one named device (a holder fetch) has no other device to ask.
-            guard let next = pickConnection(capability: capability, deviceId: nil,
-                                            excluding: [first.id]) else {
+            guard let next = pick(excluding: [first.id]) else {
                 throw error
             }
             ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)' failed (\(error)); retrying once on another device")

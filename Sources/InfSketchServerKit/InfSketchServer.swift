@@ -173,6 +173,10 @@ public final class InfSketchServer: Sendable {
         // that can render — the relay `render_sketch` walks, so the picture is the one an agent
         // gets and the deployed app already serves it (spec 2026-08-29-watcher-frames-...).
         // Every delete, however it arrives, forgets the agent's edit history for that document.
+        // Live-state ops go to the device with the document open (review finding 20).
+        await broker.setSubscriberLookup { docId in
+            await manager.subscribedConnections(docId: docId)
+        }
         let mcpAdapter = self.mcpAdapter
         await manager.setDocumentDeletedHandler { docId in
             await mcpAdapter.forgetHistory(docId: docId)

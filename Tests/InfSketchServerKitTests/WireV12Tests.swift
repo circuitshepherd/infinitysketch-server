@@ -60,7 +60,7 @@ import InfSketchWire
         let doc = Data("{\"doc\":true}".utf8)
         let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: doc, spec: spec) }
         let message = try #require(await box.first())
-        guard case .strokeOpRequest(let rid, "D", .inline(let payload), let inlineSpec, let kind) = message else {
+        guard case .strokeOpRequest(let rid, "D", .inline(let payload), let inlineSpec, let kind, _) = message else {
             Issue.record("expected a strokeOpRequest, got \(message)"); return
         }
         #expect(kind == OpSpecBundleWire.kind)
@@ -92,7 +92,7 @@ import InfSketchWire
         let spec = Data("{\"op\":\"list\"}".utf8)
         let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data([1]), spec: spec) }
         let message = try #require(await box.first())
-        guard case .strokeOpRequest(let rid, _, _, let inlineSpec, let kind) = message else {
+        guard case .strokeOpRequest(let rid, _, _, let inlineSpec, let kind, _) = message else {
             Issue.record("expected a strokeOpRequest"); return
         }
         #expect(inlineSpec == spec)
@@ -132,7 +132,7 @@ import InfSketchWire
         let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data([1]), spec: Data("{}".utf8)) }
         _ = try #require(await first.first())
         await broker.unregister(connectionId: firstId)
-        guard case .strokeOpRequest(let rid, _, _, _, _)? = await second.first() else {
+        guard case .strokeOpRequest(let rid, _, _, _, _, _)? = await second.first() else {
             Issue.record("the op must be retried on the remaining device"); return
         }
         await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)

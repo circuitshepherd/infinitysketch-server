@@ -87,9 +87,9 @@ import InfSketchWire
         let harness = try await Harness(manager: manager)
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
-        try harness.send(.subscribe(docId: "remote", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "remote", createIfMissing: false))
         try harness.send(.listDocs)
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
 
         let answered = await harness.wait { collector in
             let messages = await collector.messages
@@ -114,7 +114,7 @@ import InfSketchWire
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["authorStrokes"], deviceId: "dev"))
         #expect(await harness.wait { await $0.index { if case .helloAck = $0 { true } else { false } } != nil })
-        try harness.send(.subscribe(docId: "remote", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "remote", createIfMissing: false))
 
         let request = Task {
             try await broker.requestStrokeOp(docId: "d", docBytes: Data("x".utf8), spec: Data("{}".utf8),
@@ -124,7 +124,7 @@ import InfSketchWire
             await collector.messages.contains { if case .strokeOpRequest = $0 { true } else { false } }
         }
         let id = try #require(await harness.collector.messages.lazy.compactMap { message -> UInt32? in
-            if case .strokeOpRequest(let id, _, _, _, _) = message { return id }
+            if case .strokeOpRequest(let id, _, _, _, _, _) = message { return id }
             return nil
         }.first)
         try harness.send(.strokeOpReply(requestId: id, docId: "d", payload: .inline(Data("y".utf8)),
@@ -143,7 +143,7 @@ import InfSketchWire
         let harness = try await Harness(manager: manager)
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
-        try harness.send(.subscribe(docId: "remote", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "remote", createIfMissing: false))
         let payload = OpPayload(type: "fullDoc", data: Data([7]))
         try harness.send(.op(docId: "remote", opId: "o1", payload: payload))
         try await Task.sleep(for: .milliseconds(100))

@@ -212,6 +212,8 @@ Only YOUR writes are recorded, never the user's own drawing, so this can never r
 
 If the document changed after your write, it is MERGED rather than refused: your change is reversed and everything that happened since is kept. That path needs a connected device; an unchanged document does not. There is no redo: calling this again takes back the edit before that one, never the undo itself. History is bounded and in memory, so a much older edit answers `nothingToUndo`. If a multi-step undo fails part-way, the error says how many steps had already landed.
 
+A change made through the user's live selection (transform_selection, duplicate_selection, delete_selection, draw_selection, restyle_selection) commits in the app and cannot be taken back here: an undo that reaches one refuses with `lastEditWasLiveSelection` rather than reverse an older write beneath it.
+
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document id to undo an edit in. |

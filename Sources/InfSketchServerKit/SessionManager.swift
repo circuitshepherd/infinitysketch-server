@@ -43,7 +43,10 @@ public actor SessionManager {
     /// ends one session and a later open makes another under the same docId, and a release that
     /// arrives afterwards belongs to the first — charging it to the second tore that down under
     /// a live subscriber (review finding 19).
-    private var tokenDocs: [UUID: (docId: String, session: DocumentSession)] = [:]
+    /// Which document, session and CONNECTION each subscription belongs to. The connection is what
+    /// lets the broker send a live-state op (the user's selection, the pen they hold, their
+    /// viewport) to the device that actually has the document open (`subscribedConnections`).
+    private var tokenDocs: [UUID: (docId: String, session: DocumentSession, connectionId: UUID?)] = [:]
     private var counts: [String: Int] = [:]
     private var tokenWatchDocs: [UUID: (docId: String, session: DocumentSession)] = [:]
     private var watcherCounts: [String: Int] = [:]
@@ -244,7 +247,8 @@ public actor SessionManager {
     /// broadcasts may leave out image blobs it already holds. Defaults to false: a peer that never
     /// said so keeps receiving whole documents.
     public func subscribe(docId: String, createIfMissing: Bool = false,
-                          acceptsStrippedDocuments: Bool = false) async throws -> SubscribeResult {
+                          acceptsStrippedDocuments: Bool = false,
+                          connectionId: UUID? = nil) async throws -> SubscribeResult {
         let docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
@@ -313,13 +317,23 @@ public actor SessionManager {
             await session.unsubscribe(result.token)
             throw DocumentStoreError.notFound
         }
-        tokenDocs[result.token] = (docId, session)
+        tokenDocs[result.token] = (docId, session, connectionId)
         let newCount = counts[docId, default: 0] + 1
         counts[docId] = newCount
         if case .subscribed(_, let seq, _) = result.snapshot {
             emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: newCount)
         }
         return result
+    }
+
+    /// The connections holding a subscription to `docId`'s CURRENT session — the devices that have
+    /// the document open. A subscription left on a session a delete already ended does not count.
+    public func subscribedConnections(docId: String) -> Set<UUID> {
+        let docId = canonicalDocId(docId)
+        guard let session = sessions[docId] else { return [] }
+        return Set(tokenDocs.values.compactMap { entry in
+            entry.docId == docId && entry.session === session ? entry.connectionId : nil
+        })
     }
 
     /// The token decides which document and session this was; `docId` is the caller's spelling

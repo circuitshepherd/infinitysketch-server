@@ -146,7 +146,7 @@ struct ConnectionKeepaliveTests {
         let harness = try await Harness(manager: manager, config: Self.fastConfig())
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
-        try harness.send(.subscribe(docId: "remote", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "remote", createIfMissing: false))
         #expect(await harness.wait { await $0.closed }, "the silent peer is dropped")
         await closedFlag.markClosed()
         let released = await harness.wait {
@@ -175,7 +175,7 @@ struct ConnectionKeepaliveTests {
         let harness = try await Harness(manager: manager, config: Self.fastConfig())
         defer { harness.finish() }
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
 
         #expect(await harness.wait { await $0.closed }, "the peer must be dropped")
 
@@ -239,7 +239,7 @@ struct ConnectionKeepaliveTests {
         #expect(await harness.collector.pingCount == 0,
                 "the 39-byte helloAck is under the 100-byte budget — nothing should have pinged yet")
 
-        try harness.send(.subscribe(docId: "d", fromSeq: nil, createIfMissing: false))
+        try harness.send(.subscribe(docId: "d", createIfMissing: false))
         #expect(await harness.wait { await $0.pingCount > 0 },
                 "the snapshot pushes emitted bytes past the budget, which must ASK the peer to prove it is reading")
     }
