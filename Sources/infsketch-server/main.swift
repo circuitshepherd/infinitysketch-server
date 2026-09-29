@@ -121,9 +121,11 @@ do {
 }
 
 if verifyVersions {
-    // Opening the store runs the same start-up cleanup a server start would, so this reports what
-    // the next start would see.
-    let problems = DirectoryVersionStore(directory: docsDirectory).verify()
+    // READ-ONLY (`cleanup: false`): an operator may run this against a live server's folder,
+    // where a blob written for a version not yet on disk, or an `.atomic` temporary, is in flight —
+    // the start-up cleanup would delete it. What a start WOULD clean (an interrupted delete's
+    // folder, an orphaned blob) is not a problem to report: nothing names it.
+    let problems = DirectoryVersionStore(directory: docsDirectory, cleanup: false).verify()
     for line in problems { print(line) }
     print(problems.isEmpty ? "versions: sound" : "versions: \(problems.count) problem(s)")
     exit(problems.isEmpty ? 0 : 1)

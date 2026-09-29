@@ -48,9 +48,14 @@ public final class InfSketchServer: Sendable {
     public convenience init(
         port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
     ) {
+        // The document store FIRST, in its own statement: its init runs the identity migration,
+        // which renames document files to their ids — and the version store's start-up cleanup
+        // removes the version folder of any id with no document file, so it must see the files
+        // under their final names.
+        let store = DirectoryDocumentStore(directory: docsDirectory)
         self.init(
             port: port,
-            store: DirectoryDocumentStore(directory: docsDirectory),
+            store: store,
             config: config,
             // `.versions/` and `.blobs/` beside the documents — dot-directories, so `list()` never
             // sees them (the `.trash` reasoning below).

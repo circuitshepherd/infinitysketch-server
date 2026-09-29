@@ -207,3 +207,106 @@ extension VersionStoreRecoveryTests {
         #expect(reopened.verify().isEmpty)
     }
 }
+
+/// What the start-up cleanup must NEVER do: delete on a read-only verify, or read a failed listing
+/// or read as "nothing there" (review of Task 4.3).
+extension VersionStoreRecoveryTests {
+    private func everyPath(under dir: URL) -> [String] {
+        let base = dir.standardizedFileURL.path
+        return ((FileManager.default.enumerator(atPath: base)?.allObjects as? [String]) ?? []).sorted()
+    }
+
+    /// A store with one of each thing a start would clean: an orphaned blob, the folder of a
+    /// deleted document (index and all), and an `.atomic` temporary — plus a live document.
+    private func storeWithEverythingACleanupRemoves() throws -> (dir: URL, orphan: URL, deletedFolder: URL, temporary: URL) {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        for id in ["alive", "deleted"] {
+            let v = VersionFixtures.document(marker: id, images: [(UUID(), VersionFixtures.image(seed: id == "alive" ? 76 : 77))])
+            try store.record(docId: id, bytes: v, hash: VersionDigest.hex(of: v))
+        }
+        try Data("x".utf8).write(to: dir.appendingPathComponent("alive.infsketch"))
+        let orphan = dir.appendingPathComponent(".blobs/\(String(repeating: "b", count: 64))")
+        try Data("orphan".utf8).write(to: orphan)
+        let temporary = dir.appendingPathComponent(".blobs/\(String(repeating: "c", count: 64)).sb-1-x")
+        try Data("in flight".utf8).write(to: temporary)
+        return (dir, orphan, dir.appendingPathComponent(".versions/deleted"), temporary)
+    }
+
+    @Test func aReadOnlyVerifyDeletesNothing() throws {
+        let (dir, _, _, _) = try storeWithEverythingACleanupRemoves()
+        let before = everyPath(under: dir)
+        let problems = DirectoryVersionStore(directory: dir, cleanup: false).verify()
+        #expect(problems.isEmpty)
+        #expect(everyPath(under: dir) == before)
+        // …while an ordinary start does clean them up, so the fixture really has something to lose.
+        _ = DirectoryVersionStore(directory: dir)
+        #expect(everyPath(under: dir) != before)
+    }
+
+    /// No document file listed while version folders exist: the documents may just not be visible
+    /// (evicted, a partial sync, moved away), so nothing is removed.
+    @Test func noVisibleDocumentRemovesNoVersionFolder() throws {
+        let (dir, _, deletedFolder, _) = try storeWithEverythingACleanupRemoves()
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("alive.infsketch"))
+        _ = DirectoryVersionStore(directory: dir)
+        #expect(FileManager.default.fileExists(atPath: deletedFolder.path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".versions/alive").path))
+    }
+
+    /// Runs `body` with `url`'s permissions set to `mode`, restoring them after. Returns false (and
+    /// runs nothing) when the permissions do not take — as root, e.g. the Linux container, where
+    /// every read succeeds regardless.
+    private func withPermissions(_ mode: Int, on url: URL, readable probe: () -> Bool, _ body: () throws -> Void) throws -> Bool {
+        let fm = FileManager.default
+        let original = (try fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) ?? 0o755
+        try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+        defer { try? fm.setAttributes([.posixPermissions: original], ofItemAtPath: url.path) }
+        guard !probe() else { return false }
+        try body()
+        return true
+    }
+
+    @Test func anUnlistableDocumentsFolderRemovesNoVersionFolder() throws {
+        let (dir, _, deletedFolder, _) = try storeWithEverythingACleanupRemoves()
+        // Write and search but not read: the store can still reach `.versions/`, but cannot list
+        // which documents exist.
+        let ran = try withPermissions(0o333, on: dir,
+                                      readable: { (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) != nil }) {
+            _ = DirectoryVersionStore(directory: dir)
+        }
+        guard ran else { return }
+        #expect(FileManager.default.fileExists(atPath: deletedFolder.path))
+    }
+
+    @Test func anUnlistableVersionFolderRemovesNoBlob() throws {
+        let (dir, orphan, _, _) = try storeWithEverythingACleanupRemoves()
+        let folder = dir.appendingPathComponent(".versions/alive")
+        let ran = try withPermissions(0o000, on: folder,
+                                      readable: { (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) != nil }) {
+            _ = DirectoryVersionStore(directory: dir)
+        }
+        guard ran else { return }
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
+        #expect(DirectoryVersionStore(directory: dir, cleanup: false).verify().isEmpty)
+    }
+
+    @Test func anUnreadableVersionFileRemovesNoBlob() throws {
+        let (dir, orphan, _, _) = try storeWithEverythingACleanupRemoves()
+        let folder = dir.appendingPathComponent(".versions/alive")
+        let name = try #require(try FileManager.default.contentsOfDirectory(atPath: folder.path)
+            .first(where: VersionHash.isWellFormed))
+        let file = folder.appendingPathComponent(name)
+        let blobs = dir.appendingPathComponent(DirectoryVersionStore.blobsDirectoryName)
+        let blobsBefore = try FileManager.default.contentsOfDirectory(atPath: blobs.path).filter(VersionHash.isWellFormed)
+        let ran = try withPermissions(0o000, on: file, readable: { (try? Data(contentsOf: file)) != nil }) {
+            _ = DirectoryVersionStore(directory: dir)
+        }
+        guard ran else { return }
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
+        // The unreadable version's own blob above all: an incomplete count would call it unreferenced.
+        let blobsAfter = try FileManager.default.contentsOfDirectory(atPath: blobs.path).filter(VersionHash.isWellFormed)
+        #expect(Set(blobsBefore).isSubset(of: Set(blobsAfter)))
+        #expect(DirectoryVersionStore(directory: dir, cleanup: false).load(docId: "alive", hash: name) != nil)
+    }
+}
