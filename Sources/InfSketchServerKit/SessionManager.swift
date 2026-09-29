@@ -340,7 +340,8 @@ public actor SessionManager {
         // a name is changed only by `renameDoc`, never overwritten by a later subscribe. AFTER the
         // guard above: labelling first left a label behind for a document a racing delete had
         // already removed (and whose label the delete had already dropped).
-        if createIfMissing, let name, store.name(of: docId) == nil {
+        // A name that is only the id (a file already renamed to its id) is no label at all.
+        if createIfMissing, let name, !Self.isIdItself(name, docId: docId), store.name(of: docId) == nil {
             try? store.setName(name, for: docId)
         }
         tokenDocs[result.token] = (docId, session, connectionId)
@@ -700,7 +701,7 @@ public actor SessionManager {
     /// already has is kept: a name changes only through `renameDoc`.
     private func saveFetched(docId: String, bytes: Data) throws {
         try store.save(docId: docId, bytes: bytes)
-        if store.name(of: docId) == nil, let name = liveIndexEntry(docId)?.name {
+        if store.name(of: docId) == nil, let name = liveIndexEntry(docId)?.name, !Self.isIdItself(name, docId: docId) {
             try? store.setName(name, for: docId)
         }
     }
@@ -742,7 +743,7 @@ public actor SessionManager {
         var entries = try store.list().map { info in
             DocListEntry(
                 id: info.docId,
-                name: info.name,
+                name: listedName(stored: info),
                 sizeBytes: info.sizeBytes,
                 modifiedAt: info.modifiedAt,
                 seq: live[info.docId]?.seq,
@@ -757,6 +758,26 @@ public actor SessionManager {
                 seq: nil, subscriberCount: nil, hasContent: false))
         }
         return entries.sorted { $0.id < $1.id }
+    }
+
+    /// The name a stored document lists under: its label, else the name a device advertised it
+    /// with, and its id only when neither exists. **No listing may show the id while a name is
+    /// known**, because a device's connect prologue reads the listing before that device has
+    /// advertised and takes a changed name for a rename made elsewhere — an id there renamed the
+    /// user's file to a UUID, and that device then advertised the UUID stem as the name.
+    /// (`StoredDocInfo.name` falls back to the id itself when there is no label.)
+    private func listedName(stored info: StoredDocInfo) -> String {
+        if store.name(of: info.docId) != nil { return info.name }
+        if let advertised = liveIndexEntry(info.docId)?.name, !Self.isIdItself(advertised, docId: info.docId) {
+            return advertised
+        }
+        return info.name
+    }
+
+    /// Whether `name` is just the document's id (in any letter case) — what a device advertises
+    /// for a file that was already renamed to its id. Never a label worth keeping.
+    static func isIdItself(_ name: String, docId: String) -> Bool {
+        name.caseInsensitiveCompare(docId) == .orderedSame
     }
 
     /// M2c-1: fold a connected device's advertisements into the live index. Multiple devices
@@ -785,7 +806,7 @@ public actor SessionManager {
             // connect, and taking that would revert the rename for everybody. An advertisement
             // only fills a missing label.
             let label = store.name(of: ad.docId)
-            if label == nil { unlabelled.append(ad) }
+            if label == nil, !Self.isIdItself(ad.name, docId: ad.docId) { unlabelled.append(ad) }
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)
                 if let label { existing.name = label }

@@ -97,6 +97,42 @@ import InfSketchWire
         #expect(try await manager.listDocuments().first { $0.id == "ID-8" }?.name == "Watched")
     }
 
+    /// No listing may name a document by its id while a device has advertised a name for it: the
+    /// app's connect prologue reads the listing BEFORE its device advertises and treats a changed
+    /// name as a rename made elsewhere, so an id in the listing renamed the user's file to a UUID.
+    /// A stored document can lack its label however it got there (a lost `.names.json`, a label
+    /// write that failed) — the listing falls back to the advertised name before the id.
+    @Test func anUnlabelledStoredDocumentListsUnderItsAdvertisedNameNotItsId() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ID-11", name: "Held", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        // Stored AFTER the advertisement and without a label — the advertisement found nothing
+        // stored to label.
+        try store.save(docId: "ID-11", bytes: Fixtures.docBytes)
+        #expect(store.name(of: "ID-11") == nil)
+        #expect(try await manager.listDocuments().first { $0.id == "ID-11" }?.name == "Held")
+    }
+
+    /// A device whose file had already been renamed to its id advertises the id as the name. That
+    /// must not become the stored label — a label is permanent, and it would then be read back by
+    /// every other device as a rename. A later advertisement of a real name still fills it.
+    @Test func anAdvertisedNameEqualToTheIdIsNeverStoredAsTheLabel() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        try store.save(docId: "AB12-CD", bytes: Fixtures.docBytes)
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "AB12-CD", name: "ab12-cd", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "renamed-device")
+        #expect(store.name(of: "AB12-CD") == nil)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "AB12-CD", name: "Real Name", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "other-device")
+        #expect(store.name(of: "AB12-CD") == "Real Name")
+        #expect(try await manager.listDocuments().first { $0.id == "AB12-CD" }?.name == "Real Name")
+    }
+
     /// A label the document already has wins over the advertisement, as everywhere else.
     @Test func aFetchDoesNotReplaceAnExistingLabel() async throws {
         let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
