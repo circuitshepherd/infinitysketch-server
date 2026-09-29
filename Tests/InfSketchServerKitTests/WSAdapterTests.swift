@@ -1041,3 +1041,41 @@ func isCurrentHelloAck(_ message: ServerMessage?) -> Bool {
     if case .helloAck(WireProtocol.version, let serverId, _)? = message { return !serverId.isEmpty }
     return false
 }
+
+/// The WebSocket door onto the version store: the hello's deviceId is who holds, an op moves its
+/// `pushed` hold, `baseSaved` its `base` hold, and a subscribe's base fields reach the reply.
+@Suite struct WSAdapterVersionTests {
+    @Test func theSocketDoorsMoveHoldsAndAnswerTheBase() async throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "d", bytes: VersionFixtures.document(marker: "v0"))
+        let versions = DirectoryVersionStore(directory: dir)
+        let manager = SessionManager(store: store, versions: versions)
+        let h = try await Harness(manager: manager)
+        var reader = ServerMessageReader(h.output)
+
+        try h.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "ipad"))
+        #expect(isCurrentHelloAck(try await reader.next()))
+        try h.send(.subscribe(docId: "d", createIfMissing: false))
+        guard case .subscribed = try await reader.next() else { Issue.record("no subscribe reply"); return }
+
+        let v1 = VersionFixtures.document(marker: "v1", images: [(UUID(), VersionFixtures.image(seed: 9))])
+        let v1Hash = VersionDigest.hex(of: v1)
+        try h.send(.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: v1)))
+        guard case .event = try await reader.next() else { Issue.record("no echo"); return }
+        #expect(versions.holds(docId: "d")["ipad"]?.pushed == v1Hash)
+
+        try h.send(.op(docId: "d", opId: "o2", payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "v2"))))
+        guard case .event = try await reader.next() else { Issue.record("no echo"); return }
+        // `baseSaved` has no reply: the unsubscribe after it is handled after it on this connection.
+        try h.send(.baseSaved(docId: "D", versionHash: v1Hash))
+        try h.send(.unsubscribe(docId: "d"))
+        try h.send(.subscribe(docId: "d", createIfMissing: false, baseHash: v1Hash, wantBase: true))
+        guard case .subscribed(_, _, .inline(let payload), let baseHash, let kind) = try await reader.next() else {
+            Issue.record("no resubscribe reply"); return
+        }
+        #expect(versions.holds(docId: "d")["ipad"]?.base == v1Hash)
+        #expect(baseHash == v1Hash && kind == SnapshotBundleWire.kind)
+        #expect(try SnapshotBundle(encoded: payload).resolvedBase() == v1)
+    }
+}

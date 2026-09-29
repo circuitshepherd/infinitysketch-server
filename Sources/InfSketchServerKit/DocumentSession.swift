@@ -204,6 +204,11 @@ actor DocumentSession {
     /// render surface already uses.
     static let maxWatcherFramePx = 2048
     private var watcherFramePx: [UUID: Int] = [:]
+    /// The server's kept versions (spec §1); nil for a store that keeps none (tests, in-memory).
+    private let versions: (any VersionStore)?
+    /// Which DEVICE each subscription belongs to, for the `delivered` holds a broadcast moves.
+    /// A subscription whose connection said no deviceId in its hello holds nothing.
+    private var subscriberDevices: [UUID: String] = [:]
     /// One-slot live-frame cache; dies with the session (the HTTP route then
     /// falls back to the stored thumbnail, marked stale).
     /// `canvasRect` is the canvas region the whole square PNG covers, as the device
@@ -217,17 +222,41 @@ actor DocumentSession {
 
     /// Designated: session over already-known bytes (createIfMissing path uses
     /// empty bytes; nothing is persisted until the first op's store.save).
-    init(docId: String, store: any DocumentStore, bufferLimit: Int, bytes: Data) {
+    /// `docId` must be the CANONICAL spelling (the one the store saves under): the version store
+    /// keys `.versions/<docId>` verbatim. `SessionManager` only ever constructs sessions that way.
+    init(docId: String, store: any DocumentStore, bufferLimit: Int, bytes: Data,
+         versions: (any VersionStore)? = nil) {
         self.docId = docId
         self.store = store
         self.bufferLimit = bufferLimit
         self.bytes = bytes
+        self.versions = versions
     }
 
     /// Loads the document from the store (the pre-existing path).
-    init(docId: String, store: any DocumentStore, bufferLimit: Int) throws {
+    init(docId: String, store: any DocumentStore, bufferLimit: Int,
+         versions: (any VersionStore)? = nil) throws {
         self.init(docId: docId, store: store, bufferLimit: bufferLimit,
-                  bytes: try store.load(docId: docId))
+                  bytes: try store.load(docId: docId), versions: versions)
+    }
+
+    /// Keep this write as a version, and move the transit holds it implies (spec §1; `HoldSlot`).
+    /// Synchronous file work in the same actor turn as `store.save`, like the save itself: the single
+    /// writer per document is what keeps "the current version is kept" true.
+    private func keepVersion(_ newBytes: Data, digest: Data, pusher: String?, submitter: UUID?) {
+        guard let versions, !newBytes.isEmpty else { return }
+        let hash = VersionHash.hex(digest)
+        do { try versions.record(docId: docId, bytes: newBytes, hash: hash) }
+        catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)"); return }
+        let now = Date()
+        if let pusher { versions.setHold(docId: docId, deviceId: pusher, slot: .pushed, hash: hash, now: now) }
+        // One hold per DEVICE, not per subscription: a device with two subscriptions (two
+        // connections) is moved once. The writer's own subscription is skipped — it holds this
+        // version as `pushed` already, and it ignores the echo of its own op.
+        let receivers = Set(subscriberDevices.filter { $0.key != submitter }.values)
+        for device in receivers {
+            versions.setHold(docId: docId, deviceId: device, slot: .delivered, hash: hash, now: now)
+        }
     }
 
     var subscriberCount: Int { subscribers.count }
@@ -278,18 +307,31 @@ actor DocumentSession {
         }
         guard (try? store.save(docId: docId, bytes: newBytes)) != nil else { return bytes }
         bytes = newBytes
+        keepVersion(newBytes, digest: Data(SHA256.hash(data: newBytes)), pusher: nil, submitter: nil)
         return newBytes
     }
 
     /// `acceptsStrippedDocuments` — this subscriber understands a `strippedDoc` event and will
     /// splice the blobs back from its own copy. Defaults to FALSE, so a peer that never said so
     /// keeps receiving whole documents: `infsketch-demo` subscribes to document events too.
-    func subscribe(acceptsStrippedDocuments: Bool = false) -> SubscribeResult {
+    /// `deviceId` — the subscribing connection's device (from its hello), which is then held as
+    /// having been DELIVERED the snapshot, and every later broadcast.
+    func subscribe(acceptsStrippedDocuments: Bool = false, deviceId: String? = nil) -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
             bufferingPolicy: .bufferingOldest(bufferLimit))
         subscribers[token] = continuation
         if acceptsStrippedDocuments { strippedCapableSubscribers.insert(token) }
+        if let deviceId { subscriberDevices[token] = deviceId }
+        // The snapshot this subscriber is about to receive must be a kept version: a document that
+        // predates the store, or one a holder fetch or the manager put on disk without a session,
+        // has none yet. Cheap when it already is (one rebuild to check it is healthy).
+        if let versions, !bytes.isEmpty {
+            let hash = VersionDigest.hex(of: bytes)
+            do { try versions.ensureCurrent(docId: docId, bytes: bytes, hash: hash) }
+            catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)") }
+            if let deviceId { versions.setHold(docId: docId, deviceId: deviceId, slot: .delivered, hash: hash, now: Date()) }
+        }
         // A reconnecting app must learn it is already watched: deliver the
         // current watcher count as this subscription's first event.
         if !watchers.isEmpty {
@@ -304,6 +346,7 @@ actor DocumentSession {
 
     func unsubscribe(_ token: UUID) {
         strippedCapableSubscribers.remove(token)
+        subscriberDevices.removeValue(forKey: token)
         subscribers.removeValue(forKey: token)?.finish()
     }
 
@@ -409,7 +452,8 @@ actor DocumentSession {
     func submit(opId: String, payload: OpPayload, expectation: WriteExpectation = .none,
                 submitter: UUID? = nil,
                 receivedAt: ContinuousClock.Instant? = nil,
-                writer: String? = nil) -> SubmitOutcome {
+                writer: String? = nil,
+                holderDeviceId: String? = nil) -> SubmitOutcome {
         // The document was deleted while this write was on its way: saving it would re-create
         // the file the user just deleted.
         guard !deleted else {
@@ -590,6 +634,11 @@ actor DocumentSession {
         saveEnded = ContinuousClock.now
         bytes = newBytes
         seq += 1
+        let newDigest = rebuiltHash ?? Data(SHA256.hash(data: newBytes))
+        // Kept BEFORE anyone hears of the write: the echo is the pusher's ack and the broadcast a
+        // peer's delivery, and either may be answered at once with a `baseSaved` naming this
+        // version — which must find it kept (and held), or it would release the device's hold.
+        keepVersion(newBytes, digest: newDigest, pusher: holderDeviceId, submitter: submitter)
         // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
         // hand every other subscriber a binary blob they have no idea how to read: measured, a
         // second device took 210 bytes of `StrippedDocument` as its document, failed to decode it,
@@ -600,7 +649,7 @@ actor DocumentSession {
         broadcastBytes = broadcastDocument(
             newBytes, previous: sessionBytes, previousRuns: sessionBlobRuns,
             previousHash: { currentHash },
-            newBytesHash: { rebuiltHash ?? Data(SHA256.hash(data: newBytes)) },
+            newBytesHash: { newDigest },
             opId: opId, submitter: submitter)
         recordTelemetry(kind: payload.type, payloadBytes: inline.count,
                         documentBytes: newBytes.count, outcome: "accepted")
@@ -624,6 +673,7 @@ actor DocumentSession {
         if (try? store.exists(docId: docId)) == true {
             try store.delete(docId: docId)
         }
+        versions?.removeAll(docId: docId)
         announceDeleted()
     }
 
@@ -632,6 +682,7 @@ actor DocumentSession {
         for (_, continuation) in subscribers { continuation.finish() }
         subscribers.removeAll()
         strippedCapableSubscribers.removeAll()
+        subscriberDevices.removeAll()
         // Watchers end here too. Left open, a browser on the deleted document sat on a socket
         // that would never carry another nudge; a finished stream is what `WSAdapter` turns
         // into a close, and a close is what makes the page reconnect and learn the truth.
@@ -723,6 +774,7 @@ actor DocumentSession {
             // nothing else notices.
             subscribers.removeValue(forKey: token)?.finish()
             strippedCapableSubscribers.remove(token)
+            subscriberDevices.removeValue(forKey: token)
         default:
             break
         }

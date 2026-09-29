@@ -261,10 +261,9 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, let createIfMissing, let name, _, _, _):
-            // `baseHash`/`fileHash`/`wantBase` are wired into `manager.subscribe` in the task that
-            // teaches the server to keep versions — this task only puts them on the wire.
-            // Always a full snapshot.
+        case .subscribe(let docId, let createIfMissing, let name, let baseHash, let fileHash, let wantBase):
+            // Always a full snapshot; it may also name (and, with `wantBase`, carry) the base the
+            // device asked for, when this server keeps that version.
             // Per-document, so it names its document: a docId-less `error` here failed EVERY
             // pending subscribe on the connection, other documents' opens included.
             guard docSubscriptions[docId] == nil else {
@@ -274,7 +273,8 @@ actor Connection {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
                     acceptsStrippedDocuments: acceptsStrippedDocuments,
-                    connectionId: connectionId, name: name)
+                    connectionId: connectionId, name: name, deviceId: deviceId,
+                    baseHash: baseHash, fileHash: fileHash, wantBase: wantBase)
                 // The subscribe can take tens of seconds (a holder fetch), and this actor is
                 // reentrant: the connection may have closed meanwhile. `close()` has already
                 // released every subscription it knew of, so storing this one would leak it —
@@ -352,7 +352,11 @@ actor Connection {
                 // WHO pushed. `deviceId` from hello when there is one; the connection's own id
                 // otherwise, so two anonymous peers are still tellable apart in the file — which
                 // is the entire point of recording this.
-                writer: deviceId ?? connectionId.uuidString
+                writer: deviceId ?? connectionId.uuidString,
+                // The version this device's accepted push produced is held for it (`pushed`), so it
+                // is still here when the device writes it into its note. Only a device with an id
+                // holds anything — a connection id dies with the connection.
+                holderDeviceId: deviceId
             ).rejectMessage {
                 emit(reject.addressed(to: docId))
             }
@@ -492,10 +496,12 @@ actor Connection {
             }
             await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
 
-        case .baseSaved:
-            // Moving the device's held base onto this version is the job of the task that teaches
-            // the server to keep versions; this task only puts the message on the wire.
-            break
+        case .baseSaved(let docId, let versionHash):
+            // No reply: the hold is the server's own bookkeeping. A connection that said no deviceId
+            // in its hello has no identity to hold anything for.
+            if let deviceId {
+                await manager.noteBaseSaved(docId: docId, versionHash: versionHash, deviceId: deviceId)
+            }
         }
     }
 
