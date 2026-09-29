@@ -470,15 +470,17 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     }
 
     /// A `.versions/<id>/` folder whose document file is gone belongs to a DELETED document: ids
-    /// are stable and versions exist only for stored documents, so a delete is the only way the
-    /// file disappears — and spec §1 has a delete remove the versions AND the holds (every device
-    /// was already told `docDeleted`). A kill can interrupt that removal before it starts (the
+    /// are stable and versions exist only for stored documents, so the file disappears through a
+    /// delete or through someone removing it by hand. Spec §1 has a delete remove the versions AND
+    /// the holds (every device was already told `docDeleted`), and a file removed by hand is
+    /// cleaned up the same way. A kill can interrupt that removal before it starts (the
     /// queued `removeAll` never ran — the folder still has its index) or part-way (index gone):
     /// either way the folder is removed here. Its blobs are not released here — the reference
     /// counts are built only afterwards, from what is left on disk.
     ///
     /// Never removed: a folder whose document file exists under that id in any letter case (a
-    /// first `record` killed before its index was written — the next write writes it), and one
+    /// first `record` killed before its index was written — the next write writes it), one whose
+    /// document is an iCloud placeholder (`.<id>.infsketch.icloud` — evicted, not deleted), and one
     /// with a QUARANTINED index (its holds are unreadable, not absent — see `sweep` — so there is
     /// no certainty to act on).
     ///
@@ -493,9 +495,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             ServerLog.error("versions: could not list the documents in \(root.path) — no version folder removed")
             return
         }
-        let docFiles = Set(rootNames
-            .filter { $0.lowercased().hasSuffix(".infsketch") }
-            .map { String($0.dropLast(".infsketch".count)).lowercased() })
+        let docFiles = Set(rootNames.compactMap(Self.documentIdPresent(asFileNamed:)))
         guard !docFiles.isEmpty else {
             ServerLog.error("versions: \(versionFolders.count) version folder(s) but no document file in " +
                             "\(root.path) — none removed (documents not visible right now are not deleted)")
@@ -512,6 +512,22 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
                 ServerLog.verbose("[versions] removed '\(doc)': its document is gone — an interrupted delete")
             }
         }
+    }
+
+    /// The (lowercased) document id a file in the documents folder shows as PRESENT, or nil: the
+    /// document itself (`<id>.infsketch`), and its iCloud placeholder (`.<id>.infsketch.icloud`) —
+    /// an evicted document is not a deleted one, so its versions must never be pruned.
+    static func documentIdPresent(asFileNamed name: String) -> String? {
+        let lower = name.lowercased()
+        if lower.hasPrefix("."), lower.hasSuffix(".infsketch.icloud") {
+            let id = lower.dropFirst().dropLast(".infsketch.icloud".count)
+            return id.isEmpty ? nil : String(id)
+        }
+        if lower.hasSuffix(".infsketch") {
+            let id = lower.dropLast(".infsketch".count)
+            return id.isEmpty ? nil : String(id)
+        }
+        return nil
     }
 
     /// The names in `folder`: `[]` when it does not exist (a store with nothing in it yet), `nil`

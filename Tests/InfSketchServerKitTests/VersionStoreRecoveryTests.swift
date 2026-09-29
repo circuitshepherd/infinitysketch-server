@@ -79,6 +79,31 @@ import InfSketchWire
         #expect(reopened.verify().isEmpty)
     }
 
+    /// A partly visible documents folder: one document evicted to iCloud shows only as its
+    /// placeholder `.<id>.infsketch.icloud` while another is present. The evicted document was not
+    /// deleted, so its versions stay — while a folder with neither file is still removed.
+    @Test func aFolderWhoseDocumentIsAnICloudPlaceholderIsKept() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        var hashes: [String: String] = [:]
+        for id in ["Evicted", "gone", "alive"] {
+            let v = VersionFixtures.document(marker: id)
+            hashes[id] = VersionDigest.hex(of: v)
+            try store.record(docId: id, bytes: v, hash: hashes[id]!)
+            try FileManager.default.removeItem(at: dir.appendingPathComponent(".versions/\(id)/holds.json"))
+        }
+        try Data("x".utf8).write(to: dir.appendingPathComponent("alive.infsketch"))
+        try Data("placeholder".utf8).write(to: dir.appendingPathComponent(".evicted.infsketch.icloud"))
+        _ = DirectoryVersionStore(directory: dir)
+        #expect(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent(".versions/Evicted/\(hashes["Evicted"]!)").path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".versions/gone").path) == false)
+        #expect(DirectoryVersionStore.documentIdPresent(asFileNamed: ".Doc.infsketch.icloud") == "doc")
+        #expect(DirectoryVersionStore.documentIdPresent(asFileNamed: "Doc.infsketch") == "doc")
+        #expect(DirectoryVersionStore.documentIdPresent(asFileNamed: ".infsketch.icloud") == nil)
+        #expect(DirectoryVersionStore.documentIdPresent(asFileNamed: "notes.txt") == nil)
+    }
+
     /// A quarantined index means the holds are UNREADABLE, not absent: the folder is not an
     /// interrupted delete even though `holds.json` is missing, and its versions stay.
     @Test func aFolderWithAQuarantinedIndexIsKept() throws {
