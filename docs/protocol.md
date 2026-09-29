@@ -40,21 +40,39 @@ connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a 
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
 browser page sends still answer with `error` — only pages watch.)
 
-The version check is **exact equality** (`WireProtocol.version`, currently 12), and that is
+The version check is **exact equality** (`WireProtocol.version`, currently 13), and that is
 deliberate: both decoders throw on an unknown message `type` rather than ignoring it, so an older
 peer does not degrade gracefully — it would die on the first message it cannot decode, arbitrarily
 long after connecting, with no diagnosable cause. Refusing at the handshake converts that into a
-clean, immediate error. Consequently **every wire addition bumps the version**, however small.
+clean, immediate error. Consequently **every wire addition bumps the version**, however small. The one exception is a
+version that is **not yet released**: while no `v*` tag of this repository contains the commit that
+introduced the current version, a further wire change folds into that same version instead of
+bumping again (both ends deploy together, and no released peer speaks it yet). Once a tag contains
+it, the next wire change bumps. **A version must never carry two meanings**, which is the other
+half of the rule: wire 12 was folded while unreleased, but `main` already carried it with documents
+addressed by NAME, so documents-by-`documentId` took **13** — a wire-12 peer of either meaning
+decodes the other's messages silently and acts on the wrong identity.
 
 `capabilities` declares what the client can do for the server — device-relayed ops (`render`,
 `createDoc`, `authorStrokes`, `authorText`, `authorImage`, `authorGrids`, `mergeDocs`,
 `copyElements`, `reorderElements`, `transformElements`, `controlSelection`, `provideContent`) and
 transport features (`blobOmission`).
 
+## Document identity and names
+
+**`docId` IS the document's `documentId`** — a stable identity minted once and carried in the
+document's own bytes (`DocumentIdentity`, `InfSketchWire`), never a filename or a display string. A
+**name** is a separate, mutable label a person sees; two documents may share one. `subscribe`'s
+`name` labels a document it creates; `DocListEntry.name` and `DocAdvertisement.name` carry the
+current label in a listing or an advertisement (each defaults to the id when absent, so an older
+peer or a not-yet-named document still shows something sensible); `renameDoc` changes the label,
+never the id.
+
 ## Document sessions
 
-- `subscribe(docId, createIfMissing)` → `subscribed(docId, seq, snapshot)` or
-  `subscribeFailed`. The snapshot is the full document; there is no history replay.
+- `subscribe(docId, createIfMissing, name)` → `subscribed(docId, seq, snapshot)` or
+  `subscribeFailed`. The snapshot is the full document; there is no history replay. `name` labels a
+  document this subscribe CREATES; it is ignored when the document already exists.
 - Writes are `op(docId, opId, payload, expectation)`. An accepted op is broadcast to every
   subscriber as `event` with a per-session increasing `seq`; the writer's own op comes back as its
   ack. A refused op is `reject(docId, opId, reason, seq)`.
@@ -65,6 +83,9 @@ transport features (`blobOmission`).
 - `deleteDoc` removes the document (no expectation — the user asked for it gone); live subscribers
   are told via `docDeleted` so a device holding a copy stops syncing it rather than silently
   re-uploading it. Deleted files go to the store's `.trash/`, pruned after 30 days.
+- `renameDoc(docId, name)` changes a document's label (identity is untouched) and is answered on the
+  STATUS stream as `docRenamed(docId, name)` — sent to every status subscriber, the renaming device
+  included, so there is one place a device learns a document's current name.
 
 ## Blob omission (why pushes are small)
 
@@ -113,10 +134,11 @@ any op handler sees the spec. A text frame over 1 MiB drops the app's socket out
 
 ## Discovery, status, and live frames
 
-- `listDocs` → `docList` — the store's documents with size, modified date, seq, subscriber count.
-- `advertiseDocs` — a device announces documents it holds locally (metadata + thumbnail, no
-  content), kept in an in-memory index so other devices can browse and fetch them on demand; pruned
-  when the advertising device disconnects.
+- `listDocs` → `docList` — the store's documents (`DocListEntry`: id, name, size, modified date,
+  seq, subscriber count).
+- `advertiseDocs` — a device announces documents it holds locally (`DocAdvertisement`: id, name,
+  metadata + thumbnail, no content), kept in an in-memory index so other devices can browse and
+  fetch them on demand; pruned when the advertising device disconnects.
 - `subscribeStatus` → `statusEvent` pushes (doc updated / deleted / subscriber changes) — what the
   web overview and the app's browser refresh from.
 - `watchDoc` / `unwatchDoc` — a browser viewing a document's page makes the device render live

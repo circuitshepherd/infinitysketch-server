@@ -299,6 +299,20 @@ private struct ServerMessageReader {
         #expect(payload.docId == "d")
         #expect(payload.kind == "sessionOpened")
     }
+
+    @Test func aRenameOverTheSocketIsEchoedOnTheStatusStream() async throws {
+        let harness = try await Harness(manager: try makeManager())   // stores "d"
+        var reader = ServerMessageReader(harness.output)
+        try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: "dev"))
+        _ = try await reader.next()
+        try harness.send(.subscribeStatus)
+        try harness.send(.renameDoc(docId: "d", name: "Renamed"))
+        var renamed: ServerMessage?
+        while let message = try await reader.next() {
+            if case .docRenamed = message { renamed = message; break }
+        }
+        #expect(renamed == .docRenamed(docId: "d", name: "Renamed"))
+    }
 }
 
 @Suite struct WSAdapterOutgoingTransferTests {

@@ -311,7 +311,16 @@ public enum DocJSON {
         // empty preview and shows its placeholder; the device's next save renders a real one.
         var doc = doc
         doc.removeValue(forKey: "aaa001_thumbnailData")
-        return try JSONSerialization.data(withJSONObject: doc)
+        // `.sortedKeys` (2026-09-28 review, round 1, item 1c): this was the one writer of
+        // `.infsketch` bytes that did NOT sort its top-level keys, and a document this writes can
+        // land back in `Documents/` (an agent's `replace_doc`/`add_text`/… on a synced document).
+        // The app's `SketchDocData.extractDocumentId(from:)` no longer depends on the order — it
+        // reads every top-level key — so this is about keeping every writer's bytes in one shape
+        // (a stable layout diffs and hashes the same way whichever side wrote it), not about
+        // correctness of that reader. `aaa001_thumbnailData` is removed just above, so there is no
+        // thumbnail key left to keep first here — the app's own writers keep that invariant where
+        // a thumbnail IS present.
+        return try JSONSerialization.data(withJSONObject: doc, options: [.sortedKeys])
     }
 
     /// The raw `placedTextsData` array with each element left as `Any`. The

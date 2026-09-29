@@ -5,12 +5,17 @@ public struct StoredDocInfo: Sendable, Equatable {
     public let name: String
     public let sizeBytes: Int
     public let modifiedAt: Date
+    /// Whether `name` is a recorded label (false: no label, `name` is the id). Carried so a listing
+    /// never asks the store per document again (`SessionManager.listedName`).
+    public let labelled: Bool
 
-    public init(docId: String, name: String, sizeBytes: Int, modifiedAt: Date) {
+    /// `labelled` defaults to "the name is not the id", right for every store that keeps no labels.
+    public init(docId: String, name: String, sizeBytes: Int, modifiedAt: Date, labelled: Bool? = nil) {
         self.docId = docId
         self.name = name
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
+        self.labelled = labelled ?? (name != docId)
     }
 }
 
@@ -38,9 +43,23 @@ public protocol DocumentStore: Sendable {
     /// when nothing is stored under it. What `SessionManager` canonicalises docIds to, so one
     /// document is one session however a caller spells it.
     func storedDocId(matching docId: String) -> String?
+    /// Whether a document is stored under EXACTLY this spelling. A fast check for the common case
+    /// (a caller passing an id it was given), cheaper than `list()` or `storedDocId(matching:)`.
+    func storesExactly(docId: String) -> Bool
     /// A server-instance id that survives restarts, or nil when this store cannot keep one (the
     /// server then makes a random id per process). See `SessionManager.serverId`.
     func persistentServerId() -> String?
+    /// The name a person sees for `docId` — a LABEL, not an identity: two documents may carry the
+    /// same one. Nil when none is recorded (callers show the id).
+    func name(of docId: String) -> String?
+    /// Records `name` as `docId`'s label.
+    func setName(_ name: String, for docId: String) throws
+    /// Records `name` as the label of the document stored under EXACTLY `storedId` (a spelling the
+    /// caller took from `list()`), with no lookup of the stored spelling.
+    func setName(_ name: String, forStoredId storedId: String) throws
+    /// Forgets `docId`'s label (a document deleted without stored bytes — `delete` drops the label
+    /// of a stored one itself).
+    func removeName(for docId: String)
 }
 
 extension DocumentStore {
@@ -50,8 +69,18 @@ extension DocumentStore {
         (try? exists(docId: docId)) == true ? docId : nil
     }
 
+    public func storesExactly(docId: String) -> Bool { storedDocId(matching: docId) == docId }
+
     /// Stores with nowhere durable to keep it: a random id per server process.
     public func persistentServerId() -> String? { nil }
+
+    /// Stores that keep no labels: every document is shown by its id.
+    public func name(of docId: String) -> String? { nil }
+    public func setName(_ name: String, for docId: String) throws {}
+    public func setName(_ name: String, forStoredId storedId: String) throws {
+        try setName(name, for: storedId)
+    }
+    public func removeName(for docId: String) {}
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -62,11 +91,21 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// sides of a delete answer "how long do I have to change my mind?" the same way. Injected so
     /// tests can pin the boundary instead of waiting a month.
     private let trashRetention: TimeInterval
+    /// documentId → name (`.names.json`). A class instance, so this struct stays a value.
+    private let labels: DocumentLabels
+    /// How many times this store enumerated its directory (`list()`, `storedDocId(matching:)`) —
+    /// what `ListingCostTests` counts, so a per-document lookup that lists the folder again (an
+    /// O(N²) listing on the session actor) fails a test instead of a large library.
+    let directoryListings = ListingCounter()
 
     public init(directory: URL, trashRetention: TimeInterval = 30 * 24 * 60 * 60) {
         self.directory = directory
         self.trashRetention = trashRetention
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        labels = DocumentLabels(directory: directory)
+        // First, before anything reads the folder: a pre-identity (name-keyed) folder becomes
+        // id-keyed, once. An empty folder just gets the marker.
+        IdentityMigration.run(in: directory, labels: labels)
         // Sweep once here as well as after each delete, so a server that runs for weeks without
         // deleting anything still clears out what expired while it was up.
         pruneTrash()
@@ -109,20 +148,24 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func list() throws -> [StoredDocInfo] {
         let fm = FileManager.default
+        directoryListings.increment()
         let urls = try fm.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+        let labelled = labels.all()
         return urls
             .filter { $0.pathExtension == Self.fileExtension }
             .compactMap { url in
                 guard let values = try? url.resourceValues(
                     forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
                 let id = url.deletingPathExtension().lastPathComponent
+                let label = labelled[id]
                 return StoredDocInfo(
                     docId: id,
-                    name: id,
+                    name: label ?? id,
                     sizeBytes: values.fileSize ?? 0,
-                    modifiedAt: values.contentModificationDate ?? .distantPast)
+                    modifiedAt: values.contentModificationDate ?? .distantPast,
+                    labelled: label != nil)
             }
     }
 
@@ -142,8 +185,53 @@ public struct DirectoryDocumentStore: DocumentStore {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
     }
 
+    /// Exact key first, then the labels' own keys folded — both in memory. The folder is listed
+    /// only when two labelled ids differ just by case, where the stored spelling decides.
+    public func name(of docId: String) -> String? {
+        let all = labels.all()
+        if let exact = all[docId] { return exact }
+        let wanted = docId.lowercased()
+        let folded = all.keys.filter { $0.lowercased() == wanted }
+        switch folded.count {
+        case 0: return nil
+        case 1: return all[folded[0]]
+        default: return all[storedDocId(matching: docId) ?? folded.min()!]
+        }
+    }
+
+    /// An id already labelled under this exact spelling needs no listing (every rename of a
+    /// labelled document); otherwise the stored spelling is looked up.
+    public func setName(_ name: String, for docId: String) throws {
+        if labels.name(of: docId) != nil { return try labels.set(name, for: docId) }
+        try labels.set(name, for: storedDocId(matching: docId) ?? docId)
+    }
+
+    public func setName(_ name: String, forStoredId storedId: String) throws {
+        try labels.set(name, for: storedId)
+    }
+
+    public func removeName(for docId: String) {
+        let wanted = docId.lowercased()
+        for key in labels.all().keys where key.lowercased() == wanted { labels.remove(key) }
+    }
+
+    /// `fileExists` alone is not enough: on a case-insensitive filesystem (APFS, NTFS) it finds
+    /// `Chart.infsketch` for `chart`, and the spelling is what a session is keyed by. The directory's
+    /// NAMES are compared instead — no attributes, no labels, unlike `list()`.
+    public func storesExactly(docId: String) -> Bool {
+        guard let url = try? fileURL(for: docId),
+              FileManager.default.fileExists(atPath: url.path),
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return false }
+        return names.contains(url.lastPathComponent)
+    }
+
     public func storedDocId(matching docId: String) -> String? {
-        guard let stored = try? list().map(\.docId) else { return nil }
+        directoryListings.increment()
+        // Names only — no attributes, no labels — unlike `list()`.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return nil }
+        let suffix = ".\(Self.fileExtension)"
+        let stored = names.filter { $0.hasSuffix(suffix) }.map { String($0.dropLast(suffix.count)) }
         if stored.contains(docId) { return docId }
         let wanted = docId.lowercased()
         // `.min()`: two files differing only in case can exist on a case-sensitive filesystem, and
@@ -177,15 +265,75 @@ public struct DirectoryDocumentStore: DocumentStore {
         let trashDir = directory.appendingPathComponent(Self.trashDirectoryName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let stamped = "\(stem)__\(Self.trashStamp())"
-            try FileManager.default.moveItem(
-                at: url,
-                to: trashDir.appendingPathComponent(stamped).appendingPathExtension(Self.fileExtension))
+            let stamp = Self.trashStamp()
+            let named = "\(Self.trashedStem(docId: stem, name: labels.name(of: stem)))__\(stamp)"
+            do {
+                try FileManager.default.moveItem(
+                    at: url, to: trashDir.appendingPathComponent(named).appendingPathExtension(Self.fileExtension))
+            } catch {
+                // The readable name is the only part a file system can refuse (a length or
+                // character rule we did not foresee): retry with the bare id before the outright
+                // removal below — which destroys the document — is ever reached.
+                try FileManager.default.moveItem(
+                    at: url, to: trashDir.appendingPathComponent("\(stem)__\(stamp)").appendingPathExtension(Self.fileExtension))
+            }
         } catch {
             try FileManager.default.removeItem(at: url)
         }
+        labels.remove(stem)
         // Tidying, after the part the user actually asked for. Never allowed to fail the delete.
         pruneTrash()
+    }
+
+    /// The trashed file's name before its stamp: `<docId> (<name>)`, or the bare docId when the
+    /// document has no label or is labelled by its own id. The label is dropped with the document,
+    /// and a docId (a UUID) says nothing to a person looking for what they deleted — so the name
+    /// travels in the file name, readable in any file browser. Characters no file system accepts
+    /// become `_`, and a long name is cut to `trashNameByteLimit` bytes.
+    /// The readable name's budget in UTF-8 BYTES. File-name limits are bytes (255 on ext4 and
+    /// APFS), and a Character can be many of them: 100 emoji are 400 bytes, and a too-long name
+    /// makes the move fail. 150 leaves room for a legacy id, ` ()`, the stamp and the extension.
+    static let trashNameByteLimit = 150
+
+    static func trashedStem(docId: String, name: String?) -> String {
+        guard let name else { return docId }
+        // Control characters (Cc) only — not `CharacterSet.controlCharacters`, which also holds the
+        // format characters (Cf) such as the zero-width joiner inside every family emoji.
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        var readable = String(String.UnicodeScalarView(name.unicodeScalars.map {
+            forbidden.contains($0) || $0.properties.generalCategory == .control ? "_" : $0
+        })).trimmingCharacters(in: .whitespaces)
+        while readable.hasPrefix(".") { readable.removeFirst() }
+        if readable.utf8.count > trashNameByteLimit {
+            // Cut on a Character boundary: whole grapheme clusters only, never half an emoji.
+            var cut = ""
+            for character in readable {
+                guard cut.utf8.count + String(character).utf8.count <= trashNameByteLimit else { break }
+                cut.append(character)
+            }
+            readable = cut.trimmingCharacters(in: .whitespaces)
+        }
+        guard !readable.isEmpty, readable != docId else { return docId }
+        return "\(docId) (\(readable))"
+    }
+
+    /// What a trashed file's basename says: the document's id, its name when the file carries one,
+    /// and when it was deleted. Read from the RIGHT like `trashDate`: the stamp after the last
+    /// `__`, then `<docId> (<name>)` split at the FIRST ` (` — a minted id (a UUID) never contains
+    /// one, a name may. A LEGACY id (a pre-identity file name the migration left in place, e.g. one
+    /// that could not carry an id) can: such an entry splits inside its id, and the name read back
+    /// is wrong. Only the file name is affected — the document inside is whole.
+    /// A file trashed before names were kept parses with `name` nil.
+    static func trashedDocument(fromTrashedBasename basename: String)
+        -> (docId: String, name: String?, deletedAt: Date)? {
+        guard let separator = basename.range(of: "__", options: .backwards),
+              let deletedAt = trashDate(fromTrashedBasename: basename) else { return nil }
+        let head = String(basename[..<separator.lowerBound])
+        if head.hasSuffix(")"), let open = head.range(of: " (") {
+            let name = String(head[open.upperBound..<head.index(before: head.endIndex)])
+            return (String(head[..<open.lowerBound]), name, deletedAt)
+        }
+        return (head, nil, deletedAt)
     }
 
     /// Remove trashed documents past `trashRetention`
@@ -249,9 +397,10 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// here. This server is cross-platform on purpose, so the resolution is now the server's own
     /// and identical everywhere.
     ///
-    /// Case-insensitive was chosen over exact-match because it is what macOS users already
-    /// experience and what the app's own browser assumes (it dedupes documents by name stem, so
-    /// "Chart" and "chart" were never really two documents).
+    /// A docId is now the document's `documentId` (a UUID the app mints), not the name a person
+    /// sees — that is a label (`DocumentLabels`). Case folding stays: an agent may type a UUID in
+    /// lower case, and a folder written before the identity migration may still hold a document
+    /// the migration left under its old name.
     ///
     /// The scan only runs when the exact name MISSES, so the ordinary hit — every repeat call on a
     /// document, including the byte-CAS `exists` check on every write — still costs one
@@ -280,9 +429,9 @@ public struct DirectoryDocumentStore: DocumentStore {
     /// called `RAINFALL`, where macOS and Linux both leave it called `Rainfall`.
     ///
     /// That is not cosmetic, which is why it is worth an enumeration. A docId IS this server's
-    /// document identity — the filename stem the app captured when it opened the document, and what
-    /// the mirror, the holder index and every agent tool key off — so a silent re-spelling leaves a
-    /// device keyed on `Rainfall` and a server holding `RAINFALL` disagreeing about which document
+    /// document identity — the document's `documentId`, which the file is named by, and what the
+    /// mirror, the holder index and every agent tool key off — so a silent re-spelling leaves a
+    /// device keyed on one spelling and a server holding another disagreeing about which document
     /// they are syncing, on one platform only.
     ///
     /// The cost is deliberately kept OFF the read path: a save writes the whole document, beside
@@ -317,4 +466,13 @@ public enum ThumbnailExtractor {
               !png.isEmpty else { return nil }
         return png
     }
+}
+
+
+/// A thread-safe count (`DirectoryDocumentStore.directoryListings`).
+final class ListingCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() { lock.lock(); value += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
 }

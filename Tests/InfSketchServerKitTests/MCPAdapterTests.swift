@@ -267,16 +267,16 @@ private func toolResultImage(_ content: [Tool.Content]) -> (data: String, mimeTy
     return nil
 }
 
-/// Seeds a second document via the opaque-bytes `replace_doc` tool (the same
-/// tool `replaceDocForFreshIdStoresFile` etc. drive directly) — the
-/// `merge_docs` relay tests (agent-merge-docs, Task 1) need TWO distinct
-/// existing documents in the same running server, and `startServer` only
-/// seeds one via its `DirectoryDocumentStore`.
-private func seedDocViaReplaceDoc(_ client: Client, docId: String, bytes: Data) async throws {
-    let (_, isError) = try await client.callTool(
-        name: "replace_doc",
-        arguments: ["docId": .string(docId), "bytes": .string(bytes.base64EncodedString())])
-    #expect(isError != true)
+/// Seeds a second document under exactly `docId`, straight through the session manager — the
+/// `merge_docs` relay tests (agent-merge-docs, Task 1) need TWO distinct existing documents in the
+/// same running server, and `startServer` only seeds one via its `DirectoryDocumentStore`. (It used
+/// to go through `replace_doc`, which now creates a NEW document with its own id when the reference
+/// names none, so the seeded document would no longer be called `docId` by id.)
+private func seedDocDirectly(_ server: InfSketchServer, docId: String, bytes: Data) async throws {
+    let outcome = await server.manager.submitOpeningSession(
+        docId: docId, createIfMissing: true, opId: "seed-\(UUID().uuidString)",
+        payload: OpPayload(type: "fullDoc", data: bytes), expectation: .absent)
+    if case .rejected = outcome { Issue.record("seeding \(docId) was rejected") }
 }
 
 /// A fake InfinitySketch device for the `create_doc` tests (Task 4): a real
@@ -289,7 +289,7 @@ private func seedDocViaReplaceDoc(_ client: Client, docId: String, bytes: Data) 
 /// inbound `createDocRequest` whenever the broker sends one — independent of
 /// whatever the test's main task is doing (typically awaiting
 /// `client.callTool(name: "create_doc", ...)` on the MCP side).
-private actor FakeCreateDocDevice {
+actor FakeCreateDocDevice {
     private let ws: URLSessionWebSocketTask
     private var pumpTask: Task<Void, Never>?
     private(set) var receivedRequests: [(requestId: UInt32, docId: String)] = []
@@ -1465,14 +1465,16 @@ private actor FakeStrokeOpDevice {
             name: "replace_doc",
             arguments: ["docId": "fresh", "bytes": .string(freshBytes.base64EncodedString())])
         #expect(isError != true)
-        #expect(toolResultText(content).contains("seq 1"))
+        #expect(toolResultText(content).contains("\"seq\":1"))
 
+        // A reference no document carries is a NEW document NAMED by it, with its own id.
         let entries = try await server.manager.listDocuments()
-        #expect(entries.contains { $0.id == "fresh" })
+        let created = try #require(entries.first { $0.name == "fresh" })
+        #expect(created.id != "fresh")
 
-        let rawContents = try await client.readResource(uri: "infsketch://doc/fresh/raw")
+        let rawContents = try await client.readResource(uri: "infsketch://doc/\(created.id)/raw")
         let rawBlob = try #require(rawContents[0].blob)
-        #expect(Data(base64Encoded: rawBlob) == freshBytes)
+        #expect(Data(base64Encoded: rawBlob) == DocumentIdentity.settingDocumentId(in: freshBytes, to: created.id))
 
         await server.stop()
     }
@@ -1487,19 +1489,23 @@ private actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
 
         let copied = Data(#"{"aaa001_thumbnailData":"T","documentId":"COPIED","placedTextsData":[]}"#.utf8)
-        _ = try await client.callTool(
+        let (createContent, _) = try await client.callTool(
             name: "replace_doc", arguments: ["docId": "made", "bytes": .string(copied.base64EncodedString())])
+        let reply = try #require(try JSONSerialization.jsonObject(
+            with: Data(toolResultText(createContent).utf8)) as? [String: Any])
+        let id = try #require(reply["docId"] as? String)
         let stored = Data(base64Encoded: try #require(
-            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+            try await client.readResource(uri: "infsketch://doc/\(id)/raw")[0].blob))!
         let minted = try #require(DocumentIdentity.documentId(of: stored))
         #expect(minted != "COPIED")
+        #expect(minted == id)
         #expect(stored == DocumentIdentity.replacingDocumentId(in: copied, with: minted))
 
         let other = Data(#"{"aaa001_thumbnailData":"","documentId":"OTHER","marker":1}"#.utf8)
         _ = try await client.callTool(
             name: "replace_doc", arguments: ["docId": "made", "bytes": .string(other.base64EncodedString())])
         let replaced = Data(base64Encoded: try #require(
-            try await client.readResource(uri: "infsketch://doc/made/raw")[0].blob))!
+            try await client.readResource(uri: "infsketch://doc/\(id)/raw")[0].blob))!
         #expect(DocumentIdentity.documentId(of: replaced) == minted)
 
         await server.stop()
@@ -1520,9 +1526,10 @@ private actor FakeStrokeOpDevice {
             arguments: ["docId": "d", "bytes": .string(replacement.base64EncodedString())])
         #expect(isError != true)
 
+        // Stored as given, except that the legacy document (no `documentId`) gains its id.
         let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
         let rawBlob = try #require(rawContents[0].blob)
-        #expect(Data(base64Encoded: rawBlob) == replacement)
+        #expect(Data(base64Encoded: rawBlob) == DocumentIdentity.settingDocumentId(in: replacement, to: "d"))
 
         await server.stop()
     }
@@ -1567,11 +1574,12 @@ private actor FakeStrokeOpDevice {
             name: "replace_doc",
             arguments: ["docId": "totally-new", "bytes": .string(freshBytes.base64EncodedString())])
         #expect(isError != true)
-        #expect(toolResultText(content).contains("seq 1"))
+        #expect(toolResultText(content).contains("\"seq\":1"))
 
-        let rawContents = try await client.readResource(uri: "infsketch://doc/totally-new/raw")
+        let created = try #require(try await server.manager.listDocuments().first { $0.name == "totally-new" })
+        let rawContents = try await client.readResource(uri: "infsketch://doc/\(created.id)/raw")
         let rawBlob = try #require(rawContents[0].blob)
-        #expect(Data(base64Encoded: rawBlob) == freshBytes)
+        #expect(Data(base64Encoded: rawBlob) == DocumentIdentity.settingDocumentId(in: freshBytes, to: created.id))
 
         await server.stop()
     }
@@ -1602,12 +1610,12 @@ private actor FakeStrokeOpDevice {
             name: "replace_doc",
             arguments: ["docId": "replace-then-create", "bytes": .string(freshBytes.base64EncodedString())])
         #expect(createIsError != true)
-        #expect(toolResultText(createContent).contains("seq 1"))
+        #expect(toolResultText(createContent).contains("\"seq\":1"))
 
         let (raceContent, raceIsError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "replace-then-create"])
+            name: "create_doc", arguments: ["name": "replace-then-create"])
         #expect(raceIsError == true)
-        #expect(toolResultText(raceContent) == "docExists")
+        #expect(toolResultText(raceContent).hasPrefix("docExists: \"replace-then-create\" is document "))
 
         await server.stop()
     }
@@ -1791,12 +1799,12 @@ private actor FakeStrokeOpDevice {
         #expect(createDoc.description?.contains("docChangedDuringOp") != true)
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "StillCreates"])
+            name: "create_doc", arguments: ["name": "StillCreates"])
         #expect(isError != true)
-        #expect(toolResultText(content).contains("seq 1"))
+        #expect(toolResultText(content).contains("\"seq\":1"))
 
         let entries = try await server.manager.listDocuments()
-        #expect(entries.contains { $0.id == "StillCreates" })
+        #expect(entries.contains { $0.name == "StillCreates" && $0.id != "StillCreates" })
 
         await server.stop()
     }
@@ -1842,16 +1850,22 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "Fresh"])
+            name: "create_doc", arguments: ["name": "Fresh"])
         #expect(isError != true)
-        #expect(toolResultText(content).contains("seq 1"))
+        let reply = try #require(try JSONSerialization.jsonObject(
+            with: Data(toolResultText(content).utf8)) as? [String: Any])
+        #expect(reply["seq"] as? Int == 1)
+        #expect(reply["name"] as? String == "Fresh")
+        let id = try #require(reply["docId"] as? String)
 
-        let rawContents = try await client.readResource(uri: "infsketch://doc/Fresh/raw")
+        // The device's template, given the new document's own identity and nothing else.
+        let rawContents = try await client.readResource(uri: "infsketch://doc/\(id)/raw")
         let rawBlob = try #require(rawContents[0].blob)
-        #expect(Data(base64Encoded: rawBlob) == Fixtures.docBytes)
+        #expect(Data(base64Encoded: rawBlob)
+                == DocumentIdentity.settingDocumentId(in: Fixtures.docBytes, to: id))
 
         let entries = try await server.manager.listDocuments()
-        #expect(entries.contains { $0.id == "Fresh" })
+        #expect(entries.contains { $0.id == id && $0.name == "Fresh" })
 
         await server.stop()
     }
@@ -1865,9 +1879,9 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "d"])
+            name: "create_doc", arguments: ["name": "d"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "docExists")
+        #expect(toolResultText(content) == "docExists: \"d\" is document d")
 
         // The existence check must short-circuit BEFORE ever contacting the
         // device — no createDocRequest should have been sent.
@@ -1890,7 +1904,7 @@ private actor FakeStrokeOpDevice {
         let device = try await FakeCreateDocDevice(port: port, autoReplyBytes: Fixtures.docBytes)
         defer { Task { await device.close() } }
 
-        let (content, isError) = try await client.callTool(name: "create_doc", arguments: ["docId": "held"])
+        let (content, isError) = try await client.callTool(name: "create_doc", arguments: ["name": "Held"])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("docExists"))
         #expect(await device.receivedRequests.isEmpty)
@@ -1921,14 +1935,14 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (firstContent, firstIsError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "twice-fresh"])
+            name: "create_doc", arguments: ["name": "twice-fresh"])
         #expect(firstIsError != true)
-        #expect(toolResultText(firstContent).contains("seq 1"))
+        #expect(toolResultText(firstContent).contains("\"seq\":1"))
 
         let (secondContent, secondIsError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "twice-fresh"])
+            name: "create_doc", arguments: ["name": "twice-fresh"])
         #expect(secondIsError == true)
-        #expect(toolResultText(secondContent) == "docExists")
+        #expect(toolResultText(secondContent).hasPrefix("docExists: \"twice-fresh\" is document "))
 
         // Only the first create ever reached the device — the second was
         // rejected by the fast pre-check before any second createDocRequest.
@@ -1945,7 +1959,7 @@ private actor FakeStrokeOpDevice {
         // No fake device connects in this test.
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "NoDevice"])
+            name: "create_doc", arguments: ["name": "NoDevice"])
         #expect(isError == true)
         #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
 
@@ -1963,7 +1977,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "SlowDoc"])
+            name: "create_doc", arguments: ["name": "SlowDoc"])
         #expect(isError == true)
         #expect(toolResultText(content) == "deviceTimeout")
 
@@ -1986,7 +2000,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
 
         let firstCall = Task { try await client.callTool(
-            name: "create_doc", arguments: ["docId": "Pending"]) }
+            name: "create_doc", arguments: ["name": "Pending"]) }
 
         // Wait until the request is actually in flight (has reached the
         // device), so the second call below is a genuine collision.
@@ -1998,7 +2012,7 @@ private actor FakeStrokeOpDevice {
         #expect(inFlight)
 
         let (content, isError) = try await client.callTool(
-            name: "create_doc", arguments: ["docId": "Pending"])
+            name: "create_doc", arguments: ["name": "Pending"])
         #expect(isError == true)
         #expect(toolResultText(content) == "creationInProgress")
 
@@ -2009,7 +2023,7 @@ private actor FakeStrokeOpDevice {
             requestId: pending.requestId, docId: pending.docId, bytes: Fixtures.docBytes)
         let (firstContent, firstIsError) = try await firstCall.value
         #expect(firstIsError != true)
-        #expect(toolResultText(firstContent).contains("seq 1"))
+        #expect(toolResultText(firstContent).contains("\"seq\":1"))
 
         await server.stop()
     }
@@ -4692,7 +4706,7 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(client, docId: "S", bytes: sourceBytes)
+        try await seedDocDirectly(server, docId: "S", bytes: sourceBytes)
 
         let mergedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)
         let device = try await FakeStrokeOpDevice(
@@ -4731,8 +4745,8 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(
-            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        try await seedDocDirectly(
+            server, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
 
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)),
@@ -4818,7 +4832,7 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(client, docId: "S", bytes: sourceBytes)
+        try await seedDocDirectly(server, docId: "S", bytes: sourceBytes)
 
         let mergedBytes = Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)
         let device = try await FakeStrokeOpDevice(
@@ -4828,7 +4842,9 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
         #expect(isError != true)
-        #expect(toolResultText(content).contains("merged S and T into C"))
+        #expect(toolResultText(content).contains("merged S and T into C ("))
+        let cId = try #require(try await server.manager.listDocuments().first { $0.name == "C" }?.id)
+        #expect(cId != "C")
 
         let received = try #require(await device.receivedRequests.first)
         #expect(received.docId == "T")
@@ -4837,8 +4853,8 @@ private actor FakeStrokeOpDevice {
             JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(Set(envelope.keys) == ["op", "prefer", "sourceBytes"])
 
-        let cRaw = try await client.readResource(uri: "infsketch://doc/C/raw")
-        #expect(Data(base64Encoded: try #require(cRaw[0].blob)) == mergedBytes)
+        let cRaw = try await client.readResource(uri: "infsketch://doc/\(cId)/raw")
+        #expect(Data(base64Encoded: try #require(cRaw[0].blob)) == DocumentIdentity.settingDocumentId(in: mergedBytes, to: cId))
 
         let sRaw = try await client.readResource(uri: "infsketch://doc/S/raw")
         #expect(Data(base64Encoded: try #require(sRaw[0].blob)) == sourceBytes)
@@ -4856,7 +4872,7 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8))
+        try await seedDocDirectly(server, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":""}"#.utf8))
         let union = Data(#"{"aaa001_thumbnailData":"","documentId":"TARGET-ID","marker":"merged"}"#.utf8)
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(union), capabilities: ["mergeDocs"])
         defer { Task { await device.close() } }
@@ -4864,9 +4880,11 @@ private actor FakeStrokeOpDevice {
         let (_, isError) = try await client.callTool(
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
         #expect(isError != true)
-        let stored = Data(base64Encoded: try #require(try await client.readResource(uri: "infsketch://doc/C/raw")[0].blob))!
+        let cId = try #require(try await server.manager.listDocuments().first { $0.name == "C" }?.id)
+        let stored = Data(base64Encoded: try #require(try await client.readResource(uri: "infsketch://doc/\(cId)/raw")[0].blob))!
         let id = try #require(DocumentIdentity.documentId(of: stored))
         #expect(id != "TARGET-ID")
+        #expect(id == cId)
         #expect(stored == DocumentIdentity.replacingDocumentId(in: union, with: id))
         await server.stop()
     }
@@ -4880,10 +4898,10 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(
-            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
-        try await seedDocViaReplaceDoc(
-            client, docId: "C", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"existing"}"#.utf8))
+        try await seedDocDirectly(
+            server, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        try await seedDocDirectly(
+            server, docId: "C", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"existing"}"#.utf8))
 
         let device = try await FakeStrokeOpDevice(
             port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"merged"}"#.utf8)),
@@ -4893,7 +4911,7 @@ private actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "C"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "docExists")
+        #expect(toolResultText(content) == "docExists: \"C\" is document C")
 
         // Fast-fail: the device must never be contacted for an already-taken `into`.
         #expect(await device.receivedRequests.isEmpty)
@@ -4901,25 +4919,25 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// `into` equal to `source` or `target` is rejected up front as
-    /// `invalidArguments`, alongside `source == target` above.
-    @Test func mergeDocsIntoEqualToSourceOrTargetIsInvalid() async throws {
+    /// `into` is a new document's NAME, so an `into` that is `source`'s or `target`'s name is
+    /// simply a taken name: `docExists`, naming the document that has it.
+    @Test func mergeDocsIntoEqualToSourceOrTargetIsATakenName() async throws {
         let (server, port, task) = try await startServer(seedDocId: "T", bytes: Fixtures.docBytes)
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(
-            client, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        try await seedDocDirectly(
+            server, docId: "S", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
 
         let (contentIntoSource, isErrorIntoSource) = try await client.callTool(
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "S"])
         #expect(isErrorIntoSource == true)
-        #expect(toolResultText(contentIntoSource) == "invalidArguments")
+        #expect(toolResultText(contentIntoSource) == "docExists: \"S\" is document S")
 
         let (contentIntoTarget, isErrorIntoTarget) = try await client.callTool(
             name: "merge_docs", arguments: ["source": "S", "target": "T", "into": "T"])
         #expect(isErrorIntoTarget == true)
-        #expect(toolResultText(contentIntoTarget) == "invalidArguments")
+        #expect(toolResultText(contentIntoTarget) == "docExists: \"T\" is document T")
 
         await server.stop()
     }
@@ -4942,7 +4960,7 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(client, docId: "s", bytes: sourceBytes)
+        try await seedDocDirectly(server, docId: "s", bytes: sourceBytes)
 
         let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["copyElements"])
@@ -4982,7 +5000,7 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(client, docId: "s", bytes: sourceBytes)
+        try await seedDocDirectly(server, docId: "s", bytes: sourceBytes)
 
         let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
         let metaBytes = Data(#"{"createdStrokeKeys":["newkey1"],"createdTextIds":[],"createdImageIds":[]}"#.utf8)
@@ -5762,8 +5780,8 @@ private actor FakeStrokeOpDevice {
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
-        try await seedDocViaReplaceDoc(
-            client, docId: "s", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
+        try await seedDocDirectly(
+            server, docId: "s", bytes: Data(#"{"aaa001_thumbnailData":"","marker":"source"}"#.utf8))
         let device = try await FakeStrokeOpDevice(
             port: port,
             autoReply: .bytesWithMeta(
@@ -5961,13 +5979,15 @@ private actor FakeStrokeOpDevice {
             "list_images": ["canvasBounds", "pinned", "opacity", "tags"],
             "list_tags": ["roof", "elements", "grids"],
             "find_elements": ["roof"],
-            "list_docs": ["sizeBytes", "modifiedAt", "hasContent", "open"],
+            "list_docs": ["name", "sizeBytes", "modifiedAt", "hasContent", "open"],
+            "create_doc": ["docId", "name", "seq"],
+            "replace_doc": ["docId", "name", "seq"],
             "snap_points": ["canvasPoint", "candidates", "canvasPosition", "distance", "kind", "parents"],
             "list_grids": ["families", "drawSpacing", "snapSpacing", "lineAngleDeg", "tags"],
             "get_selection": ["elements", "canvasBounds", "canvasRect", "canvasReferencePoint",
                               "active", "sessionActive", "uncommittedCopy"],
             "get_tool": ["inkType", "toolWidth", "pickerDialWidth"],
-            "list_open_docs": ["openDocs", "docId", "capabilities"],
+            "list_open_docs": ["openDocs", "docId", "name", "capabilities"],
             "render_sketch": ["filePath", "renderUrl"],
             "draw_strokes": ["storedColors"],
             "restyle_strokes": ["storedColor"],

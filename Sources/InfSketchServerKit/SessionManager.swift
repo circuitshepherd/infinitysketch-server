@@ -259,7 +259,8 @@ public actor SessionManager {
     /// said so keeps receiving whole documents.
     public func subscribe(docId: String, createIfMissing: Bool = false,
                           acceptsStrippedDocuments: Bool = false,
-                          connectionId: UUID? = nil) async throws -> SubscribeResult {
+                          connectionId: UUID? = nil,
+                          name: String? = nil) async throws -> SubscribeResult {
         var docId = canonicalDocId(docId)
         graceTasks.removeValue(forKey: docId)?.task.cancel()
         let session: DocumentSession
@@ -334,6 +335,14 @@ public actor SessionManager {
         guard sessions[docId] === session else {
             await session.unsubscribe(result.token)
             throw DocumentStoreError.notFound
+        }
+        // A creating subscribe carries the document's name: label it, unless it already has one —
+        // a name is changed only by `renameDoc`, never overwritten by a later subscribe. AFTER the
+        // guard above: labelling first left a label behind for a document a racing delete had
+        // already removed (and whose label the delete had already dropped).
+        // A name that is only the id (a file already renamed to its id) is no label at all.
+        if createIfMissing, let name, !Self.isIdItself(name, docId: docId), store.name(of: docId) == nil {
+            try? store.setName(name, for: docId)
         }
         tokenDocs[result.token] = (docId, session, connectionId)
         let newCount = counts[docId, default: 0] + 1
@@ -441,6 +450,11 @@ public actor SessionManager {
             try await session.deleteFromStore()
         } else if hadContent {
             try store.delete(docId: docId)
+        } else {
+            // Advertised only: no bytes to trash, but a `renameDoc` label may be stored — and a
+            // label outranks every later advertisement, so left behind it would name whatever is
+            // next advertised under this id with the deleted document's name.
+            store.removeName(for: docId)
         }
         ServerLog.verbose("[live-index] \(Self.stamp()) deleteDoc \(docId): hadContent=\(hadContent) holders=\(holders)")
 
@@ -675,8 +689,21 @@ public actor SessionManager {
         //     reaches the store through a `DocumentSession`, and opening one requires this actor) —
         //     so check-through-save is one uncontended actor turn.
         if let durable = try? store.load(docId: docId) { return durable }
-        try? store.save(docId: docId, bytes: bytes)
+        try? saveFetched(docId: docId, bytes: bytes)
         return bytes
+    }
+
+    /// Persists bytes fetched from a holder, LABELLED with the name the document was advertised
+    /// under. A stored document without a label lists as its id, so without this an agent that had
+    /// just read a document by name could not find it by that name again, and a device's connect
+    /// prologue read the id as the document's new name and renamed the user's file to a UUID —
+    /// until the device's next advertisement happened to restore the label. A label the document
+    /// already has is kept: a name changes only through `renameDoc`.
+    private func saveFetched(docId: String, bytes: Data) throws {
+        try store.save(docId: docId, bytes: bytes)
+        if store.name(of: docId) == nil, let name = liveIndexEntry(docId)?.name, !Self.isIdItself(name, docId: docId) {
+            try? store.setName(name, for: docId)
+        }
     }
 
     /// True when the only thing here is an EMPTY session with nothing durable behind it — the
@@ -716,6 +743,7 @@ public actor SessionManager {
         var entries = try store.list().map { info in
             DocListEntry(
                 id: info.docId,
+                name: listedName(stored: info),
                 sizeBytes: info.sizeBytes,
                 modifiedAt: info.modifiedAt,
                 seq: live[info.docId]?.seq,
@@ -726,10 +754,30 @@ public actor SessionManager {
         let contentIds = Set(entries.map { $0.id.lowercased() })
         for (docId, entry) in liveIndex where !contentIds.contains(docId.lowercased()) {
             entries.append(DocListEntry(
-                id: docId, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
+                id: docId, name: store.name(of: docId) ?? entry.name, sizeBytes: entry.sizeBytes, modifiedAt: entry.modifiedAt,
                 seq: nil, subscriberCount: nil, hasContent: false))
         }
         return entries.sorted { $0.id < $1.id }
+    }
+
+    /// The name a stored document lists under: its label, else the name a device advertised it
+    /// with, and its id only when neither exists. **No listing may show the id while a name is
+    /// known**, because a device's connect prologue reads the listing before that device has
+    /// advertised and takes a changed name for a rename made elsewhere — an id there renamed the
+    /// user's file to a UUID, and that device then advertised the UUID stem as the name.
+    /// (`StoredDocInfo.name` falls back to the id itself when there is no label.)
+    private func listedName(stored info: StoredDocInfo) -> String {
+        if info.labelled { return info.name }
+        if let advertised = liveIndexEntry(info.docId)?.name, !Self.isIdItself(advertised, docId: info.docId) {
+            return advertised
+        }
+        return info.name
+    }
+
+    /// Whether `name` is just the document's id (in any letter case) — what a device advertises
+    /// for a file that was already renamed to its id. Never a label worth keeping.
+    static func isIdItself(_ name: String, docId: String) -> Bool {
+        name.caseInsensitiveCompare(docId) == .orderedSame
     }
 
     /// M2c-1: fold a connected device's advertisements into the live index. Multiple devices
@@ -750,11 +798,20 @@ public actor SessionManager {
         // local-only, and would keep offering that device as a fetch source for it — a stale
         // holder that sorts first is asked first and burns the full device timeout.
         dropDeviceFromHolders(deviceId)
+        var unlabelled: [DocAdvertisement] = []
         for ad in ads {
+            // A LABEL (set by `renameDoc`, a creating subscribe, or stored) wins over the name a
+            // device advertises: a device offline across a rename, one holding a locally suffixed
+            // "Plan 1", or one whose case-only rename failed re-advertises its OWN stem on every
+            // connect, and taking that would revert the rename for everybody. An advertisement
+            // only fills a missing label.
+            let label = store.name(of: ad.docId)
+            if label == nil, !Self.isIdItself(ad.name, docId: ad.docId) { unlabelled.append(ad) }
             if var existing = liveIndex[ad.docId] {
                 existing.holders.insert(deviceId)
+                if let label { existing.name = label }
                 if ad.modifiedAt >= existing.modifiedAt {
-                    existing.name = ad.docId
+                    if label == nil { existing.name = ad.name }
                     existing.sizeBytes = ad.sizeBytes
                     existing.modifiedAt = ad.modifiedAt
                     existing.thumbnail = ad.thumbnail
@@ -762,8 +819,23 @@ public actor SessionManager {
                 liveIndex[ad.docId] = existing
             } else {
                 liveIndex[ad.docId] = LiveDocEntry(
-                    name: ad.docId, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
+                    name: label ?? ad.name, sizeBytes: ad.sizeBytes, modifiedAt: ad.modifiedAt,
                     thumbnail: ad.thumbnail, holders: [deviceId])
+            }
+        }
+        // A STORED document without a label takes the advertised name — what restores the labels
+        // after `.names.json` was lost. A labelled document keeps its label: a name changes only
+        // through `renameDoc`.
+        // The stored ids are listed ONCE for the batch — per advertisement it was a directory
+        // listing per document, O(N²) on this actor for a device advertising a large library.
+        if !unlabelled.isEmpty, let stored = try? store.list().map(\.docId) {
+            let exact = Set(stored)
+            var folded: [String: String] = [:]
+            for id in stored.sorted() where folded[id.lowercased()] == nil { folded[id.lowercased()] = id }
+            for ad in unlabelled {
+                guard let docId = exact.contains(ad.docId) ? ad.docId : folded[ad.docId.lowercased()],
+                      store.name(of: docId) == nil else { continue }
+                try? store.setName(ad.name, forStoredId: docId)
             }
         }
         announceLiveIndexChange(from: before)
@@ -825,6 +897,45 @@ public actor SessionManager {
 
     public func liveDocs() -> [String: LiveDocEntry] { liveIndex }
 
+    // MARK: - names (labels)
+
+    /// A document's name is a LABEL: renaming changes it here and on every device (each renames its
+    /// own file), and changes nothing else — content, versions and subscriptions stay as they are.
+    /// Every status subscriber is told, the renaming device included: two devices renaming at once
+    /// then both end on the name applied last here, because everyone hears the renames in this order.
+    public func renameDoc(docId: String, name: String) async throws {
+        let docId = canonicalDocId(docId)
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else { throw DocumentStoreError.invalidDocId }
+        let stored = (try? store.exists(docId: docId)) ?? false
+        let advertised = liveIndexEntry(docId) != nil
+        guard stored || advertised || sessions[docId] != nil else { throw DocumentStoreError.notFound }
+        try store.setName(label, for: docId)
+        for key in liveIndex.keys where key.lowercased() == docId.lowercased() {
+            liveIndex[key]?.name = label
+        }
+        broadcastToStatusSubscribers(.docRenamed(docId: docId, name: label))
+    }
+
+    /// Label a document an agent is about to create (the create itself is an ordinary submit).
+    public func labelDocument(docId: String, name: String) {
+        try? store.setName(name, for: canonicalDocId(docId))
+    }
+
+    public func resolveDocRef(_ ref: String) async -> DocRefResolution {
+        // An id always wins over a name (`DocRefResolver`), so an EXACT id hit needs no listing —
+        // and that is every call from an agent holding an id, or on an open document.
+        if sessions[ref] != nil || store.storesExactly(docId: ref) { return .id(ref) }
+        var candidates = ((try? await listDocuments()) ?? []).map {
+            DocRefCandidate(id: $0.id, name: $0.name, modifiedAt: $0.modifiedAt)
+        }
+        // A session with nothing stored yet (a create in flight) is a document too.
+        for id in sessions.keys where !candidates.contains(where: { $0.id == id }) {
+            candidates.append(DocRefCandidate(id: id, name: store.name(of: id) ?? id, modifiedAt: Date()))
+        }
+        return DocRefResolver.resolve(ref, among: candidates)
+    }
+
     public func liveEntry(docId: String) -> LiveDocEntry? { liveIndexEntry(canonicalDocId(docId)) }
 
     /// Try each holder in turn until one hands over the bytes. Holders are equal — there is no
@@ -865,7 +976,7 @@ public actor SessionManager {
         // worst-case fetch (budget + one attempt) can legitimately approach it. So consult the
         // durable truth: if anything is stored now it WINS, and opening from the store loads it.
         if (try? store.exists(docId: docId)) != true {
-            try store.save(docId: docId, bytes: bytes)
+            try saveFetched(docId: docId, bytes: bytes)
         }
         return try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
     }
@@ -935,8 +1046,13 @@ public actor SessionManager {
     }
 
     private func emitStatus(docId: String, kind: String, seq: Int?, count: Int?) {
-        let message = ServerMessage.statusEvent(
-            payload: StatusPayload(docId: docId, kind: kind, seq: seq, subscriberCount: count))
+        broadcastToStatusSubscribers(.statusEvent(
+            payload: StatusPayload(docId: docId, kind: kind, seq: seq, subscriberCount: count)))
+    }
+
+    /// Every status subscriber, in the order this actor produces the messages. A subscriber whose
+    /// bounded buffer overflowed is dropped (its stream finished), exactly as for status events.
+    private func broadcastToStatusSubscribers(_ message: ServerMessage) {
         for (token, continuation) in statusSubscribers {
             switch continuation.yield(message) {
             case .dropped, .terminated:

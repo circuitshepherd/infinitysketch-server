@@ -261,7 +261,7 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, let createIfMissing):
+        case .subscribe(let docId, let createIfMissing, let name):
             // Always a full snapshot.
             // Per-document, so it names its document: a docId-less `error` here failed EVERY
             // pending subscribe on the connection, other documents' opens included.
@@ -272,7 +272,7 @@ actor Connection {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
                     acceptsStrippedDocuments: acceptsStrippedDocuments,
-                    connectionId: connectionId)
+                    connectionId: connectionId, name: name)
                 // The subscribe can take tens of seconds (a holder fetch), and this actor is
                 // reentrant: the connection may have closed meanwhile. `close()` has already
                 // released every subscription it knew of, so storing this one would leak it —
@@ -319,6 +319,14 @@ actor Connection {
                 // fire-and-forget), and a docId-less `error` would fail unrelated requests.
                 ServerLog.error("deleteDoc '\(docId)' failed: \(error)")
             }
+
+        case .renameDoc(let docId, let name):
+            // Answered on the status stream (`docRenamed`, to everyone including this peer) — the
+            // device clears its pending rename when that echo arrives. A refusal has no answer:
+            // the pending rename is re-sent at the next connect, which is harmless.
+            // `documentScope` orders it behind this document's pending subscribe.
+            do { try await manager.renameDoc(docId: docId, name: name) }
+            catch { ServerLog.verbose("[rename] refused for '\(docId)': \(error)") }
 
         case .op(let docId, let opId, let payload, let expectation):
             // `receivedAt` is stamped in `handle`, the moment the op is a whole message and before
@@ -671,6 +679,11 @@ extension ServerMessage {
             return .subscribeFailed(docId: docId, reason: reason)
         case .docDeleted:
             return .docDeleted(docId: docId)
+        case .docRenamed:
+            // Deliberately NOT re-addressed: a rename travels on the STATUS stream, which is not a
+            // per-document subscription and has no per-peer spelling to restore — every peer hears
+            // the one canonical id the server applied it under (ids are canonical `documentId`s).
+            return self
         default:
             return self
         }
@@ -681,9 +694,9 @@ extension ClientMessage {
     /// The document a message acts on, for the messages whose order per document matters.
     var documentScope: String? {
         switch self {
-        case .subscribe(let docId, _), .unsubscribe(let docId), .deleteDoc(let docId),
+        case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
              .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
-             .frame(let docId, _, _, _):
+             .frame(let docId, _, _, _), .renameDoc(let docId, _):
             return docId
         default:
             return nil

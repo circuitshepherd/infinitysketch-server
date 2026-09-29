@@ -4,7 +4,7 @@ import Testing
 
 /// The server's trash is bounded (spec 2026-07-27-server-trash-pruning-design.md).
 ///
-/// `delete` moves documents into `.trash/<docId>__<UTC-stamp>.infsketch` and nothing ever removed
+/// `delete` moves documents into `.trash/<docId>[ (<name>)]__<UTC-stamp>.infsketch` and nothing ever removed
 /// them; one dev store had 46 dead documents after a single session of testing. Retention is 30
 /// days, matching the iOS Recently Deleted window the app's own delete already lands in.
 ///
@@ -153,5 +153,72 @@ struct TrashPruningTests {
         _ = DirectoryDocumentStore(directory: dir)
 
         #expect(trashNames(dir).isEmpty)
+    }
+
+    /// A trashed document keeps its NAME: the id alone says nothing to a person looking for a
+    /// document they deleted, and the label is dropped with the document. The name rides in the
+    /// trashed file's name, before the stamp, so pruning still reads the stamp from the right.
+    @Test func aTrashedDocumentKeepsItsName() throws {
+        let (store, dir) = try makeStore()
+        try store.save(docId: "ID-7", bytes: Data("x".utf8))
+        try store.setName("Q3: Plan / draft", for: "ID-7")
+
+        try store.delete(docId: "ID-7")
+
+        let names = trashNames(dir)
+        #expect(names.count == 1)
+        let basename = (try #require(names.first) as NSString).deletingPathExtension
+        let parsed = try #require(DirectoryDocumentStore.trashedDocument(fromTrashedBasename: basename))
+        #expect(parsed.docId == "ID-7")
+        #expect(parsed.name == "Q3_ Plan _ draft")
+        #expect(basename.hasPrefix("ID-7 (Q3_ Plan _ draft)__"))
+        #expect(DirectoryDocumentStore.trashDate(fromTrashedBasename: basename) != nil)
+    }
+
+    @Test func anUnnamedTrashedDocumentParsesAsBefore() throws {
+        let parsed = try #require(DirectoryDocumentStore.trashedDocument(
+            fromTrashedBasename: "Old__2020-01-01_00-00-00-000"))
+        #expect(parsed.docId == "Old")
+        #expect(parsed.name == nil)
+    }
+
+    @Test func aNamedDocumentTrashedBeyondTheWindowIsRemoved() throws {
+        let (store, dir) = try makeStore()
+        try plantTrashed("ID-1 (Ancient)__2020-01-01_00-00-00-000", in: dir)
+        try store.save(docId: "Fresh", bytes: Data("x".utf8))
+
+        try store.delete(docId: "Fresh")
+
+        #expect(!trashNames(dir).contains { $0.hasPrefix("ID-1 (Ancient)__") })
+    }
+
+    /// A file name is limited in BYTES (255 on ext4 and APFS), not Characters: 100 emoji are 400
+    /// bytes. The move into the trash must still succeed — its fallback used to REMOVE the document.
+    @Test(arguments: [
+        String(repeating: "😀", count: 100),
+        String(repeating: "設計図の最終版", count: 12),
+    ])
+    func aLongMultibyteNameStillLandsInTheTrash(name: String) throws {
+        let (store, dir) = try makeStore()
+        try store.save(docId: "ID-8", bytes: Data("x".utf8))
+        try store.setName(name, for: "ID-8")
+
+        try store.delete(docId: "ID-8")
+
+        let names = trashNames(dir)
+        #expect(names.count == 1, "the document must be in the trash, not removed: \(names)")
+        let trashed = try #require(names.first)
+        #expect(trashed.utf8.count <= 255)
+        let parsed = DirectoryDocumentStore.trashedDocument(
+            fromTrashedBasename: (trashed as NSString).deletingPathExtension)
+        #expect(parsed?.docId == "ID-8")
+        #expect(parsed?.name.map { name.hasPrefix($0) } == true, "a prefix of the name, cut on a Character")
+    }
+
+    /// The readable part is bounded by UTF-8 bytes and cut on a Character boundary.
+    @Test func theReadableNameIsBoundedInBytes() {
+        let stem = DirectoryDocumentStore.trashedStem(docId: "ID", name: String(repeating: "👨‍👩‍👧", count: 40))
+        #expect(stem.utf8.count <= "ID ()".utf8.count + DirectoryDocumentStore.trashNameByteLimit)
+        #expect(stem.hasSuffix("👨‍👩‍👧)"))
     }
 }

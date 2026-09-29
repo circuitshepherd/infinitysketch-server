@@ -27,6 +27,10 @@ enum AgentGuide {
 
     - **`list_docs`** — what exists. `open: true` means a device has it on screen, so your writes \
       land live on the user's canvas while they watch.
+    - **A document is its id; its name is a label.** Every tool takes the id or, when no other \
+      document has that name, the name. Two documents may share a name — then a name is refused \
+      `ambiguousName` with the ids to choose from. `list_docs` gives both. `create_doc(name)` \
+      returns the new id.
     - **`render_sketch`** — look at it. Your most useful tool by a distance: propose, render, \
       check, adjust. Its metadata carries the paper colour, every grid, and the viewport. \
       **`scale` is pixels per canvas point, and the image comes back INLINE — so its size is a \
