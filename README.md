@@ -116,7 +116,8 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 Every tag so far speaks wire 11, so for SYNC any of them pairs with InfinitySketch 2.1, 2.2 and 2.3
 — prefer the newest. **The next server release speaks wire 12** (unreleased as of this writing:
 `helloAck` names the server instance, per-document refusals replace connection-wide errors, a large
-op-spec rides the chunked payload), so it pairs only with the app release that ships beside it. **The agent tools pair by version:** v1.3.0's tools speak the app's Properties
+op-spec rides the chunked payload; documents are addressed by `documentId`; a pre-identity
+documents folder is migrated at first start (see `docs/protocol.md`)), so it pairs only with the app release that ships beside it. **The agent tools pair by version:** v1.3.0's tools speak the app's Properties
 panel widths (`drawnWidth`, `toolWidth` — `stampWidth` is refused by name), take a text anchor and
 add `reset_element_transforms`, which need InfinitySketch 2.3; with an older app an agent's widths
 and anchors are not understood. InfinitySketch 2.3 in turn needs v1.3.0 for its agent tools (with an
