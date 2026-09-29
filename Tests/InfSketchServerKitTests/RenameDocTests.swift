@@ -65,6 +65,51 @@ import InfSketchWire
         #expect(store.name(of: "ID-5") == "Recovered")
     }
 
+    /// A document the server FETCHES from its holder — an agent's read, or a browser watching it —
+    /// is stored under its id and must keep the name it was advertised with. Stored without a
+    /// label it listed as its id: an agent reaching for it by name got `unknownDoc` or
+    /// `sourceNotFound` until the device's next advertisement, and the device's connect prologue
+    /// read the id as the document's new name and RENAMED THE USER'S FILE to a UUID (measured
+    /// 2026-09-29 by e2e-watcher-frames and e2e-large-op-spec).
+    @Test func aDocumentFetchedForAnAgentKeepsItsAdvertisedName() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ID-7", name: "Held", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        await manager.setContentProvider { _, _ in Fixtures.docBytes }
+        #expect(await manager.currentBytesOrFetch(docId: "ID-7") == Fixtures.docBytes)
+        #expect(store.name(of: "ID-7") == "Held")
+        #expect(try await manager.listDocuments().first { $0.id == "ID-7" }?.name == "Held")
+        #expect(await manager.resolveDocRef("Held") == .id("ID-7"))
+    }
+
+    @Test func aDocumentFetchedForAWatcherKeepsItsAdvertisedName() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ID-8", name: "Watched", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        await manager.setContentProvider { _, _ in Fixtures.docBytes }
+        let result = try await manager.watch(docId: "ID-8")
+        await manager.unwatch(docId: "ID-8", token: result.token)
+        #expect(store.name(of: "ID-8") == "Watched")
+        #expect(try await manager.listDocuments().first { $0.id == "ID-8" }?.name == "Watched")
+    }
+
+    /// A label the document already has wins over the advertisement, as everywhere else.
+    @Test func aFetchDoesNotReplaceAnExistingLabel() async throws {
+        let store = DirectoryDocumentStore(directory: try VersionFixtures.temporaryDirectory())
+        try store.setName("Renamed", for: "ID-6")
+        let manager = SessionManager(store: store)
+        await manager.applyAdvertisements(
+            [DocAdvertisement(docId: "ID-6", name: "Stale", modifiedAt: Date(), sizeBytes: 1, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "ipad")
+        await manager.setContentProvider { _, _ in Fixtures.docBytes }
+        _ = await manager.currentBytesOrFetch(docId: "ID-6")
+        #expect(store.name(of: "ID-6") == "Renamed")
+    }
+
     @Test func aRefResolvesThroughTheManager() async throws {
         let (manager, _) = try manager()
         #expect(await manager.resolveDocRef("Old") == .id("ID-1"))

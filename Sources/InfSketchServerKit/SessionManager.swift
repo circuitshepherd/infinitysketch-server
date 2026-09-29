@@ -688,8 +688,21 @@ public actor SessionManager {
         //     reaches the store through a `DocumentSession`, and opening one requires this actor) —
         //     so check-through-save is one uncontended actor turn.
         if let durable = try? store.load(docId: docId) { return durable }
-        try? store.save(docId: docId, bytes: bytes)
+        try? saveFetched(docId: docId, bytes: bytes)
         return bytes
+    }
+
+    /// Persists bytes fetched from a holder, LABELLED with the name the document was advertised
+    /// under. A stored document without a label lists as its id, so without this an agent that had
+    /// just read a document by name could not find it by that name again, and a device's connect
+    /// prologue read the id as the document's new name and renamed the user's file to a UUID —
+    /// until the device's next advertisement happened to restore the label. A label the document
+    /// already has is kept: a name changes only through `renameDoc`.
+    private func saveFetched(docId: String, bytes: Data) throws {
+        try store.save(docId: docId, bytes: bytes)
+        if store.name(of: docId) == nil, let name = liveIndexEntry(docId)?.name {
+            try? store.setName(name, for: docId)
+        }
     }
 
     /// True when the only thing here is an EMPTY session with nothing durable behind it — the
@@ -935,7 +948,7 @@ public actor SessionManager {
         // worst-case fetch (budget + one attempt) can legitimately approach it. So consult the
         // durable truth: if anything is stored now it WINS, and opening from the store loads it.
         if (try? store.exists(docId: docId)) != true {
-            try store.save(docId: docId, bytes: bytes)
+            try saveFetched(docId: docId, bytes: bytes)
         }
         return try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit)
     }
