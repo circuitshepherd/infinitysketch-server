@@ -35,7 +35,9 @@ final class VersionWork: @unchecked Sendable {
         let key = docId.lowercased()
         lock.lock(); defer { lock.unlock() }
         if let queue = queues[key] { return queue }
-        let queue = DispatchQueue(label: "infsketch.versions.\(key)", qos: .utility)
+        // `.userInitiated`, not lower: a subscribe (itself `.userInitiated`) WAITS on this queue for
+        // its base, and a lower-QoS queue under load would make it wait behind background work.
+        let queue = DispatchQueue(label: "infsketch.versions.\(key)", qos: .userInitiated)
         queues[key] = queue
         return queue
     }

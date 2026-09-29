@@ -262,13 +262,22 @@ actor DocumentSession {
         // version as `pushed` already, and it ignores the echo of its own op.
         let receivers = Set(subscriberDevices.filter { $0.key != submitter }.values)
         let docId = self.docId
+        let queuedAt = ContinuousClock.now
         versionWork.enqueue(docId) { versions in
+            let started = ContinuousClock.now
+            let hash8 = VersionHash.hex(digest).prefix(8)
             do {
                 try versions.recordWrite(docId: docId, bytes: newBytes, digest: digest, pusher: pusher,
                                          deliveredTo: receivers, now: Date())
             } catch {
-                ServerLog.error("could not keep version \(VersionHash.hex(digest).prefix(12)) of '\(docId)': \(error)")
+                ServerLog.error("could not keep version \(hash8) of '\(docId)': \(error)")
             }
+            // The queue's backlog is only visible from here: a wait that keeps growing means writes
+            // arrive faster than they can be kept (docs/BACKLOG.md).
+            func ms(_ d: Duration) -> String {
+                String(format: "%.1f", Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15)
+            }
+            ServerLog.verbose("[versions] kept \(docId) \(hash8) waited \(ms(started - queuedAt)) ms, took \(ms(ContinuousClock.now - started)) ms")
         }
     }
 

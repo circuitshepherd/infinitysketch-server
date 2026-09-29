@@ -285,9 +285,9 @@ import InfSketchWire
         await manager.drainVersionWork(docId: "doc")
         let work = try #require(await manager.versionWorkForTesting)
         work.suspend("doc")
-        _ = await manager.submit(docId: "doc", opId: "late",
-                                 payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "late")),
-                                 holderDeviceId: "ipad")
+        #expect(await manager.submit(docId: "doc", opId: "late",
+                                     payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "late")),
+                                     holderDeviceId: "ipad") == .accepted(seq: 1))
         try await manager.deleteDoc(docId: "doc")
         work.resume("doc")
         await manager.drainVersionWork(docId: "doc")
