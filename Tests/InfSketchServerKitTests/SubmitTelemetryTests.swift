@@ -55,6 +55,30 @@ extension SyncTelemetryTests {
         }
     }
 
+    /// Keeping a version is its own phase, not part of `stripMs` — and it is only measured where
+    /// the server keeps versions at all.
+    @Test func keepingAVersionIsItsOwnPhase() async throws {
+        try await withCapture(enabled: true) { captured in
+            let dir = try VersionFixtures.temporaryDirectory()
+            let store = DirectoryDocumentStore(directory: dir)
+            let kept = "telemetry-versioned", plain = "telemetry-unversioned"
+            try store.save(docId: kept, bytes: Data("{}".utf8))
+            try store.save(docId: plain, bytes: Data("{}".utf8))
+            let work = VersionWork(store: DirectoryVersionStore(directory: dir))
+            let withVersions = try DocumentSession(docId: kept, store: store, bufferLimit: 16, versionWork: work)
+            let without = try DocumentSession(docId: plain, store: store, bufferLimit: 16)
+            let doc = Data("{\"a\":1}".utf8)
+            _ = await withVersions.submit(opId: "OP-V", payload: OpPayload(type: "fullDoc", data: doc))
+            _ = await without.submit(opId: "OP-P", payload: OpPayload(type: "fullDoc", data: doc))
+            await work.drain(kept)
+
+            let versioned = try #require(captured.rows(doc: kept).first)
+            #expect(versioned["versionMs"] as? Double != nil)
+            #expect(versioned["stripMs"] != nil)
+            #expect(try #require(captured.rows(doc: plain).first)["versionMs"] == nil)
+        }
+    }
+
     /// A refused write is as interesting as an accepted one — a CAS refusal under load IS what
     /// contention looks like from here — and it must be visibly distinct from a slow success.
     @Test func aRejectedWriteEmitsItsReasonAndNoSave() async throws {

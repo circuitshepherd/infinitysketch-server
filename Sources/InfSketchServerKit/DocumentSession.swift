@@ -204,8 +204,9 @@ actor DocumentSession {
     /// render surface already uses.
     static let maxWatcherFramePx = 2048
     private var watcherFramePx: [UUID: Int] = [:]
-    /// The server's kept versions (spec §1); nil for a store that keeps none (tests, in-memory).
-    private let versions: (any VersionStore)?
+    /// The server's kept versions (spec §1), reached ONLY through this document's FIFO queue
+    /// (`VersionWork`); nil for a server that keeps none (tests, in-memory).
+    private let versionWork: VersionWork?
     /// Which DEVICE each subscription belongs to, for the `delivered` holds a broadcast moves.
     /// A subscription whose connection said no deviceId in its hello holds nothing.
     private var subscriberDevices: [UUID: String] = [:]
@@ -225,37 +226,49 @@ actor DocumentSession {
     /// `docId` must be the CANONICAL spelling (the one the store saves under): the version store
     /// keys `.versions/<docId>` verbatim. `SessionManager` only ever constructs sessions that way.
     init(docId: String, store: any DocumentStore, bufferLimit: Int, bytes: Data,
-         versions: (any VersionStore)? = nil) {
+         versionWork: VersionWork? = nil) {
         self.docId = docId
         self.store = store
         self.bufferLimit = bufferLimit
         self.bytes = bytes
-        self.versions = versions
+        self.versionWork = versionWork
     }
 
     /// Loads the document from the store (the pre-existing path).
     init(docId: String, store: any DocumentStore, bufferLimit: Int,
-         versions: (any VersionStore)? = nil) throws {
+         versionWork: VersionWork? = nil) throws {
         self.init(docId: docId, store: store, bufferLimit: bufferLimit,
-                  bytes: try store.load(docId: docId), versions: versions)
+                  bytes: try store.load(docId: docId), versionWork: versionWork)
     }
 
     /// Keep this write as a version, and move the transit holds it implies (spec §1; `HoldSlot`).
-    /// Synchronous file work in the same actor turn as `store.save`, like the save itself: the single
-    /// writer per document is what keeps "the current version is kept" true.
+    /// QUEUED, not done here (`VersionWork`): the caller queues it in the same actor turn as
+    /// `store.save`, before the write's echo or broadcast goes out, so every later job on the
+    /// document's queue — a `baseSaved` answering that echo included — runs after it.
+    ///
+    /// The `delivered` holds are moved for every subscriber the broadcast is ABOUT to reach, before
+    /// it is sent. A subscriber the broadcast then drops (its buffer full, or its stream already
+    /// gone) keeps a `delivered` hold on a version it never received — accepted: the version it
+    /// really has is still held by its OWN `pushed`/`base` holds or is within the recent eight, so
+    /// the worst case is that after eight more writes its subscribe finds no base and takes the
+    /// union, which never loses content. The hold itself moves on with its next delivery.
+    ///
+    /// A failed record is logged and the write stands: a version not kept only means a later
+    /// subscribe naming it gets no base (a union), never a refused write.
     private func keepVersion(_ newBytes: Data, digest: Data, pusher: String?, submitter: UUID?) {
-        guard let versions, !newBytes.isEmpty else { return }
-        let hash = VersionHash.hex(digest)
-        do { try versions.record(docId: docId, bytes: newBytes, hash: hash) }
-        catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)"); return }
-        let now = Date()
-        if let pusher { versions.setHold(docId: docId, deviceId: pusher, slot: .pushed, hash: hash, now: now) }
+        guard let versionWork, !newBytes.isEmpty else { return }
         // One hold per DEVICE, not per subscription: a device with two subscriptions (two
         // connections) is moved once. The writer's own subscription is skipped — it holds this
         // version as `pushed` already, and it ignores the echo of its own op.
         let receivers = Set(subscriberDevices.filter { $0.key != submitter }.values)
-        for device in receivers {
-            versions.setHold(docId: docId, deviceId: device, slot: .delivered, hash: hash, now: now)
+        let docId = self.docId
+        versionWork.enqueue(docId) { versions in
+            do {
+                try versions.recordWrite(docId: docId, bytes: newBytes, digest: digest, pusher: pusher,
+                                         deliveredTo: receivers, now: Date())
+            } catch {
+                ServerLog.error("could not keep version \(VersionHash.hex(digest).prefix(12)) of '\(docId)': \(error)")
+            }
         }
     }
 
@@ -326,11 +339,17 @@ actor DocumentSession {
         // The snapshot this subscriber is about to receive must be a kept version: a document that
         // predates the store, or one a holder fetch or the manager put on disk without a session,
         // has none yet. Cheap when it already is (one rebuild to check it is healthy).
-        if let versions, !bytes.isEmpty {
-            let hash = VersionDigest.hex(of: bytes)
-            do { try versions.ensureCurrent(docId: docId, bytes: bytes, hash: hash) }
-            catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)") }
-            if let deviceId { versions.setHold(docId: docId, deviceId: deviceId, slot: .delivered, hash: hash, now: Date()) }
+        // Queued (`VersionWork`), so it runs before any base lookup or `baseSaved` that follows.
+        if let versionWork, !bytes.isEmpty {
+            let snapshot = bytes, docId = self.docId
+            versionWork.enqueue(docId) { versions in
+                let hash = VersionDigest.hex(of: snapshot)
+                do { try versions.ensureCurrent(docId: docId, bytes: snapshot, hash: hash) }
+                catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)") }
+                if let deviceId {
+                    versions.setHold(docId: docId, deviceId: deviceId, slot: .delivered, hash: hash, now: Date())
+                }
+            }
         }
         // A reconnecting app must learn it is already watched: deliver the
         // current watcher count as this subscription's first event.
@@ -468,6 +487,7 @@ actor DocumentSession {
         var rebuildEnded: ContinuousClock.Instant?
         var casEnded: ContinuousClock.Instant?
         var saveEnded: ContinuousClock.Instant?
+        var versionTook: Double?
         var broadcastBytes: Int?
         func millis(_ from: ContinuousClock.Instant, _ to: ContinuousClock.Instant) -> Double {
             Double((to - from).components.attoseconds) / 1e15
@@ -486,7 +506,9 @@ actor DocumentSession {
                 rebuildMs: rebuildEnded.map { millis(began, $0) },
                 casMs: casEnded.map { millis(rebuildEnded ?? began, $0) },
                 saveMs: saveEnded.map { millis(casEnded ?? began, $0) },
-                stripMs: outcome == "accepted" ? stripBegan.map { millis($0, ended) } : nil,
+                stripMs: outcome == "accepted"
+                    ? stripBegan.map { millis($0, ended) - (versionTook ?? 0) } : nil,
+                versionMs: versionTook,
                 totalMs: millis(began, ended),
                 outcome: outcome, subscribers: subscribers.count,
                 broadcastBytes: broadcastBytes, writer: writer))
@@ -638,7 +660,9 @@ actor DocumentSession {
         // Kept BEFORE anyone hears of the write: the echo is the pusher's ack and the broadcast a
         // peer's delivery, and either may be answered at once with a `baseSaved` naming this
         // version — which must find it kept (and held), or it would release the device's hold.
+        let versionBegan = ContinuousClock.now
         keepVersion(newBytes, digest: newDigest, pusher: holderDeviceId, submitter: submitter)
+        if versionWork != nil { versionTook = millis(versionBegan, ContinuousClock.now) }
         // The REBUILT bytes, never the payload that arrived. Forwarding a `strippedDoc` here would
         // hand every other subscriber a binary blob they have no idea how to read: measured, a
         // second device took 210 bytes of `StrippedDocument` as its document, failed to decode it,
@@ -673,7 +697,9 @@ actor DocumentSession {
         if (try? store.exists(docId: docId)) == true {
             try store.delete(docId: docId)
         }
-        versions?.removeAll(docId: docId)
+        // Behind every record already queued for this document — and `deleted` refuses every later
+        // write — so nothing can re-create its versions afterwards.
+        versionWork?.enqueue(docId) { [docId] versions in versions.removeAll(docId: docId) }
         announceDeleted()
     }
 

@@ -39,8 +39,9 @@ public enum ContentFetchError: Error, Equatable {
 public actor SessionManager {
     private let store: any DocumentStore
     private let config: SessionConfig
-    /// The server's kept versions (spec §1), handed to every session; nil keeps none.
-    private let versions: (any VersionStore)?
+    /// The server's kept versions (spec §1), reached only through each document's FIFO queue
+    /// (`VersionWork`), which every session shares; nil keeps none.
+    private let versionWork: VersionWork?
     private var sessions: [String: DocumentSession] = [:]
     /// token → the docId and the SESSION it subscribed to. By session, not docId alone: a delete
     /// ends one session and a later open makes another under the same docId, and a release that
@@ -78,7 +79,7 @@ public actor SessionManager {
                 versions: (any VersionStore)? = nil) {
         self.store = store
         self.config = config
-        self.versions = versions
+        self.versionWork = versions.map(VersionWork.init(store:))
         self.serverId = store.persistentServerId() ?? UUID().uuidString
     }
 
@@ -279,7 +280,7 @@ public actor SessionManager {
             let opened: DocumentSession
             do {
                 opened = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit,
-                                        versions: versions)
+                                        versionWork: versionWork)
             } catch DocumentStoreError.notFound where createIfMissing {
                 // Mirror clients push docs the server has never seen: open an
                 // in-memory empty session; the first op persists real bytes.
@@ -309,7 +310,7 @@ public actor SessionManager {
                 // auto-union path) — a design decision, not a drive-by hardening fix.
                 opened = DocumentSession(docId: docId, store: store,
                                          bufferLimit: config.outboundBufferLimit, bytes: Data(),
-                                         versions: versions)
+                                         versionWork: versionWork)
             } catch DocumentStoreError.notFound {
                 // M2c-1: the server holds no bytes, but a connected device does — pull them from
                 // any holder, PERSIST them (the doc is now an ordinary content doc, and it stays),
@@ -374,17 +375,27 @@ public actor SessionManager {
     /// then takes the union, never a refusal (spec §6).
     private func withBase(_ result: SubscribeResult, docId: String, baseHash: String?, fileHash: String?,
                           wantBase: Bool) async -> SubscribeResult {
-        guard let versions,
+        guard let versionWork,
               case .subscribed(let id, let seq, .inline(let snapshot), _, _) = result.snapshot,
               !snapshot.isEmpty else { return result }
-        guard let chosen = [fileHash, baseHash].compactMap({ $0 })
-            .first(where: { versions.contains(docId: docId, hash: $0) }) else { return result }
+        let candidates = [fileHash, baseHash].compactMap { $0 }
+        guard !candidates.isEmpty else { return result }
         // Off this actor: loading a version rebuilds (and hashes) a whole document, and the bundle
-        // strips the base against the snapshot, which parses both. A version that cannot be rebuilt
-        // (a missing blob) is answered exactly as one the server does not keep — confirming a base
-        // the device might later have to ask for would be a promise this server cannot keep.
+        // strips the base against the snapshot, which parses both. The lookup goes through the
+        // document's version queue, so it sees every write accepted before this subscribe.
+        //
+        // The candidates are tried IN ORDER until one actually LOADS: a version that cannot be
+        // rebuilt (a missing blob) is answered exactly as one the server does not keep — confirming
+        // a base the device might later have to ask for would be a promise this server cannot
+        // keep — and the next candidate may still be whole.
         let reply: ServerMessage? = await Task.detached(priority: .userInitiated) {
-            guard let base = versions.load(docId: docId, hash: chosen),
+            let found: (hash: String, bytes: Data)? = await versionWork.run(docId) { versions in
+                for hash in candidates {
+                    if let bytes = versions.load(docId: docId, hash: hash) { return (hash, bytes) }
+                }
+                return nil
+            }
+            guard let (chosen, base) = found,
                   let baseDigest = VersionHash.digest(hex: chosen) else { return nil }
             guard wantBase else {
                 return .subscribed(docId: id, seq: seq, snapshot: .inline(snapshot), baseHash: chosen)
@@ -404,16 +415,30 @@ public actor SessionManager {
     /// this server does not have (deleted while the device was away) gets NOTHING — no folder, no
     /// hold (review focus 4).
     public func noteBaseSaved(docId: String, versionHash: String, deviceId: String) {
-        guard let versions else { return }
+        guard let versionWork else { return }
         // The session's own key first — that is the spelling its writes were kept under — else the
         // stored spelling. Never the caller's: `.versions/<docId>` is keyed verbatim.
         let canonical = canonicalDocId(docId)
         let docId = sessionMatching(canonical)?.key ?? canonical
         guard ((try? store.exists(docId: docId)) ?? false) || sessions[docId] != nil else { return }
-        if !versions.setHold(docId: docId, deviceId: deviceId, slot: .base, hash: versionHash, now: Date()) {
-            ServerLog.verbose("[versions] \(deviceId) based '\(docId)' on \(versionHash.prefix(12)), which is not kept — no base held")
+        // Queued behind every record of this document, so a `baseSaved` answering a write's echo
+        // finds that write's version kept.
+        versionWork.enqueue(docId) { versions in
+            if !versions.setHold(docId: docId, deviceId: deviceId, slot: .base, hash: versionHash, now: Date()) {
+                ServerLog.verbose("[versions] \(deviceId) based '\(docId)' on \(versionHash.prefix(12)), which is not kept — no base held")
+            }
         }
     }
+
+    /// Wait until every version job queued so far for `docId` has run. For tests, which read the
+    /// version store directly afterwards.
+    func drainVersionWork(docId: String) async {
+        await versionWork?.drain(canonicalDocId(docId))
+    }
+
+    #if DEBUG
+    var versionWorkForTesting: VersionWork? { versionWork }
+    #endif
 
     /// The connections holding a subscription to `docId`'s CURRENT session — the devices that have
     /// the document open. A subscription left on a session a delete already ended does not count.
@@ -512,7 +537,7 @@ public actor SessionManager {
             try await session.deleteFromStore()
         } else if hadContent {
             try store.delete(docId: docId)
-            versions?.removeAll(docId: docId)
+            versionWork?.enqueue(docId) { [docId] versions in versions.removeAll(docId: docId) }
         } else {
             // Advertised only: no bytes to trash, but a `renameDoc` label may be stored — and a
             // label outranks every later advertisement, so left behind it would name whatever is
@@ -541,7 +566,7 @@ public actor SessionManager {
             let opened: DocumentSession
             do {
                 opened = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit,
-                                        versions: versions)
+                                        versionWork: versionWork)
             } catch DocumentStoreError.notFound {
                 // The document a user reaches for first is one the DEVICE holds and has not opened
                 // during this server's life: advertised, on the overview, and not in the store.
@@ -657,11 +682,11 @@ public actor SessionManager {
             let session: DocumentSession
             do {
                 session = try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit,
-                                        versions: versions)
+                                        versionWork: versionWork)
             } catch DocumentStoreError.notFound where createIfMissing {
                 session = DocumentSession(docId: docId, store: store,
                                           bufferLimit: config.outboundBufferLimit, bytes: Data(),
-                                         versions: versions)
+                                         versionWork: versionWork)
             } catch {
                 return .rejected(.reject(docId: docId, opId: opId, reason: "unknownDoc", seq: 0))
             }
@@ -1046,7 +1071,7 @@ public actor SessionManager {
             try saveFetched(docId: docId, bytes: bytes)
         }
         return try DocumentSession(docId: docId, store: store, bufferLimit: config.outboundBufferLimit,
-                                        versions: versions)
+                                        versionWork: versionWork)
     }
 
     private func fetchFromHolders(docId: String) async throws -> Data {

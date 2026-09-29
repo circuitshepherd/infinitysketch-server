@@ -21,10 +21,19 @@ import InfSketchWire
         try await manager.subscribe(docId: "doc", deviceId: "writer")
     }
 
+    /// Waits for the write's version job too (`VersionWork`), since the tests then read the store.
     private func push(_ manager: SessionManager, _ bytes: Data, from device: String?,
                       docId: String = "doc") async -> SubmitOutcome {
-        await manager.submit(docId: docId, opId: UUID().uuidString, payload: OpPayload(type: "fullDoc", data: bytes),
-                             holderDeviceId: device)
+        let outcome = await manager.submit(docId: docId, opId: UUID().uuidString,
+                                           payload: OpPayload(type: "fullDoc", data: bytes),
+                                           holderDeviceId: device)
+        await manager.drainVersionWork(docId: docId)
+        return outcome
+    }
+
+    private func noteBase(_ manager: SessionManager, _ hash: String, device: String, docId: String = "doc") async {
+        await manager.noteBaseSaved(docId: docId, versionHash: hash, deviceId: device)
+        await manager.drainVersionWork(docId: docId)
     }
 
     @Test func anAcceptedPushIsKeptAndHeldForItsDevice() async throws {
@@ -125,12 +134,12 @@ import InfSketchWire
         let writer = try await open(manager)
         let first = VersionFixtures.document(marker: "first")
         _ = await push(manager, first, from: nil)
-        await manager.noteBaseSaved(docId: "doc", versionHash: VersionDigest.hex(of: first), deviceId: "ipad")
+        await noteBase(manager, VersionDigest.hex(of: first), device: "ipad")
         #expect(versions.holds(docId: "doc")["ipad"]?.base == VersionDigest.hex(of: first))
         for i in 0..<12 { _ = await push(manager, VersionFixtures.document(marker: "w\(i)"), from: "mac") }
         #expect(versions.contains(docId: "doc", hash: VersionDigest.hex(of: first)))
         let gone = VersionDigest.hex(of: VersionFixtures.document(marker: "w0"))
-        await manager.noteBaseSaved(docId: "doc", versionHash: gone, deviceId: "ipad")
+        await noteBase(manager, gone, device: "ipad")
         #expect(versions.holds(docId: "doc")["ipad"]?.base == nil)
         #expect(versions.contains(docId: "doc", hash: gone) == false)
         #expect(versions.contains(docId: "doc", hash: VersionDigest.hex(of: first)) == false)
@@ -146,7 +155,7 @@ import InfSketchWire
     /// Review focus 4.
     @Test func baseSavedForAnUnknownDocumentCreatesNothing() async throws {
         let (manager, _, dir) = try setUp()
-        await manager.noteBaseSaved(docId: "deleted-long-ago", versionHash: String(repeating: "e", count: 64), deviceId: "ipad")
+        await noteBase(manager, String(repeating: "e", count: 64), device: "ipad", docId: "deleted-long-ago")
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".versions/deleted-long-ago").path) == false)
     }
 
@@ -155,6 +164,7 @@ import InfSketchWire
         try await open(manager)
         _ = await push(manager, VersionFixtures.document(marker: "v1"), from: nil)
         try await manager.deleteDoc(docId: "doc")
+        await manager.drainVersionWork(docId: "doc")
         #expect(versions.keptHashes(docId: "doc").isEmpty)
     }
 
@@ -163,8 +173,11 @@ import InfSketchWire
         let (manager, versions, dir) = try setUp()
         _ = await manager.submitOpeningSession(docId: "doc", createIfMissing: false, opId: "x",
                                                payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "v1")))
+        await manager.drainVersionWork(docId: "doc")
+        #expect(!versions.keptHashes(docId: "doc").isEmpty)
         let restarted = SessionManager(store: DirectoryDocumentStore(directory: dir), versions: versions)
         try await restarted.deleteDoc(docId: "doc")
+        await restarted.drainVersionWork(docId: "doc")
         #expect(versions.keptHashes(docId: "doc").isEmpty)
     }
 
@@ -173,7 +186,7 @@ import InfSketchWire
         try await open(manager)
         let v1 = VersionFixtures.document(marker: "v1")
         _ = await push(manager, v1, from: "ipad")
-        await manager.noteBaseSaved(docId: "doc", versionHash: VersionDigest.hex(of: v1), deviceId: "ipad")
+        await noteBase(manager, VersionDigest.hex(of: v1), device: "ipad")
         let restarted = SessionManager(store: DirectoryDocumentStore(directory: dir),
                                        versions: DirectoryVersionStore(directory: dir))
         let result = try await restarted.subscribe(docId: "doc", deviceId: "ipad",
@@ -187,6 +200,7 @@ import InfSketchWire
         let v1 = VersionFixtures.document(marker: "agent")
         _ = await manager.submitOpeningSession(docId: "doc", createIfMissing: false, opId: "x",
                                                payload: OpPayload(type: "fullDoc", data: v1))
+        await manager.drainVersionWork(docId: "doc")
         #expect(versions.contains(docId: "doc", hash: VersionDigest.hex(of: v1)))
         #expect(versions.holds(docId: "doc").isEmpty)
     }
@@ -198,7 +212,7 @@ import InfSketchWire
         _ = try await manager.subscribe(docId: "DOC", deviceId: "ipad")
         let v1 = VersionFixtures.document(marker: "v1")
         _ = await push(manager, v1, from: "ipad", docId: "Doc")
-        await manager.noteBaseSaved(docId: "dOc", versionHash: VersionDigest.hex(of: v1), deviceId: "ipad")
+        await noteBase(manager, VersionDigest.hex(of: v1), device: "ipad", docId: "dOc")
         #expect(versions.contains(docId: "doc", hash: VersionDigest.hex(of: v1)))
         #expect(versions.holds(docId: "doc")["ipad"]?.base == VersionDigest.hex(of: v1))
         let names = try FileManager.default.contentsOfDirectory(
@@ -208,5 +222,77 @@ import InfSketchWire
                                                 baseHash: VersionDigest.hex(of: v1))
         guard case .subscribed(_, _, _, let baseHash, _) = again.snapshot else { Issue.record("no reply"); return }
         #expect(baseHash == VersionDigest.hex(of: v1))
+    }
+
+    // MARK: - fix round 1
+
+    /// Item 2: a `fileHash` whose version lost a blob is skipped, and the intact `baseHash` answers.
+    @Test func aDamagedFileVersionFallsBackToTheIntactBase() async throws {
+        let (manager, _, dir) = try setUp()
+        let writer = try await open(manager)
+        let blobs = dir.appendingPathComponent(DirectoryVersionStore.blobsDirectoryName)
+        func blobNames() throws -> Set<String> {
+            Set((try? FileManager.default.contentsOfDirectory(atPath: blobs.path)) ?? [])
+        }
+        let v1 = VersionFixtures.document(marker: "v1", images: [(UUID(), VersionFixtures.image(seed: 81))])
+        let v2 = VersionFixtures.document(marker: "v2", images: [(UUID(), VersionFixtures.image(seed: 82))])
+        _ = await push(manager, v1, from: nil)
+        let v1Blobs = try blobNames()
+        _ = await push(manager, v2, from: nil)
+        _ = await push(manager, VersionFixtures.document(marker: "v3"), from: nil)
+        #expect(!v1Blobs.isEmpty)
+        for name in v1Blobs { try FileManager.default.removeItem(at: blobs.appendingPathComponent(name)) }
+
+        let result = try await manager.subscribe(docId: "doc", deviceId: "mac",
+                                                 baseHash: VersionDigest.hex(of: v2),
+                                                 fileHash: VersionDigest.hex(of: v1), wantBase: true)
+        guard case .subscribed(_, _, .inline(let payload), let baseHash, let kind) = result.snapshot else {
+            Issue.record("no reply"); return
+        }
+        #expect(baseHash == VersionDigest.hex(of: v2) && kind == SnapshotBundleWire.kind)
+        #expect(try SnapshotBundle(encoded: payload).resolvedBase() == v2)
+        await manager.unsubscribe(docId: "doc", token: writer.token)
+        await manager.unsubscribe(docId: "doc", token: result.token)
+    }
+
+    /// Item 4: a version store that cannot record does not refuse the write, and a later
+    /// `baseSaved` / subscribe naming that version degrades to "no base" (a union), never an error.
+    @Test func aFailedRecordStillAcceptsTheWriteAndDegradesToNoBase() async throws {
+        let (manager, versions, dir) = try setUp()
+        // `.versions` is a FILE, so no document directory can ever be created under it.
+        try Data("not a directory".utf8).write(to: dir.appendingPathComponent(DirectoryVersionStore.versionsDirectoryName))
+        let writer = try await open(manager)
+        let v1 = VersionFixtures.document(marker: "v1")
+        #expect(await push(manager, v1, from: "ipad") == .accepted(seq: 1))
+        #expect(try DirectoryDocumentStore(directory: dir).load(docId: "doc") == v1)
+        await noteBase(manager, VersionDigest.hex(of: v1), device: "ipad")
+        #expect(versions.holds(docId: "doc").isEmpty)
+        let later = try await manager.subscribe(docId: "doc", deviceId: "ipad",
+                                                baseHash: VersionDigest.hex(of: v1), wantBase: true)
+        guard case .subscribed(_, _, .inline(let payload), let baseHash, let kind) = later.snapshot else {
+            Issue.record("no reply"); return
+        }
+        #expect(baseHash == nil && kind == nil && payload == v1)
+        await manager.unsubscribe(docId: "doc", token: writer.token)
+        await manager.unsubscribe(docId: "doc", token: later.token)
+    }
+
+    /// Item 1: a delete's `removeAll` runs AFTER every record queued before it, so a record that
+    /// has not run yet when the document is deleted can never re-create `.versions/<docId>`.
+    @Test func aDeleteRunsAfterEveryQueuedRecord() async throws {
+        let (manager, _, dir) = try setUp()
+        let writer = try await open(manager)
+        await manager.drainVersionWork(docId: "doc")
+        let work = try #require(await manager.versionWorkForTesting)
+        work.suspend("doc")
+        _ = await manager.submit(docId: "doc", opId: "late",
+                                 payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "late")),
+                                 holderDeviceId: "ipad")
+        try await manager.deleteDoc(docId: "doc")
+        work.resume("doc")
+        await manager.drainVersionWork(docId: "doc")
+        #expect(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent(".versions/doc").path) == false)
+        _ = writer
     }
 }

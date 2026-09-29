@@ -55,7 +55,7 @@ import Testing
             docId: doc, opId: "OP-1", payloadKind: "strippedDoc",
             payloadBytes: 400_123, documentBytes: 6_746_001,
             waitMs: 312.4, rebuildMs: 34.2, casMs: 2.9, saveMs: 3.4, stripMs: 29.1,
-            totalMs: 72.8, outcome: "accepted", subscribers: 2, broadcastBytes: 400_139)
+            versionMs: 0.4, totalMs: 72.8, outcome: "accepted", subscribers: 2, broadcastBytes: 400_139)
     }
 
     // MARK: - the gate
@@ -99,6 +99,7 @@ import Testing
             #expect(object["casMs"] as? Double == 2.9)
             #expect(object["saveMs"] as? Double == 3.4)
             #expect(object["stripMs"] as? Double == 29.1)
+            #expect(object["versionMs"] as? Double == 0.4)
             #expect(object["totalMs"] as? Double == 72.8)
             #expect(object["outcome"] as? String == "accepted")
             #expect(object["subs"] as? Int == 2)

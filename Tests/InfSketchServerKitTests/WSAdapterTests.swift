@@ -1063,6 +1063,7 @@ func isCurrentHelloAck(_ message: ServerMessage?) -> Bool {
         let v1Hash = VersionDigest.hex(of: v1)
         try h.send(.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: v1)))
         guard case .event = try await reader.next() else { Issue.record("no echo"); return }
+        await manager.drainVersionWork(docId: "d")
         #expect(versions.holds(docId: "d")["ipad"]?.pushed == v1Hash)
 
         try h.send(.op(docId: "d", opId: "o2", payload: OpPayload(type: "fullDoc", data: VersionFixtures.document(marker: "v2"))))
@@ -1074,8 +1075,64 @@ func isCurrentHelloAck(_ message: ServerMessage?) -> Bool {
         guard case .subscribed(_, _, .inline(let payload), let baseHash, let kind) = try await reader.next() else {
             Issue.record("no resubscribe reply"); return
         }
+        await manager.drainVersionWork(docId: "d")
         #expect(versions.holds(docId: "d")["ipad"]?.base == v1Hash)
         #expect(baseHash == v1Hash && kind == SnapshotBundleWire.kind)
         #expect(try SnapshotBundle(encoded: payload).resolvedBase() == v1)
+    }
+
+    private func setUp() throws -> (SessionManager, DirectoryVersionStore) {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryDocumentStore(directory: dir)
+        try store.save(docId: "d", bytes: VersionFixtures.document(marker: "v0"))
+        let versions = DirectoryVersionStore(directory: dir)
+        return (SessionManager(store: store, versions: versions), versions)
+    }
+
+    /// Opens a connection with `deviceId`, subscribes it to "d", and returns its reader.
+    private func connect(_ manager: SessionManager, deviceId: String?) async throws -> (Harness, ServerMessageReader) {
+        let h = try await Harness(manager: manager)
+        var reader = ServerMessageReader(h.output)
+        try h.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: deviceId))
+        #expect(isCurrentHelloAck(try await reader.next()))
+        try h.send(.subscribe(docId: "d", createIfMissing: false))
+        guard case .subscribed = try await reader.next() else { throw DocumentStoreError.notFound }
+        return (h, reader)
+    }
+
+    /// A write on one connection is held as DELIVERED for the device on another.
+    @Test func aWriteIsHeldAsDeliveredForTheOtherConnectionsDevice() async throws {
+        let (manager, versions) = try setUp()
+        let (ipad, firstReader) = try await connect(manager, deviceId: "ipad")
+        var ipadReader = firstReader
+        let (mac, secondReader) = try await connect(manager, deviceId: "mac")
+        var macReader = secondReader
+        let v1 = VersionFixtures.document(marker: "v1")
+        try ipad.send(.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: v1)))
+        guard case .event = try await ipadReader.next() else { Issue.record("no echo"); return }
+        guard case .event = try await macReader.next() else { Issue.record("no broadcast"); return }
+        await manager.drainVersionWork(docId: "d")
+        let holds = versions.holds(docId: "d")
+        #expect(holds["mac"]?.delivered == VersionDigest.hex(of: v1))
+        #expect(holds["ipad"]?.pushed == VersionDigest.hex(of: v1))
+        _ = mac
+    }
+
+    /// A connection that said no deviceId in its hello holds nothing — its connection id dies with
+    /// the connection, so a hold for it could never be released.
+    @Test func aConnectionWithoutADeviceIdHoldsNothing() async throws {
+        let (manager, versions) = try setUp()
+        let (anon, reader) = try await connect(manager, deviceId: nil)
+        var anonReader = reader
+        let v1 = VersionFixtures.document(marker: "v1")
+        try anon.send(.op(docId: "d", opId: "o1", payload: OpPayload(type: "fullDoc", data: v1)))
+        guard case .event = try await anonReader.next() else { Issue.record("no echo"); return }
+        try anon.send(.baseSaved(docId: "d", versionHash: VersionDigest.hex(of: v1)))
+        try anon.send(.unsubscribe(docId: "d"))
+        try anon.send(.subscribe(docId: "d", createIfMissing: false))
+        guard case .subscribed = try await anonReader.next() else { Issue.record("no reply"); return }
+        await manager.drainVersionWork(docId: "d")
+        #expect(versions.contains(docId: "d", hash: VersionDigest.hex(of: v1)), "the write is kept")
+        #expect(versions.holds(docId: "d").isEmpty)
     }
 }

@@ -49,8 +49,9 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
 
     public func record(docId: String, bytes: Data, hash: String) throws {
         guard VersionDigest.hex(of: bytes) == hash else { throw VersionStoreError.hashMismatch }
-        lock.lock(); defer { lock.unlock() }
         let dir = try docDir(docId)
+        let prepared = prepare(dir: dir, bytes: bytes, hash: hash)
+        lock.lock(); defer { lock.unlock() }
         // "No index yet" (a fresh document) and "an index exists but will not decode" must NOT be
         // treated alike: `?? VersionIndex()` on the second one silently drops every device's holds.
         // The protection this needs is NOT "skip the sweep on this one call" (a later call would
@@ -66,13 +67,61 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         case .ok(let existing):
             index = existing
         }
-        try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId)
+        try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId, prepared: prepared)
+        makeCurrent(&index, hash)
+        try writeIndex(index, dir)
+        sweep(dir: dir, index: index)
+    }
+
+    public func recordWrite(docId: String, bytes: Data, digest: Data, pusher: String?,
+                            deliveredTo: Set<String>, now: Date) throws {
+        guard digest.count == 32 else { throw VersionStoreError.malformedDigest }
+        let hash = VersionHash.hex(digest)
+        let dir = try docDir(docId)
+        let prepared = prepare(dir: dir, bytes: bytes, hash: hash)
+        lock.lock(); defer { lock.unlock() }
+        var index: VersionIndex
+        switch readIndexDistinguishingCorruption(dir) {
+        case .absent: index = VersionIndex()
+        case .corrupt:
+            quarantineCorruptIndex(dir)
+            index = VersionIndex()
+        case .ok(let existing): index = existing
+        }
+        try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId, prepared: prepared)
+        makeCurrent(&index, hash)
+        // The version file was written just above, so every hold here names a KEPT version.
+        if let pusher {
+            var holds = index.devices[pusher] ?? DeviceHolds(lastSeen: now)
+            holds.pushed = hash
+            holds.lastSeen = now
+            index.devices[pusher] = holds
+        }
+        for device in deliveredTo {
+            var holds = index.devices[device] ?? DeviceHolds(lastSeen: now)
+            holds.delivered = hash
+            holds.lastSeen = now
+            index.devices[device] = holds
+        }
+        try writeIndex(index, dir)
+        sweep(dir: dir, index: index)
+    }
+
+    private func makeCurrent(_ index: inout VersionIndex, _ hash: String) {
         index.current = hash
         index.recent.removeAll { $0 == hash }
         index.recent.append(hash)
         if index.recent.count > Self.recentCount { index.recent.removeFirst(index.recent.count - Self.recentCount) }
-        try writeIndex(index, dir)
-        sweep(dir: dir, index: index)
+    }
+
+    /// The cutting (`StoredVersion.make` parses the whole document) done OUTSIDE the lock, which is
+    /// store-wide: every document's writes wait on it. Skipped when the version file already exists
+    /// — the common re-record — since then the locked path only has to confirm it; if that finds
+    /// the file damaged it cuts the version itself. Checking existence without the lock is only an
+    /// optimisation: either answer leads to a correct locked path.
+    private func prepare(dir: URL, bytes: Data, hash: String) -> (version: StoredVersion, blobs: [String: Data])? {
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent(hash).path) { return nil }
+        return StoredVersion.make(from: bytes, digest: VersionHash.digest(hex: hash) ?? Data())
     }
 
     public func ensureCurrent(docId: String, bytes: Data, hash: String) throws {
@@ -219,7 +268,8 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     /// residue of not being able to read what a corrupt file used to say, and the next process
     /// restart's `rebuildBlobReferences` scan corrects it back to exactly one count per referencing
     /// file, since it recomputes every count from what is actually on disk rather than accumulating.
-    private func writeOrRepairVersion(dir: URL, bytes: Data, hash: String, docId: String) throws {
+    private func writeOrRepairVersion(dir: URL, bytes: Data, hash: String, docId: String,
+                                      prepared: (version: StoredVersion, blobs: [String: Data])? = nil) throws {
         let file = dir.appendingPathComponent(hash)
         let existedBefore = FileManager.default.fileExists(atPath: file.path)
         let priorManifest = existedBefore
@@ -230,7 +280,8 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: blobsDir, withIntermediateDirectories: true)
-        let (version, blobs) = StoredVersion.make(from: bytes, digest: VersionHash.digest(hex: hash) ?? Data())
+        let (version, blobs) = prepared
+            ?? StoredVersion.make(from: bytes, digest: VersionHash.digest(hex: hash) ?? Data())
         // Blobs FIRST: a version file that exists must be rebuildable. A brand-new version reuses an
         // already-correct, content-addressed blob as is; a REPAIR overwrites unconditionally, since
         // a damaged blob file under this same name is exactly what might need fixing.
