@@ -261,8 +261,9 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, let createIfMissing, let name):
-            // Always a full snapshot.
+        case .subscribe(let docId, let createIfMissing, let name, let baseHash, let fileHash, let wantBase):
+            // Always a full snapshot; it may also name (and, with `wantBase`, carry) the base the
+            // device asked for, when this server keeps that version.
             // Per-document, so it names its document: a docId-less `error` here failed EVERY
             // pending subscribe on the connection, other documents' opens included.
             guard docSubscriptions[docId] == nil else {
@@ -272,7 +273,8 @@ actor Connection {
                 let result = try await manager.subscribe(
                     docId: docId, createIfMissing: createIfMissing,
                     acceptsStrippedDocuments: acceptsStrippedDocuments,
-                    connectionId: connectionId, name: name)
+                    connectionId: connectionId, name: name, deviceId: deviceId,
+                    baseHash: baseHash, fileHash: fileHash, wantBase: wantBase)
                 // The subscribe can take tens of seconds (a holder fetch), and this actor is
                 // reentrant: the connection may have closed meanwhile. `close()` has already
                 // released every subscription it knew of, so storing this one would leak it —
@@ -350,7 +352,11 @@ actor Connection {
                 // WHO pushed. `deviceId` from hello when there is one; the connection's own id
                 // otherwise, so two anonymous peers are still tellable apart in the file — which
                 // is the entire point of recording this.
-                writer: deviceId ?? connectionId.uuidString
+                writer: deviceId ?? connectionId.uuidString,
+                // The version this device's accepted push produced is held for it (`pushed`), so it
+                // is still here when the device writes it into its note. Only a device with an id
+                // holds anything — a connection id dies with the connection.
+                holderDeviceId: deviceId
             ).rejectMessage {
                 emit(reject.addressed(to: docId))
             }
@@ -489,6 +495,13 @@ actor Connection {
                 return emit(.error(reason: WireErrorReason.badAdvertisement))
             }
             await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
+
+        case .baseSaved(let docId, let versionHash):
+            // No reply: the hold is the server's own bookkeeping. A connection that said no deviceId
+            // in its hello has no identity to hold anything for.
+            if let deviceId {
+                await manager.noteBaseSaved(docId: docId, versionHash: versionHash, deviceId: deviceId)
+            }
         }
     }
 
@@ -665,8 +678,8 @@ extension ServerMessage {
     /// per connection on the way out.
     func addressed(to docId: String) -> ServerMessage {
         switch self {
-        case .subscribed(_, let seq, let snapshot):
-            return .subscribed(docId: docId, seq: seq, snapshot: snapshot)
+        case .subscribed(_, let seq, let snapshot, let baseHash, let snapshotKind):
+            return .subscribed(docId: docId, seq: seq, snapshot: snapshot, baseHash: baseHash, snapshotKind: snapshotKind)
         case .event(_, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId, payload: payload)
         case .reject(_, let opId, let reason, let seq):
@@ -694,9 +707,9 @@ extension ClientMessage {
     /// The document a message acts on, for the messages whose order per document matters.
     var documentScope: String? {
         switch self {
-        case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
+        case .subscribe(let docId, _, _, _, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
              .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
-             .frame(let docId, _, _, _), .renameDoc(let docId, _):
+             .frame(let docId, _, _, _), .renameDoc(let docId, _), .baseSaved(let docId, _):
             return docId
         default:
             return nil

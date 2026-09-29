@@ -153,7 +153,7 @@ final class DeleteDocTests: XCTestCase {
 
         // And it can be subscribed to again, with a fresh session serving the new bytes.
         let again = try await manager.subscribe(docId: "Doomed")
-        guard case .subscribed(_, _, let snapshot) = again.snapshot else {
+        guard case .subscribed(_, _, let snapshot, _, _) = again.snapshot else {
             return XCTFail("expected a subscribed snapshot, got \(again.snapshot)")
         }
         XCTAssertEqual(snapshot.inlineData, Data("second".utf8))

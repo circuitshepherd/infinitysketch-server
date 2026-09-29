@@ -40,7 +40,7 @@ connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a 
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
 browser page sends still answer with `error` — only pages watch.)
 
-The version check is **exact equality** (`WireProtocol.version`, currently 13), and that is
+The version check is **exact equality** (`WireProtocol.version`, currently 14), and that is
 deliberate: both decoders throw on an unknown message `type` rather than ignoring it, so an older
 peer does not degrade gracefully — it would die on the first message it cannot decode, arbitrarily
 long after connecting, with no diagnosable cause. Refusing at the handshake converts that into a
@@ -70,9 +70,20 @@ never the id.
 
 ## Document sessions
 
-- `subscribe(docId, createIfMissing, name)` → `subscribed(docId, seq, snapshot)` or
-  `subscribeFailed`. The snapshot is the full document; there is no history replay. `name` labels a
-  document this subscribe CREATES; it is ignored when the document already exists.
+- `subscribe(docId, createIfMissing, name, baseHash, fileHash, wantBase)` → `subscribed(docId, seq,
+  snapshot, baseHash, snapshotKind)` or `subscribeFailed`. The snapshot is the full document; there
+  is no history replay. `name` labels a document this subscribe CREATES; it is ignored when the
+  document already exists. `baseHash` names the version the device holds as its base (live, or a
+  note read at open); `fileHash` names the version the note says the FILE itself may BE, which wins
+  when the server holds it (a close push made the file exactly that version). The reply's `baseHash`
+  confirms whichever of those the server holds and is the base to use; with `wantBase` the base's
+  bytes ride along too, as a `SnapshotBundle` (`snapshotKind == "snapshotWithBase"`) cut against the
+  snapshot — an image both share crosses the wire once. Neither field means a refusal: a base the
+  server does not hold is simply no base, and the device falls back to the union merge.
+- `baseSaved(docId, versionHash)` tells the server a device now bases this document on
+  `versionHash` — a note write, not a document edit, so it carries no `WriteExpectation` and gets no
+  reply. It moves that device's held base; an unknown version releases the old hold rather than
+  keeping it.
 - Writes are `op(docId, opId, payload, expectation)`. An accepted op is broadcast to every
   subscriber as `event` with a per-session increasing `seq`; the writer's own op comes back as its
   ack. A refused op is `reject(docId, opId, reason, seq)`.
@@ -86,6 +97,43 @@ never the id.
 - `renameDoc(docId, name)` changes a document's label (identity is untouched) and is answered on the
   STATUS stream as `docRenamed(docId, name)` — sent to every status subscriber, the renaming device
   included, so there is one place a device learns a document's current name.
+
+## Versions (the server-held merge base)
+
+The merge base a device would once have kept for itself now lives here; a device keeps only a
+note naming which version its file is based on (`sync-notes.json`, app-side, not on the wire). Layout
+beside the documents:
+
+```
+<documentId>.infsketch            current document, as today (named by id)
+.blobs/<sha256>                   one image blob, content-addressed, stored once
+.versions/<documentId>/<hash>     a kept version: the document with its pastedImagesData blobs cut
+                                   out (StrippedDocument's run/reference cutting, so a rebuild is
+                                   byte-identical); <hash> is the SHA-256 of the WHOLE document
+                                   bytes — the same value the app's `matchHash` CAS already uses
+.versions/<documentId>/holds.json {current, recent (newest last, at most 8), devices: {deviceId:
+                                   {base?, pushed?, delivered?, lastSeen}}}
+```
+
+- **Kept** = the current version, the last 8 recorded, and every hash any device's `holds` still
+  names (`base`/`pushed`/`delivered`) — no time limit and no count limit on how long a device's
+  hold is honoured; only the "last 8" list itself is bounded. **Released** only when a device
+  reports a newer hold for the same slot, or the document is deleted; a version outside `kept`, and
+  a blob no kept version references any more, is swept immediately after the write that could have
+  changed the answer — never on a timer.
+- `base` is the version a device's NOTE names, moved only by that device's own `baseSaved`; `pushed`
+  is its own last accepted write; `delivered` is the last version broadcast to it (any subscriber
+  but the writer). A `subscribe` naming `baseHash`/`fileHash` is answered from whichever of the two
+  the server actually holds AND can still rebuild — every read re-verifies the hash, so a version
+  whose blob went missing answers as if it had never been held, and the other candidate is tried
+  before answering no base at all.
+- Recording a write, moving a hold, answering a subscribe's base and sweeping all run on ONE
+  serial queue per document (`VersionWork`), and the record is enqueued BEFORE the write's
+  broadcast — a `baseSaved` that arrives fast behind an ack can never race ahead of the record it
+  depends on.
+- Deleting a document removes its versions and holds with it; a document re-created later under
+  the same id starts with none, so the first subscribe after a delete-and-recreate unions rather
+  than merging against a version that no longer means what it once did.
 
 ## Blob omission (why pushes are small)
 

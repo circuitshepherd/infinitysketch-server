@@ -49,6 +49,12 @@ public enum SyncTelemetry {
         public var casMs: Double?
         public var saveMs: Double?
         public var stripMs: Double?
+        /// What keeping the write as a version cost the write itself, on the session actor (spec §1)
+        /// — booked here, never in `stripMs`. Since the record moved onto the document's version
+        /// queue (`VersionWork`) this is the cost of QUEUING it (tens of microseconds); the ~70 ms
+        /// record on a 5 MB document runs off the write path. Absent for a server that keeps no
+        /// versions, or a write that was refused.
+        public var versionMs: Double?
         public var totalMs: Double
         /// `accepted`, or the rejection reason the submitter was given.
         public var outcome: String
@@ -65,7 +71,7 @@ public enum SyncTelemetry {
         public init(docId: String, opId: String, payloadKind: String, payloadBytes: Int,
                     documentBytes: Int, waitMs: Double? = nil, rebuildMs: Double? = nil,
                     casMs: Double? = nil, saveMs: Double? = nil, stripMs: Double? = nil,
-                    totalMs: Double, outcome: String, subscribers: Int,
+                    versionMs: Double? = nil, totalMs: Double, outcome: String, subscribers: Int,
                     broadcastBytes: Int? = nil, writer: String? = nil) {
             self.docId = docId
             self.opId = opId
@@ -77,6 +83,7 @@ public enum SyncTelemetry {
             self.casMs = casMs
             self.saveMs = saveMs
             self.stripMs = stripMs
+            self.versionMs = versionMs
             self.totalMs = totalMs
             self.outcome = outcome
             self.subscribers = subscribers
@@ -126,6 +133,7 @@ extension SyncTelemetry.WriteRow {
         appendMillis(&fields, "casMs", casMs)
         appendMillis(&fields, "saveMs", saveMs)
         appendMillis(&fields, "stripMs", stripMs)
+        appendMillis(&fields, "versionMs", versionMs)
         appendMillis(&fields, "totalMs", totalMs)
         fields.append("\"outcome\":\(quoted(outcome))")
         fields.append("\"subs\":\(subscribers)")

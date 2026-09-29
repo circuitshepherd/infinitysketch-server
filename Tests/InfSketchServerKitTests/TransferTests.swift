@@ -105,7 +105,7 @@ import InfSketchWire
         #expect(frames.count == 5)   // announce + 3 chunks + end
 
         guard case .text(let announceJSON) = frames[0],
-              case .subscribed(_, 5, .transfer(let d)) = try ServerMessage(jsonText: announceJSON)
+              case .subscribed(_, 5, .transfer(let d), _, _) = try ServerMessage(jsonText: announceJSON)
         else { Issue.record("expected descriptor announce"); return }
         #expect(d.totalBytes == 20)
         #expect(d.chunkSize == 8)

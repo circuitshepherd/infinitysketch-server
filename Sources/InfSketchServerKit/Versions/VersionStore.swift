@@ -51,6 +51,7 @@ public struct DeviceHolds: Codable, Equatable, Sendable {
 public enum VersionStoreError: Error, Equatable {
     case invalidDocId
     case hashMismatch
+    case malformedDigest
 }
 
 /// The server's kept document versions (spec §1). One per server, beside the documents.
@@ -58,22 +59,44 @@ public protocol VersionStore: Sendable {
     /// Keep `bytes` as version `hash` of `docId` and make it the CURRENT version; it also becomes
     /// the newest of the recent versions. Throws when `hash` is not the SHA-256 of `bytes`.
     func record(docId: String, bytes: Data, hash: String) throws
+    /// One accepted WRITE, in one index read, one index write and one sweep: keep `bytes` as the
+    /// current version, hold it as `pushed` for `pusher` and as `delivered` for every device in
+    /// `deliveredTo`. `digest` is the SHA-256 the write path already computed — it is TRUSTED (only
+    /// checked to be 32 bytes), because hashing a multi-megabyte document a second time on every
+    /// write is what this call exists to avoid.
+    func recordWrite(docId: String, bytes: Data, digest: Data, pusher: String?,
+                     deliveredTo: Set<String>, now: Date) throws
     /// Keep `bytes` as the current version of a document that predates the store (or whose
-    /// session just opened). A no-op when it already is the current version.
-    func ensureCurrent(docId: String, bytes: Data, hash: String) throws
+    /// session just opened). A no-op when it already is the current version. `sparing`: versions
+    /// the sweep this may run must not delete (see `setHold`).
+    func ensureCurrent(docId: String, bytes: Data, hash: String, sparing: Set<String>) throws
     func contains(docId: String, hash: String) -> Bool
     /// The version's bytes, rebuilt from its blobs and VERIFIED against `hash`; nil when it is not
     /// kept or cannot be rebuilt exactly (a missing blob is logged and makes the version unusable).
     func load(docId: String, hash: String) -> Data?
     /// Move one of a device's holds. `hash == nil` releases that slot. Returns false — and holds
     /// NOTHING in that slot — when the document has no versions at all or `hash` is not kept.
+    /// `sparing`: versions the sweep after the move must not delete although nothing keeps them any
+    /// more — a subscribe's `delivered` move spares the base that same subscribe asked for.
     @discardableResult
-    func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool
+    func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date,
+                 sparing: Set<String>) -> Bool
     func holds(docId: String) -> [String: DeviceHolds]
     /// Forget every version and hold of a deleted document.
     func removeAll(docId: String)
     /// Every version hash currently kept for `docId`.
     func keptHashes(docId: String) -> Set<String>
+}
+
+extension VersionStore {
+    public func ensureCurrent(docId: String, bytes: Data, hash: String) throws {
+        try ensureCurrent(docId: docId, bytes: bytes, hash: hash, sparing: [])
+    }
+
+    @discardableResult
+    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool {
+        setHold(docId: docId, deviceId: deviceId, slot: slot, hash: hash, now: now, sparing: [])
+    }
 }
 
 public enum VersionDigest {

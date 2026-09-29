@@ -38,7 +38,10 @@ public enum WireProtocol {
     // wire-13 server (or the reverse) would decode each other silently while meaning different
     // things by a docId: an old app creates stem-named duplicates here, and a new app adopts a
     // stem as an id and rewrites every legacy file's documentId to it. One version, one meaning.
-    public static let version = 13
+    //
+    // server-held versions (2026-09-28): subscribe names a base (baseHash/fileHash/wantBase),
+    // subscribed may carry it (snapshotWithBase), baseSaved moves a device's hold.
+    public static let version = 14
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
@@ -255,7 +258,16 @@ public enum ClientMessage: Equatable, Sendable {
     /// document's `documentId`, so the human-readable name the device wants to see travels
     /// alongside it. Ignored (and typically absent) when the document already exists: an existing
     /// document's name is set with `renameDoc`, never overwritten by a later subscribe.
-    case subscribe(docId: String, createIfMissing: Bool, name: String? = nil)
+    ///
+    /// `baseHash` is the version this device holds as its BASE — live (an open document's merge
+    /// lineage) or the note it read at open — the server's answer to "what can I skip sending you
+    /// back". `fileHash` is the note's `fileHash`: the version the FILE ON DISK may itself BE, which
+    /// wins over `baseHash` when the server holds it (a close push made the file exactly that
+    /// version — the most recent common ancestor there is). `wantBase` asks the server to also SEND
+    /// that base's bytes (cut against the snapshot, `SnapshotBundle`); false when the device already
+    /// holds it live and needs only a confirming `baseHash` back.
+    case subscribe(docId: String, createIfMissing: Bool, name: String? = nil,
+                   baseHash: String? = nil, fileHash: String? = nil, wantBase: Bool = false)
     case unsubscribe(docId: String)
     /// Remove the document from the server's store outright.
     ///
@@ -305,11 +317,15 @@ public enum ClientMessage: Equatable, Sendable {
     case strokeOpReply(requestId: UInt32, docId: String, payload: BulkPayload?, meta: Data?,
                        failureReason: String?, payloadKind: String? = nil)
     case advertiseDocs(payload: BulkPayload)
+    /// The device now bases this document on `versionHash` — a note write, not a document edit, so
+    /// it carries no `WriteExpectation` and awaits no answer. Moves the device's held BASE on the
+    /// server; an unknown or already-forgotten version releases it rather than holding nothing.
+    case baseSaved(docId: String, versionHash: String)
 }
 
 extension ClientMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, capabilities, deviceId, docId, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq, name
+        case type, protocolVersion, capabilities, deviceId, docId, createIfMissing, opId, payload, transferId, reason, data, transfer, requestId, failureReason, meta, expectation, payloadKind, framePx, canvasRect, seq, name, baseHash, fileHash, wantBase, versionHash
     }
 
     public init(from decoder: any Decoder) throws {
@@ -324,7 +340,10 @@ extension ClientMessage: Codable {
             self = .subscribe(
                 docId: try c.decode(String.self, forKey: .docId),
                 createIfMissing: try c.decodeIfPresent(Bool.self, forKey: .createIfMissing) ?? false,
-                name: try c.decodeIfPresent(String.self, forKey: .name))
+                name: try c.decodeIfPresent(String.self, forKey: .name),
+                baseHash: try c.decodeIfPresent(String.self, forKey: .baseHash),
+                fileHash: try c.decodeIfPresent(String.self, forKey: .fileHash),
+                wantBase: try c.decodeIfPresent(Bool.self, forKey: .wantBase) ?? false)
         case "unsubscribe":
             self = .unsubscribe(docId: try c.decode(String.self, forKey: .docId))
         case "deleteDoc":
@@ -402,6 +421,10 @@ extension ClientMessage: Codable {
                 meta: try c.decodeIfPresent(Data.self, forKey: .meta),
                 failureReason: try c.decodeIfPresent(String.self, forKey: .failureReason),
                 payloadKind: try c.decodeIfPresent(String.self, forKey: .payloadKind))
+        case "baseSaved":
+            self = .baseSaved(
+                docId: try c.decode(String.self, forKey: .docId),
+                versionHash: try c.decode(String.self, forKey: .versionHash))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: c, debugDescription: "unknown client message type: \(other)")
@@ -416,11 +439,14 @@ extension ClientMessage: Codable {
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(caps, forKey: .capabilities)
             try c.encodeIfPresent(deviceId, forKey: .deviceId)
-        case .subscribe(let docId, let createIfMissing, let name):
+        case .subscribe(let docId, let createIfMissing, let name, let baseHash, let fileHash, let wantBase):
             try c.encode("subscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
             if createIfMissing { try c.encode(true, forKey: .createIfMissing) }
             try c.encodeIfPresent(name, forKey: .name)
+            try c.encodeIfPresent(baseHash, forKey: .baseHash)
+            try c.encodeIfPresent(fileHash, forKey: .fileHash)
+            if wantBase { try c.encode(true, forKey: .wantBase) }
         case .unsubscribe(let docId):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -493,6 +519,10 @@ extension ClientMessage: Codable {
             try c.encodeIfPresent(meta, forKey: .meta)
             try c.encodeIfPresent(failureReason, forKey: .failureReason)
             try c.encodeIfPresent(payloadKind, forKey: .payloadKind)
+        case .baseSaved(let docId, let versionHash):
+            try c.encode("baseSaved", forKey: .type)
+            try c.encode(docId, forKey: .docId)
+            try c.encode(versionHash, forKey: .versionHash)
         }
     }
 }
@@ -508,7 +538,11 @@ public enum ServerMessage: Equatable, Sendable {
     /// deadline's skew allowance otherwise refused every live-state op, or applied stale ones.
     /// nil from a server that does not send it (the device then falls back to its own clock).
     case helloAck(protocolVersion: Int, serverId: String, serverTimeMs: Int? = nil)
-    case subscribed(docId: String, seq: Int, snapshot: BulkPayload)
+    /// `baseHash` non-nil = the server holds that version and it is the base to use (confirming the
+    /// device's own hold, or naming one it does not have). `snapshotKind == SnapshotBundleWire.kind`
+    /// means `snapshot` is not the document — it is a `SnapshotBundle` carrying the document AND
+    /// that base's bytes, cut against each other.
+    case subscribed(docId: String, seq: Int, snapshot: BulkPayload, baseHash: String? = nil, snapshotKind: String? = nil)
     case event(docId: String, seq: Int, kind: String, opId: String, payload: OpPayload)
     case reject(docId: String, opId: String, reason: String, seq: Int)
     case statusEvent(payload: StatusPayload)
@@ -552,7 +586,7 @@ public enum ServerMessage: Equatable, Sendable {
 
 extension ServerMessage: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter, serverTimeMs, name
+        case type, protocolVersion, docId, seq, snapshot, kind, opId, payload, reason, transfer, transferId, count, docs, requestId, data, spec, payloadKind, framePx, serverId, notAfter, serverTimeMs, name, baseHash, snapshotKind
     }
 
     public init(from decoder: any Decoder) throws {
@@ -572,7 +606,9 @@ extension ServerMessage: Codable {
             self = .subscribed(
                 docId: try c.decode(String.self, forKey: .docId),
                 seq: try c.decode(Int.self, forKey: .seq),
-                snapshot: snapshot)
+                snapshot: snapshot,
+                baseHash: try c.decodeIfPresent(String.self, forKey: .baseHash),
+                snapshotKind: try c.decodeIfPresent(String.self, forKey: .snapshotKind))
         case "event":
             self = .event(
                 docId: try c.decode(String.self, forKey: .docId),
@@ -647,7 +683,7 @@ extension ServerMessage: Codable {
             try c.encode(v, forKey: .protocolVersion)
             try c.encode(serverId, forKey: .serverId)
             try c.encodeIfPresent(serverTimeMs, forKey: .serverTimeMs)
-        case .subscribed(let docId, let seq, let snapshot):
+        case .subscribed(let docId, let seq, let snapshot, let baseHash, let snapshotKind):
             try c.encode("subscribed", forKey: .type)
             try c.encode(docId, forKey: .docId)
             try c.encode(seq, forKey: .seq)
@@ -655,6 +691,8 @@ extension ServerMessage: Codable {
             case .inline(let data): try c.encode(data, forKey: .snapshot)
             case .transfer(let descriptor): try c.encode(descriptor, forKey: .transfer)
             }
+            try c.encodeIfPresent(baseHash, forKey: .baseHash)
+            try c.encodeIfPresent(snapshotKind, forKey: .snapshotKind)
         case .event(let docId, let seq, let kind, let opId, let payload):
             try c.encode("event", forKey: .type)
             try c.encode(docId, forKey: .docId)
@@ -807,7 +845,7 @@ extension ServerMessage: TransferCarrying {
     /// The message's bulk field, when it has one.
     public var bulk: BulkPayload? {
         switch self {
-        case .subscribed(_, _, let snapshot): return snapshot
+        case .subscribed(_, _, let snapshot, _, _): return snapshot
         case .event(_, _, _, _, let payload): return payload.bulk
         case .strokeOpRequest(_, _, let payload, _, _, _): return payload
         default: return nil
@@ -817,8 +855,9 @@ extension ServerMessage: TransferCarrying {
     /// The same message with its bulk field rewritten and every other field kept.
     public func mapBulk(_ transform: (BulkPayload) -> BulkPayload) -> ServerMessage {
         switch self {
-        case .subscribed(let docId, let seq, let snapshot):
-            return .subscribed(docId: docId, seq: seq, snapshot: transform(snapshot))
+        case .subscribed(let docId, let seq, let snapshot, let baseHash, let snapshotKind):
+            return .subscribed(docId: docId, seq: seq, snapshot: transform(snapshot),
+                               baseHash: baseHash, snapshotKind: snapshotKind)
         case .event(let docId, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId,
                           payload: OpPayload(type: payload.type, bulk: transform(payload.bulk)))

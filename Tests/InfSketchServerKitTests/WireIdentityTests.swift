@@ -39,4 +39,30 @@ import InfSketchWire
             #"{"docId":"ID-1","modifiedAt":0,"sizeBytes":1}"#.utf8))
         #expect(ad.name == "ID-1")
     }
+
+    @Test func aSubscribeNamesItsBase() throws {
+        let hash = String(repeating: "b", count: 64)
+        let message = ClientMessage.subscribe(docId: "ID", createIfMissing: true, name: "N",
+                                              baseHash: hash, fileHash: hash, wantBase: true)
+        #expect(try ClientMessage(jsonText: message.jsonText()) == message)
+        let saved = ClientMessage.baseSaved(docId: "ID", versionHash: hash)
+        #expect(try ClientMessage(jsonText: saved.jsonText()) == saved)
+    }
+
+    /// The chunk swap must carry the new fields: a dropped `snapshotKind` would hand the device a
+    /// bundle it then stores as a document — the loss only a message big enough to chunk shows.
+    @Test func aChunkedSubscribedKeepsItsBaseFields() throws {
+        let message = ServerMessage.subscribed(docId: "ID", seq: 3, snapshot: .inline(Data(repeating: 7, count: 200_000)),
+                                               baseHash: String(repeating: "c", count: 64),
+                                               snapshotKind: SnapshotBundleWire.kind)
+        var sender = TransferSender<ServerMessage>(inlineLimit: 1024, chunkSize: 4096)
+        var reassembler = TransferReassembler<ServerMessage>()
+        var out: ServerMessage?
+        for frame in try sender.frames(for: message) {
+            let wire: WireFrame
+            switch frame { case .text(let t): wire = .text(t); case .binary(let d): wire = .binary(d) }
+            if let m = try reassembler.consume(wire) { out = m }
+        }
+        #expect(out == message)
+    }
 }

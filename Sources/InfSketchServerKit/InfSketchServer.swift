@@ -52,6 +52,9 @@ public final class InfSketchServer: Sendable {
             port: port,
             store: DirectoryDocumentStore(directory: docsDirectory),
             config: config,
+            // `.versions/` and `.blobs/` beside the documents — dot-directories, so `list()` never
+            // sees them (the `.trash` reasoning below).
+            versions: DirectoryVersionStore(directory: docsDirectory),
             // A dot-directory beside the documents, for the same reason `.trash` is one: `list()`
             // enumerates non-recursively and filters on the `.infsketch` extension, so a render can
             // never surface as a document.
@@ -72,11 +75,12 @@ public final class InfSketchServer: Sendable {
     /// `WriteStallTimeoutPool`) — for the test that makes `accept` fail on a real server.
     init(
         port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
+        versions: (any VersionStore)? = nil,
         renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil
     ) {
         self.store = store
         self.renderFileStore = renderFileStore
-        let manager = SessionManager(store: store, config: config)
+        let manager = SessionManager(store: store, config: config, versions: versions)
         self.manager = manager
         // The logger is passed EXPLICITLY, never defaulted: FlyingFox's default prints to stdout on
         // every non-Apple platform, which made the quiet console Apple-only by accident. See
