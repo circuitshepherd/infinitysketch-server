@@ -12,6 +12,7 @@ var port: UInt16 = 8080
 var docsPath = "./docs"
 var openBrowser = true
 var telemetryPath: String?
+var verifyVersions = false
 
 /// True when this process created the console it is printing to — i.e. it was double-clicked from
 /// Explorer rather than started from a terminal that already existed.
@@ -93,6 +94,10 @@ while let argument = arguments.next() {
             die("--allow-host requires a host name")
         }
         allowedHostNames.append(value)
+    case "--verify-versions":
+        // Check the version store (`.versions/`, `.blobs/`) and exit, without serving: every kept
+        // version must rebuild to its hash. `scripts/fault-version-store` runs it after each kill.
+        verifyVersions = true
     case "--verbose":
         // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
         // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
@@ -101,7 +106,7 @@ while let argument = arguments.next() {
         ServerLog.isVerbose = true
     default:
         let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
-            + " [--telemetry FILE] [--allow-host NAME]"
+            + " [--telemetry FILE] [--allow-host NAME] [--verify-versions]"
         // `--help` is a request, not a failure: it exits 0 and never holds the window.
         if argument == "--help" { print(usage); exit(0) }
         die(usage)
@@ -113,6 +118,15 @@ do {
     try FileManager.default.createDirectory(at: docsDirectory, withIntermediateDirectories: true)
 } catch {
     die("could not create docs directory at \(docsDirectory.path): \(error.localizedDescription)")
+}
+
+if verifyVersions {
+    // Opening the store runs the same start-up cleanup a server start would, so this reports what
+    // the next start would see.
+    let problems = DirectoryVersionStore(directory: docsDirectory).verify()
+    for line in problems { print(line) }
+    print(problems.isEmpty ? "versions: sound" : "versions: \(problems.count) problem(s)")
+    exit(problems.isEmpty ? 0 : 1)
 }
 
 if let telemetryPath {
