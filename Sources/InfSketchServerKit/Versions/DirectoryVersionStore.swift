@@ -25,11 +25,35 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     /// blob sha → how many kept version files reference it. Rebuilt from the manifests at init.
     private var blobRefs: [String: Int] = [:]
 
-    public init(directory: URL) {
+    /// With `cleanup` (the server's own store), also cleans up after a process that was killed
+    /// part-way through a write (Task 4.3), BEFORE anything can use the store — this runs before
+    /// the server accepts a connection, so before any `VersionWork` job: the version folder of a
+    /// deleted document an interrupted (or never run) `removeAll` left behind, the temporaries of
+    /// interrupted `.atomic` writes, and every blob no version file on disk references.
+    ///
+    /// `cleanup: false` changes NOTHING on disk — for `--verify-versions`, which an operator may
+    /// run against the folder of a LIVE server: there a blob just written for a version not yet on
+    /// disk, or an `.atomic` write's temporary, is in flight, not left over.
+    public init(directory: URL, cleanup: Bool = true) {
         root = directory
         lock.lock(); defer { lock.unlock() }
-        rebuildBlobReferences()
+        if cleanup {
+            pruneAbandonedFolders()
+            pruneWriteLeftovers()
+        }
+        rebuildBlobReferences(pruneUnreferenced: cleanup)
     }
+
+    #if DEBUG
+    /// Called (with the lock held) at every point of a write where a `kill -9` would leave the
+    /// disk in an intermediate state: after each blob, version file and index write, and after
+    /// each deletion. A test copies the directory there — "the process died here" — and checks
+    /// the copy is still sound.
+    var faultPoint: ((String) -> Void)?
+    private func reachedFaultPoint(_ name: String) { faultPoint?(name) }
+    #else
+    @inline(__always) private func reachedFaultPoint(_ name: String) {}
+    #endif
 
     private var versionsDir: URL { root.appendingPathComponent(Self.versionsDirectoryName, isDirectory: true) }
     private var blobsDir: URL { root.appendingPathComponent(Self.blobsDirectoryName, isDirectory: true) }
@@ -74,6 +98,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId, prepared: prepared)
         makeCurrent(&index, hash)
         try writeIndex(index, dir)
+        reachedFaultPoint("index")
         sweep(dir: dir, index: index, sparing: sparing)
     }
 
@@ -108,6 +133,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             index.devices[device] = holds
         }
         try writeIndex(index, dir)
+        reachedFaultPoint("index")
         sweep(dir: dir, index: index)
     }
 
@@ -207,6 +233,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         holds.lastSeen = now
         index.devices[deviceId] = holds
         guard (try? writeIndex(index, dir)) != nil else { return false }
+        reachedFaultPoint("index")
         sweep(dir: dir, index: index, sparing: sparing)
         return known && hash != nil
     }
@@ -230,16 +257,23 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         guard let dir = try? docDir(docId) else { return }
         lock.lock(); defer { lock.unlock() }
         // The index goes FIRST: a kill part-way then leaves version files no index names (removed at
-        // the next start, Task 4.3), never an index naming files that are gone.
+        // the next start, `pruneAbandonedFolders`), never an index naming files that are gone.
         try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.holdsFileName))
+        reachedFaultPoint("removeAll.index")
+        // Then the version files, and only THEN the blobs they referenced: a blob released first
+        // would leave, for as long as the kill lasts, a version file on disk that cannot be rebuilt.
+        // The other way round, a kill leaves blobs nothing references, which the next start frees.
+        var released: [String] = []
         for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         where VersionHash.isWellFormed(name) {
             if let raw = try? Data(contentsOf: dir.appendingPathComponent(name)),
                let manifest = try? StoredVersion.manifest(ofEncoded: raw) {
-                for sha in Set(manifest.values) { releaseBlob(sha) }
+                released.append(contentsOf: Set(manifest.values))
             }
         }
         try? FileManager.default.removeItem(at: dir)
+        reachedFaultPoint("removeAll.folder")
+        for sha in released { releaseBlob(sha) }
     }
 
     public func keptHashes(docId: String) -> Set<String> {
@@ -294,9 +328,11 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             let blobFile = blobsDir.appendingPathComponent(sha)
             if existedBefore || !FileManager.default.fileExists(atPath: blobFile.path) {
                 try run.write(to: blobFile, options: .atomic)
+                reachedFaultPoint("blob")
             }
         }
         try version.encoded().write(to: file, options: .atomic)
+        reachedFaultPoint("version")
         for sha in Set(version.manifest.values) { blobRefs[sha, default: 0] += 1 }
         if let prior = priorManifest {
             for sha in Set(prior.values) { releaseBlob(sha) }
@@ -398,10 +434,14 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         for name in names where VersionHash.isWellFormed(name) && !keep.contains(name) {
             let file = dir.appendingPathComponent(name)
-            if let raw = try? Data(contentsOf: file), let manifest = try? StoredVersion.manifest(ofEncoded: raw) {
-                for sha in Set(manifest.values) { releaseBlob(sha) }
-            }
+            let manifest = (try? Data(contentsOf: file)).flatMap { try? StoredVersion.manifest(ofEncoded: $0) }
+            // The file BEFORE its blobs (Task 4.3): released first, a blob this version alone used
+            // was gone while the version file still named it — a kill there left a version on disk
+            // that could not be rebuilt. This way round a kill leaves an unreferenced blob, which
+            // the next start frees.
             try? FileManager.default.removeItem(at: file)
+            reachedFaultPoint("sweep.version")
+            if let manifest { for sha in Set(manifest.values) { releaseBlob(sha) } }
         }
     }
 
@@ -425,31 +465,203 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         } else {
             blobRefs.removeValue(forKey: sha)
             try? FileManager.default.removeItem(at: blobsDir.appendingPathComponent(sha))
+            reachedFaultPoint("blob.deleted")
         }
     }
 
-    private func rebuildBlobReferences() {
-        blobRefs = [:]
-        let docs = (try? FileManager.default.contentsOfDirectory(atPath: versionsDir.path)) ?? []
-        for doc in docs {
+    /// A `.versions/<id>/` folder whose document file is gone belongs to a DELETED document: ids
+    /// are stable and versions exist only for stored documents, so the file disappears through a
+    /// delete or through someone removing it by hand. Spec §1 has a delete remove the versions AND
+    /// the holds (every device was already told `docDeleted`), and a file removed by hand is
+    /// cleaned up the same way. A kill can interrupt that removal before it starts (the
+    /// queued `removeAll` never ran — the folder still has its index) or part-way (index gone):
+    /// either way the folder is removed here. Its blobs are not released here — the reference
+    /// counts are built only afterwards, from what is left on disk.
+    ///
+    /// Never removed: a folder whose document file exists under that id in any letter case (a
+    /// first `record` killed before its index was written — the next write writes it), one whose
+    /// document is an iCloud placeholder (`.<id>.infsketch.icloud` — evicted, not deleted), and one
+    /// with a QUARANTINED index (its holds are unreadable, not absent — see `sweep` — so there is
+    /// no certainty to act on).
+    ///
+    /// A listing that FAILS is never read as "nothing there": if the documents cannot be listed,
+    /// nothing is removed. Nor is anything removed when NO document file is listed while version
+    /// folders exist — documents that are not visible right now (evicted to iCloud, a partial
+    /// sync, a folder the user moved away) are not documents that were deleted.
+    private func pruneAbandonedFolders() {
+        let fm = FileManager.default
+        guard let versionFolders = listFolder(versionsDir), !versionFolders.isEmpty else { return }
+        guard let rootNames = try? fm.contentsOfDirectory(atPath: root.path) else {
+            ServerLog.error("versions: could not list the documents in \(root.path) — no version folder removed")
+            return
+        }
+        let docFiles = Set(rootNames.compactMap(Self.documentIdPresent(asFileNamed:)))
+        guard !docFiles.isEmpty else {
+            ServerLog.error("versions: \(versionFolders.count) version folder(s) but no document file in " +
+                            "\(root.path) — none removed (documents not visible right now are not deleted)")
+            return
+        }
+        for doc in versionFolders {
             let dir = versionsDir.appendingPathComponent(doc, isDirectory: true)
-            for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                  !hasQuarantinedIndex(dir),
+                  !docFiles.contains(doc.lowercased())
+            else { continue }
+            if (try? fm.removeItem(at: dir)) != nil {
+                ServerLog.verbose("[versions] removed '\(doc)': its document is gone — an interrupted delete")
+            }
+        }
+    }
+
+    /// The (lowercased) document id a file in the documents folder shows as PRESENT, or nil: the
+    /// document itself (`<id>.infsketch`), and its iCloud placeholder (`.<id>.infsketch.icloud`) —
+    /// an evicted document is not a deleted one, so its versions must never be pruned.
+    static func documentIdPresent(asFileNamed name: String) -> String? {
+        let lower = name.lowercased()
+        if lower.hasPrefix("."), lower.hasSuffix(".infsketch.icloud") {
+            let id = lower.dropFirst().dropLast(".infsketch.icloud".count)
+            return id.isEmpty ? nil : String(id)
+        }
+        if lower.hasSuffix(".infsketch") {
+            let id = lower.dropLast(".infsketch".count)
+            return id.isEmpty ? nil : String(id)
+        }
+        return nil
+    }
+
+    /// The names in `folder`: `[]` when it does not exist (a store with nothing in it yet), `nil`
+    /// when it exists and cannot be listed — which must never be read as empty.
+    private func listFolder(_ folder: URL) -> [String]? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder.path) else { return [] }
+        return try? fm.contentsOfDirectory(atPath: folder.path)
+    }
+
+    /// The temporary file of an `.atomic` write the kill interrupted before its rename: Foundation
+    /// names it after its target (`<hash>.sb-…-…` on Darwin), so it is recognised by carrying one
+    /// of this store's own names without BEING one. Measured under `scripts/fault-version-store`:
+    /// about one per kill, a blob's worth of bytes each, left forever otherwise. A quarantined index
+    /// (`holds.json.corrupt-…`) is never one — it is kept on purpose. Nothing else in these folders
+    /// is touched.
+    private func pruneWriteLeftovers() {
+        let fm = FileManager.default
+        let folders = [blobsDir] + ((try? fm.contentsOfDirectory(atPath: versionsDir.path)) ?? [])
+            .map { versionsDir.appendingPathComponent($0, isDirectory: true) }
+        for folder in folders {
+            for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+            where Self.isInterruptedWriteLeftover(name) {
+                try? fm.removeItem(at: folder.appendingPathComponent(name))
+            }
+        }
+    }
+
+    static func isInterruptedWriteLeftover(_ name: String) -> Bool {
+        if VersionHash.isWellFormed(name) || name == holdsFileName
+            || name.hasPrefix("\(holdsFileName).corrupt-") { return false }
+        if name.contains(holdsFileName) { return true }
+        // A 64-character lowercase-hex run anywhere in the name: a version's or a blob's.
+        var run = 0
+        for byte in name.utf8 {
+            if (0x30...0x39).contains(byte) || (0x61...0x66).contains(byte) {
+                run += 1
+                if run == 64 { return true }
+            } else {
+                run = 0
+            }
+        }
+        return false
+    }
+
+    /// One line per HARD problem, empty when the store is sound: an index that does not decode, an
+    /// index keeping a version whose file is missing, and a version file that cannot be read, names
+    /// a missing (or malformed) blob, or rebuilds to bytes of another hash. Every version file on
+    /// disk is checked, kept or not — after a kill, any one of them may be the base a device names.
+    /// Reads only; `infsketch-server --verify-versions` prints it.
+    public func verify() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let fm = FileManager.default
+        var problems: [String] = []
+        for doc in ((try? fm.contentsOfDirectory(atPath: versionsDir.path)) ?? []).sorted() {
+            let dir = versionsDir.appendingPathComponent(doc, isDirectory: true)
+            switch readIndexDistinguishingCorruption(dir) {
+            case .absent: break
+            case .corrupt: problems.append("\(doc): holds.json does not decode")
+            case .ok(let index):
+                for hash in kept(index).sorted() where !fm.fileExists(atPath: dir.appendingPathComponent(hash).path) {
+                    problems.append("\(doc): the index keeps \(hash) but its file is missing")
+                }
+            }
+            for name in ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
             where VersionHash.isWellFormed(name) {
                 guard let raw = try? Data(contentsOf: dir.appendingPathComponent(name)),
-                      let manifest = try? StoredVersion.manifest(ofEncoded: raw) else { continue }
-                for sha in Set(manifest.values) where VersionHash.isWellFormed(sha) {
-                    blobRefs[sha, default: 0] += 1
+                      let version = try? StoredVersion(encoded: raw) else {
+                    problems.append("\(doc)/\(name): unreadable version file"); continue
+                }
+                if let bad = version.manifest.values.first(where: { !VersionHash.isWellFormed($0) }) {
+                    problems.append("\(doc)/\(name): names a malformed blob reference '\(bad)'"); continue
+                }
+                if let missing = Set(version.manifest.values).sorted()
+                    .first(where: { !fm.fileExists(atPath: blobsDir.appendingPathComponent($0).path) }) {
+                    problems.append("\(doc)/\(name): its blob \(missing) is missing"); continue
+                }
+                do {
+                    let rebuilt = try version.rebuild { try? Data(contentsOf: self.blobsDir.appendingPathComponent($0)) }
+                    if VersionDigest.hex(of: rebuilt) != name {
+                        problems.append("\(doc)/\(name): rebuilds to other bytes")
+                    }
+                } catch {
+                    problems.append("\(doc)/\(name): cannot be rebuilt (\(error))")
                 }
             }
         }
-        // Orphans: a blob written just before a crash whose version file never made it to disk, or
-        // one a `sweep` deleted the referencing (unparseable) version file of without being able to
-        // release (see `sweep`'s doc comment). Nothing can ever reference it again, so free the
-        // space at the next start. Only a well-formed name is even a candidate — anything else in
-        // `.blobs/` was never one of ours to begin with and is left alone.
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: blobsDir.path)) ?? []
+        return problems
+    }
+
+    /// Counts every version file's blob references, and with `pruneUnreferenced` deletes the blobs
+    /// nothing references: orphans of a blob written just before a crash whose version file never
+    /// made it to disk, or of a `sweep` that deleted an unparseable version file without being able
+    /// to release its blobs (see `sweep`). Only a well-formed name is even a candidate — anything
+    /// else in `.blobs/` was never one of ours to begin with and is left alone.
+    ///
+    /// A folder that cannot be listed, or a version file that cannot be READ, means the counts are
+    /// incomplete — and an incomplete count reads a needed blob as unreferenced. Then no blob is
+    /// deleted this start (logged); the counts are still the best available for the running store.
+    /// A version file that reads but does not parse is garbage, not a gap: it references nothing.
+    private func rebuildBlobReferences(pruneUnreferenced: Bool) {
+        let fm = FileManager.default
+        blobRefs = [:]
+        var incomplete: [String] = []
+        if let docs = listFolder(versionsDir) {
+            for doc in docs {
+                let dir = versionsDir.appendingPathComponent(doc, isDirectory: true)
+                var isDirectory: ObjCBool = false
+                guard fm.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+                guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else {
+                    incomplete.append("cannot list \(doc)"); continue
+                }
+                for name in names where VersionHash.isWellFormed(name) {
+                    guard let raw = try? Data(contentsOf: dir.appendingPathComponent(name)) else {
+                        incomplete.append("cannot read \(doc)/\(name)"); continue
+                    }
+                    guard let manifest = try? StoredVersion.manifest(ofEncoded: raw) else { continue }
+                    for sha in Set(manifest.values) where VersionHash.isWellFormed(sha) {
+                        blobRefs[sha, default: 0] += 1
+                    }
+                }
+            }
+        } else {
+            incomplete.append("cannot list \(Self.versionsDirectoryName)")
+        }
+        guard pruneUnreferenced else { return }
+        guard incomplete.isEmpty else {
+            ServerLog.error("versions: no unreferenced blob removed this start — the references could not all be " +
+                            "read (\(incomplete.prefix(3).joined(separator: "; "))\(incomplete.count > 3 ? "; …" : ""))")
+            return
+        }
+        for name in (try? fm.contentsOfDirectory(atPath: blobsDir.path)) ?? []
         where VersionHash.isWellFormed(name) && blobRefs[name] == nil {
-            try? FileManager.default.removeItem(at: blobsDir.appendingPathComponent(name))
+            try? fm.removeItem(at: blobsDir.appendingPathComponent(name))
         }
     }
 }
