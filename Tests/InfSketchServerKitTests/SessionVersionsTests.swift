@@ -152,6 +152,40 @@ import InfSketchWire
         await manager.unsubscribe(docId: "doc", token: later.token)
     }
 
+    /// Phase 3 review: a device whose ONLY hold on its base V is an old `delivered` (its `baseSaved`
+    /// never went out, or it saved offline) comes back after nine writes. Its own subscribe moves
+    /// that `delivered` hold to the current version — and that move's sweep used to release V
+    /// before the same subscribe's base lookup ran, so the device got no base and took a union.
+    @Test func aSubscribeDoesNotReleaseTheBaseItIsAskingFor() async throws {
+        let (manager, versions, _) = try setUp()
+        let writer = try await open(manager)
+        let v = VersionFixtures.document(marker: "V")
+        _ = await push(manager, v, from: "mac")
+        let vHash = VersionDigest.hex(of: v)
+        // Device B is delivered V, then goes away without ever reporting a base.
+        let away = try await manager.subscribe(docId: "doc", deviceId: "ipad")
+        await manager.drainVersionWork(docId: "doc")
+        await manager.unsubscribe(docId: "doc", token: away.token)
+        #expect(versions.holds(docId: "doc")["ipad"]?.delivered == vHash)
+        #expect(versions.holds(docId: "doc")["ipad"]?.base == nil)
+        for i in 0..<9 { _ = await push(manager, VersionFixtures.document(marker: "w\(i)"), from: "mac") }
+        // Only B's `delivered` hold keeps V now.
+        #expect(versions.contains(docId: "doc", hash: vHash))
+
+        let back = try await manager.subscribe(docId: "doc", deviceId: "ipad", baseHash: vHash, wantBase: true)
+        guard case .subscribed(_, _, .inline(let payload), let baseHash, let kind) = back.snapshot else {
+            Issue.record("no reply"); return
+        }
+        #expect(baseHash == vHash)
+        #expect(kind == SnapshotBundleWire.kind)
+        #expect(try SnapshotBundle(encoded: payload).resolvedBase() == v)
+        // And the move did not sweep it: V is still there to ask for again.
+        await manager.drainVersionWork(docId: "doc")
+        #expect(versions.contains(docId: "doc", hash: vHash))
+        await manager.unsubscribe(docId: "doc", token: writer.token)
+        await manager.unsubscribe(docId: "doc", token: back.token)
+    }
+
     /// Review focus 4.
     @Test func baseSavedForAnUnknownDocumentCreatesNothing() async throws {
         let (manager, _, dir) = try setUp()

@@ -48,6 +48,10 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     // MARK: - protocol
 
     public func record(docId: String, bytes: Data, hash: String) throws {
+        try record(docId: docId, bytes: bytes, hash: hash, sparing: [])
+    }
+
+    private func record(docId: String, bytes: Data, hash: String, sparing: Set<String>) throws {
         guard VersionDigest.hex(of: bytes) == hash else { throw VersionStoreError.hashMismatch }
         let dir = try docDir(docId)
         let prepared = prepare(dir: dir, bytes: bytes, hash: hash)
@@ -70,7 +74,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         try writeOrRepairVersion(dir: dir, bytes: bytes, hash: hash, docId: docId, prepared: prepared)
         makeCurrent(&index, hash)
         try writeIndex(index, dir)
-        sweep(dir: dir, index: index)
+        sweep(dir: dir, index: index, sparing: sparing)
     }
 
     public func recordWrite(docId: String, bytes: Data, digest: Data, pusher: String?,
@@ -124,7 +128,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         return StoredVersion.make(from: bytes, digest: VersionHash.digest(hex: hash) ?? Data())
     }
 
-    public func ensureCurrent(docId: String, bytes: Data, hash: String) throws {
+    public func ensureCurrent(docId: String, bytes: Data, hash: String, sparing: Set<String>) throws {
         let dir = try docDir(docId)
         lock.lock()
         let index = readIndex(dir)
@@ -133,7 +137,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         // `record` would repair it; `loadLocked` is the one place that already knows how to tell.
         let alreadyCurrentAndHealthy = index?.current == hash && loadLocked(dir: dir, hash: hash, docId: docId) != nil
         lock.unlock()
-        if !alreadyCurrentAndHealthy { try record(docId: docId, bytes: bytes, hash: hash) }
+        if !alreadyCurrentAndHealthy { try record(docId: docId, bytes: bytes, hash: hash, sparing: sparing) }
     }
 
     public func contains(docId: String, hash: String) -> Bool {
@@ -175,7 +179,8 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     }
 
     @discardableResult
-    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool {
+    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date,
+                        sparing: Set<String>) -> Bool {
         guard let dir = try? docDir(docId) else { return false }
         lock.lock(); defer { lock.unlock() }
         var index: VersionIndex
@@ -202,7 +207,7 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         holds.lastSeen = now
         index.devices[deviceId] = holds
         guard (try? writeIndex(index, dir)) != nil else { return false }
-        sweep(dir: dir, index: index)
+        sweep(dir: dir, index: index, sparing: sparing)
         return known && hash != nil
     }
 
@@ -382,9 +387,14 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
     /// its blob references cannot be released: this sweep has no way to know what it referenced.
     /// Those blobs become ORPHANS — freed instead by the next process start's
     /// `rebuildBlobReferences` scan, which finds them referenced by nothing and deletes them then.
-    func sweep(dir: URL, index: VersionIndex) {
+    ///
+    /// `sparing` — versions THIS call must not delete although the policy no longer keeps them: a
+    /// subscribe's own hold move spares the versions that same subscribe named as its base, so the
+    /// move can never take away the version the device is about to merge against (a later write may
+    /// still sweep it, once nothing holds it).
+    func sweep(dir: URL, index: VersionIndex, sparing: Set<String> = []) {
         guard !hasQuarantinedIndex(dir) else { return }
-        let keep = kept(index)
+        let keep = kept(index).union(sparing)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         for name in names where VersionHash.isWellFormed(name) && !keep.contains(name) {
             let file = dir.appendingPathComponent(name)

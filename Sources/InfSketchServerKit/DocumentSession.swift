@@ -338,7 +338,11 @@ actor DocumentSession {
     /// keeps receiving whole documents: `infsketch-demo` subscribes to document events too.
     /// `deviceId` — the subscribing connection's device (from its hello), which is then held as
     /// having been DELIVERED the snapshot, and every later broadcast.
-    func subscribe(acceptsStrippedDocuments: Bool = false, deviceId: String? = nil) -> SubscribeResult {
+    /// `sparingBase` — the versions this subscribe named as its base (`fileHash`, `baseHash`): the
+    /// `delivered` move below must not sweep them, or a device whose only hold on its base was an
+    /// old `delivered` would release, with its own subscribe, the version it is merging against.
+    func subscribe(acceptsStrippedDocuments: Bool = false, deviceId: String? = nil,
+                   sparingBase: Set<String> = []) -> SubscribeResult {
         let token = UUID()
         let (stream, continuation) = AsyncStream<ServerMessage>.makeStream(
             bufferingPolicy: .bufferingOldest(bufferLimit))
@@ -353,10 +357,11 @@ actor DocumentSession {
             let snapshot = bytes, docId = self.docId
             versionWork.enqueue(docId) { versions in
                 let hash = VersionDigest.hex(of: snapshot)
-                do { try versions.ensureCurrent(docId: docId, bytes: snapshot, hash: hash) }
+                do { try versions.ensureCurrent(docId: docId, bytes: snapshot, hash: hash, sparing: sparingBase) }
                 catch { ServerLog.error("could not keep version \(hash.prefix(12)) of '\(docId)': \(error)") }
                 if let deviceId {
-                    versions.setHold(docId: docId, deviceId: deviceId, slot: .delivered, hash: hash, now: Date())
+                    versions.setHold(docId: docId, deviceId: deviceId, slot: .delivered, hash: hash, now: Date(),
+                                     sparing: sparingBase)
                 }
             }
         }

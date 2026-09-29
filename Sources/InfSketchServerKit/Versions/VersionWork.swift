@@ -57,6 +57,19 @@ final class VersionWork: @unchecked Sendable {
         }
     }
 
+    /// Queue `job` NOW — before this call returns, so it runs ahead of anything queued after it —
+    /// and hand back its answer to await later. `run` cannot promise that: it queues only once the
+    /// caller's `await` starts, and a caller that must order a lookup BEFORE another actor's job
+    /// (a subscribe's base lookup before the same subscribe's `delivered` hold move) cannot wait
+    /// for the answer there.
+    func schedule<T: Sendable>(_ docId: String,
+                               _ job: @escaping @Sendable (any VersionStore) -> T) -> ScheduledVersionJob<T> {
+        let store = self.store
+        let handle = ScheduledVersionJob<T>()
+        queue(docId).async { handle.finish(job(store)) }
+        return handle
+    }
+
     /// Wait until every job queued so far for `docId` has run. For tests, which read the store
     /// directly afterwards.
     func drain(_ docId: String) async {
@@ -68,4 +81,38 @@ final class VersionWork: @unchecked Sendable {
     func suspend(_ docId: String) { queue(docId).suspend() }
     func resume(_ docId: String) { queue(docId).resume() }
     #endif
+}
+
+/// The answer of a job `VersionWork.schedule` queued, awaited once.
+final class ScheduledVersionJob<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: T?
+    private var waiter: CheckedContinuation<T, Never>?
+
+    fileprivate func finish(_ value: T) {
+        lock.lock()
+        if let waiter {
+            self.waiter = nil
+            lock.unlock()
+            waiter.resume(returning: value)
+        } else {
+            result = value
+            lock.unlock()
+        }
+    }
+
+    var value: T {
+        get async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    continuation.resume(returning: result)
+                } else {
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        }
+    }
 }

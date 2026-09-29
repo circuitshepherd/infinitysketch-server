@@ -67,21 +67,36 @@ public protocol VersionStore: Sendable {
     func recordWrite(docId: String, bytes: Data, digest: Data, pusher: String?,
                      deliveredTo: Set<String>, now: Date) throws
     /// Keep `bytes` as the current version of a document that predates the store (or whose
-    /// session just opened). A no-op when it already is the current version.
-    func ensureCurrent(docId: String, bytes: Data, hash: String) throws
+    /// session just opened). A no-op when it already is the current version. `sparing`: versions
+    /// the sweep this may run must not delete (see `setHold`).
+    func ensureCurrent(docId: String, bytes: Data, hash: String, sparing: Set<String>) throws
     func contains(docId: String, hash: String) -> Bool
     /// The version's bytes, rebuilt from its blobs and VERIFIED against `hash`; nil when it is not
     /// kept or cannot be rebuilt exactly (a missing blob is logged and makes the version unusable).
     func load(docId: String, hash: String) -> Data?
     /// Move one of a device's holds. `hash == nil` releases that slot. Returns false — and holds
     /// NOTHING in that slot — when the document has no versions at all or `hash` is not kept.
+    /// `sparing`: versions the sweep after the move must not delete although nothing keeps them any
+    /// more — a subscribe's `delivered` move spares the base that same subscribe asked for.
     @discardableResult
-    func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool
+    func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date,
+                 sparing: Set<String>) -> Bool
     func holds(docId: String) -> [String: DeviceHolds]
     /// Forget every version and hold of a deleted document.
     func removeAll(docId: String)
     /// Every version hash currently kept for `docId`.
     func keptHashes(docId: String) -> Set<String>
+}
+
+extension VersionStore {
+    public func ensureCurrent(docId: String, bytes: Data, hash: String) throws {
+        try ensureCurrent(docId: docId, bytes: bytes, hash: hash, sparing: [])
+    }
+
+    @discardableResult
+    public func setHold(docId: String, deviceId: String, slot: HoldSlot, hash: String?, now: Date) -> Bool {
+        setHold(docId: docId, deviceId: deviceId, slot: slot, hash: hash, now: now, sparing: [])
+    }
 }
 
 public enum VersionDigest {

@@ -340,8 +340,27 @@ public actor SessionManager {
                 emitStatus(docId: docId, kind: "sessionOpened", seq: 0, count: 0)
             }
         }
+        // The base lookup is QUEUED FIRST — before `session.subscribe` queues its `delivered` hold
+        // move, whose sweep would otherwise release the very version this subscribe names: a device
+        // whose only hold on its base V is an old `delivered` (its `baseSaved` never went out, or it
+        // saved offline) comes back after nine writes, and its own subscribe swept V before the
+        // lookup ran — it took a union. The move also SPARES the named versions (`sparingBase`), so
+        // V is still there for as long as nothing else sweeps it.
+        let candidates = [fileHash, baseHash].compactMap { $0 }
+        let lookupDocId = docId
+        let lookup = versionWork.flatMap { work in
+            candidates.isEmpty ? nil : work.schedule(lookupDocId) { versions -> (hash: String, bytes: Data)? in
+                // IN ORDER until one actually LOADS: a version that cannot be rebuilt (a missing
+                // blob) is answered exactly as one the server does not keep, and the next candidate
+                // may still be whole.
+                for hash in candidates {
+                    if let bytes = versions.load(docId: lookupDocId, hash: hash) { return (hash, bytes) }
+                }
+                return nil
+            }
+        }
         let result = await session.subscribe(acceptsStrippedDocuments: acceptsStrippedDocuments,
-                                             deviceId: deviceId)
+                                             deviceId: deviceId, sparingBase: Set(candidates))
         // Reentrancy: a delete may have ended this session while we awaited it. Registering the
         // token then counted a subscriber no release would ever uncount, so the next session of
         // this docId could never tear down. The document is gone: say so.
@@ -365,7 +384,7 @@ public actor SessionManager {
         }
         // `docId` is the canonical spelling here (and the session's own): the version store keys
         // by it verbatim.
-        return await withBase(result, docId: docId, baseHash: baseHash, fileHash: fileHash, wantBase: wantBase)
+        return await withBase(result, lookup: lookup, candidates: candidates, wantBase: wantBase)
     }
 
     /// The subscribe reply, naming the base version the device asked for when this server keeps it:
@@ -373,27 +392,25 @@ public actor SessionManager {
     /// common ancestor there is), else the noted/live base. With `wantBase` the base's bytes ride
     /// along, cut against the snapshot. Anything missing or unusable is simply no base: the device
     /// then takes the union, never a refusal (spec §6).
-    private func withBase(_ result: SubscribeResult, docId: String, baseHash: String?, fileHash: String?,
-                          wantBase: Bool) async -> SubscribeResult {
-        guard let versionWork,
+    private func withBase(_ result: SubscribeResult, lookup: ScheduledVersionJob<(hash: String, bytes: Data)?>?,
+                          candidates: [String], wantBase: Bool) async -> SubscribeResult {
+        guard let lookup,
               case .subscribed(let id, let seq, .inline(let snapshot), _, _) = result.snapshot,
               !snapshot.isEmpty else { return result }
-        let candidates = [fileHash, baseHash].compactMap { $0 }
-        guard !candidates.isEmpty else { return result }
-        // Off this actor: loading a version rebuilds (and hashes) a whole document, and the bundle
-        // strips the base against the snapshot, which parses both. The lookup goes through the
-        // document's version queue, so it sees every write accepted before this subscribe.
-        //
-        // The candidates are tried IN ORDER until one actually LOADS: a version that cannot be
-        // rebuilt (a missing blob) is answered exactly as one the server does not keep — confirming
-        // a base the device might later have to ask for would be a promise this server cannot
-        // keep — and the next candidate may still be whole.
+        let versionWork = self.versionWork, docId = id
+        // Off this actor: the lookup rebuilt (and hashed) a whole document on the version queue,
+        // and the bundle strips the base against the snapshot, which parses both.
         let reply: ServerMessage? = await Task.detached(priority: .userInitiated) {
-            let found: (hash: String, bytes: Data)? = await versionWork.run(docId) { versions in
-                for hash in candidates {
-                    if let bytes = versions.load(docId: docId, hash: hash) { return (hash, bytes) }
+            // The lookup runs BEFORE this subscribe's `ensureCurrent`, so a snapshot that was not
+            // yet a kept version (a document that predates the store) is not found there. A
+            // candidate that IS the snapshot is looked up once more, queued AFTER `ensureCurrent` —
+            // so it is confirmed only if that record actually succeeded.
+            var found = await lookup.value
+            if found == nil, let versionWork,
+               let own = candidates.first(where: { $0 == VersionDigest.hex(of: snapshot) }) {
+                found = await versionWork.run(docId) { versions in
+                    versions.load(docId: docId, hash: own).map { (hash: own, bytes: $0) }
                 }
-                return nil
             }
             guard let (chosen, base) = found,
                   let baseDigest = VersionHash.digest(hex: chosen) else { return nil }
