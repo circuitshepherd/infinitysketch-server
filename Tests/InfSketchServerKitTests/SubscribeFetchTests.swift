@@ -45,7 +45,7 @@ final class SubscribeFetchTests: XCTestCase {
         }
 
         let result = try await manager.subscribe(docId: "Ghost")
-        guard case .subscribed(_, _, let snapshot) = result.snapshot,
+        guard case .subscribed(_, _, let snapshot, _, _) = result.snapshot,
               case .inline(let bytes) = snapshot else { return XCTFail("expected inline snapshot") }
         XCTAssertEqual(bytes, Data("PULLED".utf8))
         // Persisted — it is now a content doc and STAYS.

@@ -116,7 +116,7 @@ final class FetchPathHardeningTests: XCTestCase {
 
         await gate.open()
         let result = try await subscribeTask.value
-        guard case .subscribed(_, _, let snapshot) = result.snapshot,
+        guard case .subscribed(_, _, let snapshot, _, _) = result.snapshot,
               case .inline(let bytes) = snapshot else { return XCTFail("expected inline snapshot") }
         XCTAssertEqual(bytes, Data("V2".utf8), "the session must open over the durable bytes, not the stale fetch")
         XCTAssertEqual(try store.load(docId: "Ghost"), Data("V2".utf8), "must NOT revert disk to V1")

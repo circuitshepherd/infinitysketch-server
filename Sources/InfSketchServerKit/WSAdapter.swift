@@ -261,7 +261,9 @@ actor Connection {
         case _ where !helloed:
             emit(.error(reason: "helloRequired"))
 
-        case .subscribe(let docId, let createIfMissing, let name):
+        case .subscribe(let docId, let createIfMissing, let name, _, _, _):
+            // `baseHash`/`fileHash`/`wantBase` are wired into `manager.subscribe` in the task that
+            // teaches the server to keep versions — this task only puts them on the wire.
             // Always a full snapshot.
             // Per-document, so it names its document: a docId-less `error` here failed EVERY
             // pending subscribe on the connection, other documents' opens included.
@@ -489,6 +491,11 @@ actor Connection {
                 return emit(.error(reason: WireErrorReason.badAdvertisement))
             }
             await manager.applyAdvertisements(ads, connectionId: connectionId, deviceId: deviceId)
+
+        case .baseSaved:
+            // Moving the device's held base onto this version is the job of the task that teaches
+            // the server to keep versions; this task only puts the message on the wire.
+            break
         }
     }
 
@@ -665,8 +672,8 @@ extension ServerMessage {
     /// per connection on the way out.
     func addressed(to docId: String) -> ServerMessage {
         switch self {
-        case .subscribed(_, let seq, let snapshot):
-            return .subscribed(docId: docId, seq: seq, snapshot: snapshot)
+        case .subscribed(_, let seq, let snapshot, let baseHash, let snapshotKind):
+            return .subscribed(docId: docId, seq: seq, snapshot: snapshot, baseHash: baseHash, snapshotKind: snapshotKind)
         case .event(_, let seq, let kind, let opId, let payload):
             return .event(docId: docId, seq: seq, kind: kind, opId: opId, payload: payload)
         case .reject(_, let opId, let reason, let seq):
@@ -694,9 +701,9 @@ extension ClientMessage {
     /// The document a message acts on, for the messages whose order per document matters.
     var documentScope: String? {
         switch self {
-        case .subscribe(let docId, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
+        case .subscribe(let docId, _, _, _, _, _), .unsubscribe(let docId), .deleteDoc(let docId),
              .op(let docId, _, _, _), .watchDoc(let docId, _), .unwatchDoc(let docId),
-             .frame(let docId, _, _, _), .renameDoc(let docId, _):
+             .frame(let docId, _, _, _), .renameDoc(let docId, _), .baseSaved(let docId, _):
             return docId
         default:
             return nil

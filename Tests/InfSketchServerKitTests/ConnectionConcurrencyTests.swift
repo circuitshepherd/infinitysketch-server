@@ -94,14 +94,14 @@ import InfSketchWire
         let answered = await harness.wait { collector in
             let messages = await collector.messages
             return messages.contains { if case .docList = $0 { true } else { false } }
-                && messages.contains { if case .subscribed("d", _, _) = $0 { true } else { false } }
+                && messages.contains { if case .subscribed("d", _, _, _, _) = $0 { true } else { false } }
         }
         #expect(answered, "a listing and another document's subscribe must not wait for the fetch")
-        #expect(await harness.collector.index { if case .subscribed("remote", _, _) = $0 { true } else { false } } == nil)
+        #expect(await harness.collector.index { if case .subscribed("remote", _, _, _, _) = $0 { true } else { false } } == nil)
 
         await gate.release()
         #expect(await harness.wait { collector in
-            await collector.index { if case .subscribed("remote", _, _) = $0 { true } else { false } } != nil
+            await collector.index { if case .subscribed("remote", _, _, _, _) = $0 { true } else { false } } != nil
         })
     }
 
@@ -154,7 +154,7 @@ import InfSketchWire
         }, "the op must be applied after the subscribe")
         let messages = await harness.collector.messages
         #expect(!messages.contains(.error(reason: "notSubscribed")))
-        let subscribed = messages.firstIndex { if case .subscribed("remote", _, _) = $0 { true } else { false } }
+        let subscribed = messages.firstIndex { if case .subscribed("remote", _, _, _, _) = $0 { true } else { false } }
         let event = messages.firstIndex { if case .event("remote", _, _, "o1", _) = $0 { true } else { false } }
         #expect(subscribed != nil && event != nil && subscribed! < event!)
     }

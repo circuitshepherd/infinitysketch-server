@@ -40,7 +40,7 @@ connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a 
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
 browser page sends still answer with `error` — only pages watch.)
 
-The version check is **exact equality** (`WireProtocol.version`, currently 13), and that is
+The version check is **exact equality** (`WireProtocol.version`, currently 14), and that is
 deliberate: both decoders throw on an unknown message `type` rather than ignoring it, so an older
 peer does not degrade gracefully — it would die on the first message it cannot decode, arbitrarily
 long after connecting, with no diagnosable cause. Refusing at the handshake converts that into a
@@ -70,9 +70,20 @@ never the id.
 
 ## Document sessions
 
-- `subscribe(docId, createIfMissing, name)` → `subscribed(docId, seq, snapshot)` or
-  `subscribeFailed`. The snapshot is the full document; there is no history replay. `name` labels a
-  document this subscribe CREATES; it is ignored when the document already exists.
+- `subscribe(docId, createIfMissing, name, baseHash, fileHash, wantBase)` → `subscribed(docId, seq,
+  snapshot, baseHash, snapshotKind)` or `subscribeFailed`. The snapshot is the full document; there
+  is no history replay. `name` labels a document this subscribe CREATES; it is ignored when the
+  document already exists. `baseHash` names the version the device holds as its base (live, or a
+  note read at open); `fileHash` names the version the note says the FILE itself may BE, which wins
+  when the server holds it (a close push made the file exactly that version). The reply's `baseHash`
+  confirms whichever of those the server holds and is the base to use; with `wantBase` the base's
+  bytes ride along too, as a `SnapshotBundle` (`snapshotKind == "snapshotWithBase"`) cut against the
+  snapshot — an image both share crosses the wire once. Neither field means a refusal: a base the
+  server does not hold is simply no base, and the device falls back to the union merge.
+- `baseSaved(docId, versionHash)` tells the server a device now bases this document on
+  `versionHash` — a note write, not a document edit, so it carries no `WriteExpectation` and gets no
+  reply. It moves that device's held base; an unknown version releases the old hold rather than
+  keeping it.
 - Writes are `op(docId, opId, payload, expectation)`. An accepted op is broadcast to every
   subscriber as `event` with a per-session increasing `seq`; the writer's own op comes back as its
   ack. A refused op is `reject(docId, opId, reason, seq)`.

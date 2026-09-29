@@ -154,7 +154,7 @@ private struct ServerMessageReader {
         try harness.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
         try harness.send(.subscribe(docId: "d", createIfMissing: true))
-        guard case .subscribed(docId: "d", _, _)? = try await reader.next() else {
+        guard case .subscribed(docId: "d", _, _, _, _)? = try await reader.next() else {
             Issue.record("expected the first subscribe to succeed"); return
         }
         try harness.send(.subscribe(docId: "d", createIfMissing: true))
@@ -337,7 +337,7 @@ private struct ServerMessageReader {
         try harness.send(.subscribe(docId: "d", createIfMissing: false))
 
         guard case .text(let announce) = await it.next(),
-              case .subscribed(_, 0, .transfer(let d)) = try ServerMessage(jsonText: announce)
+              case .subscribed(_, 0, .transfer(let d), _, _) = try ServerMessage(jsonText: announce)
         else { Issue.record("expected descriptor announce"); return }
         #expect(d.totalBytes == Fixtures.docBytes.count)
         var reassembled = Data()

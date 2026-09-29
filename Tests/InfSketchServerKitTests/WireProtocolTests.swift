@@ -31,7 +31,9 @@ import InfSketchWire
         /// `error` used to fail every pending request on the connection.
         /// v13 (2026-09-29): docId IS the documentId, names are labels. Same message shapes as a
         /// `main` wire 12 that addressed documents by name, so 12 could not keep both meanings.
-        #expect(WireProtocol.version == 13)
+        /// v14 (2026-09-29): `subscribe` names a base (`baseHash`/`fileHash`/`wantBase`),
+        /// `subscribed` may carry it (`snapshotWithBase`), and `baseSaved` moves a device's hold.
+        #expect(WireProtocol.version == 14)
     }
 
     @Test func clientMessagesRoundTrip() throws {

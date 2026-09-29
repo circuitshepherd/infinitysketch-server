@@ -347,7 +347,7 @@ public actor SessionManager {
         tokenDocs[result.token] = (docId, session, connectionId)
         let newCount = counts[docId, default: 0] + 1
         counts[docId] = newCount
-        if case .subscribed(_, let seq, _) = result.snapshot {
+        if case .subscribed(_, let seq, _, _, _) = result.snapshot {
             emitStatus(docId: docId, kind: "subscriberCount", seq: seq, count: newCount)
         }
         return result
