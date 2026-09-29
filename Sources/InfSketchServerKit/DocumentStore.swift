@@ -5,12 +5,17 @@ public struct StoredDocInfo: Sendable, Equatable {
     public let name: String
     public let sizeBytes: Int
     public let modifiedAt: Date
+    /// Whether `name` is a recorded label (false: no label, `name` is the id). Carried so a listing
+    /// never asks the store per document again (`SessionManager.listedName`).
+    public let labelled: Bool
 
-    public init(docId: String, name: String, sizeBytes: Int, modifiedAt: Date) {
+    /// `labelled` defaults to "the name is not the id", right for every store that keeps no labels.
+    public init(docId: String, name: String, sizeBytes: Int, modifiedAt: Date, labelled: Bool? = nil) {
         self.docId = docId
         self.name = name
         self.sizeBytes = sizeBytes
         self.modifiedAt = modifiedAt
+        self.labelled = labelled ?? (name != docId)
     }
 }
 
@@ -49,6 +54,9 @@ public protocol DocumentStore: Sendable {
     func name(of docId: String) -> String?
     /// Records `name` as `docId`'s label.
     func setName(_ name: String, for docId: String) throws
+    /// Records `name` as the label of the document stored under EXACTLY `storedId` (a spelling the
+    /// caller took from `list()`), with no lookup of the stored spelling.
+    func setName(_ name: String, forStoredId storedId: String) throws
     /// Forgets `docId`'s label (a document deleted without stored bytes — `delete` drops the label
     /// of a stored one itself).
     func removeName(for docId: String)
@@ -69,6 +77,9 @@ extension DocumentStore {
     /// Stores that keep no labels: every document is shown by its id.
     public func name(of docId: String) -> String? { nil }
     public func setName(_ name: String, for docId: String) throws {}
+    public func setName(_ name: String, forStoredId storedId: String) throws {
+        try setName(name, for: storedId)
+    }
     public func removeName(for docId: String) {}
 }
 
@@ -82,6 +93,10 @@ public struct DirectoryDocumentStore: DocumentStore {
     private let trashRetention: TimeInterval
     /// documentId → name (`.names.json`). A class instance, so this struct stays a value.
     private let labels: DocumentLabels
+    /// How many times this store enumerated its directory (`list()`, `storedDocId(matching:)`) —
+    /// what `ListingCostTests` counts, so a per-document lookup that lists the folder again (an
+    /// O(N²) listing on the session actor) fails a test instead of a large library.
+    let directoryListings = ListingCounter()
 
     public init(directory: URL, trashRetention: TimeInterval = 30 * 24 * 60 * 60) {
         self.directory = directory
@@ -133,20 +148,24 @@ public struct DirectoryDocumentStore: DocumentStore {
 
     public func list() throws -> [StoredDocInfo] {
         let fm = FileManager.default
+        directoryListings.increment()
         let urls = try fm.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+        let labelled = labels.all()
         return urls
             .filter { $0.pathExtension == Self.fileExtension }
             .compactMap { url in
                 guard let values = try? url.resourceValues(
                     forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
                 let id = url.deletingPathExtension().lastPathComponent
+                let label = labelled[id]
                 return StoredDocInfo(
                     docId: id,
-                    name: labels.name(of: id) ?? id,
+                    name: label ?? id,
                     sizeBytes: values.fileSize ?? 0,
-                    modifiedAt: values.contentModificationDate ?? .distantPast)
+                    modifiedAt: values.contentModificationDate ?? .distantPast,
+                    labelled: label != nil)
             }
     }
 
@@ -166,12 +185,29 @@ public struct DirectoryDocumentStore: DocumentStore {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
     }
 
+    /// Exact key first, then the labels' own keys folded — both in memory. The folder is listed
+    /// only when two labelled ids differ just by case, where the stored spelling decides.
     public func name(of docId: String) -> String? {
-        labels.name(of: storedDocId(matching: docId) ?? docId)
+        let all = labels.all()
+        if let exact = all[docId] { return exact }
+        let wanted = docId.lowercased()
+        let folded = all.keys.filter { $0.lowercased() == wanted }
+        switch folded.count {
+        case 0: return nil
+        case 1: return all[folded[0]]
+        default: return all[storedDocId(matching: docId) ?? folded.min()!]
+        }
     }
 
+    /// An id already labelled under this exact spelling needs no listing (every rename of a
+    /// labelled document); otherwise the stored spelling is looked up.
     public func setName(_ name: String, for docId: String) throws {
+        if labels.name(of: docId) != nil { return try labels.set(name, for: docId) }
         try labels.set(name, for: storedDocId(matching: docId) ?? docId)
+    }
+
+    public func setName(_ name: String, forStoredId storedId: String) throws {
+        try labels.set(name, for: storedId)
     }
 
     public func removeName(for docId: String) {
@@ -191,7 +227,11 @@ public struct DirectoryDocumentStore: DocumentStore {
     }
 
     public func storedDocId(matching docId: String) -> String? {
-        guard let stored = try? list().map(\.docId) else { return nil }
+        directoryListings.increment()
+        // Names only — no attributes, no labels — unlike `list()`.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return nil }
+        let suffix = ".\(Self.fileExtension)"
+        let stored = names.filter { $0.hasSuffix(suffix) }.map { String($0.dropLast(suffix.count)) }
         if stored.contains(docId) { return docId }
         let wanted = docId.lowercased()
         // `.min()`: two files differing only in case can exist on a case-sensitive filesystem, and
@@ -426,4 +466,13 @@ public enum ThumbnailExtractor {
               !png.isEmpty else { return nil }
         return png
     }
+}
+
+
+/// A thread-safe count (`DirectoryDocumentStore.directoryListings`).
+final class ListingCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() { lock.lock(); value += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
 }

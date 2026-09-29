@@ -224,7 +224,7 @@ sync with it too, but its agent tools need 2.3. The app and the server check the
 versions exactly, so an app with a different protocol will not connect -- it simply shows the
 server as offline rather than reporting a mismatch.
 
-NOTE (next release, wire protocol 12): builds made after the wire-12 change pair only with the
+NOTE (next release, wire protocol 13): builds made after the wire-13 change pair only with the
 InfinitySketch release that ships beside them; that app names a version mismatch in its sync
 status instead of showing "offline". Update this paragraph with the paired app version when it is
 tagged.

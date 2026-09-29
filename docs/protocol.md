@@ -40,7 +40,7 @@ connection is not subscribed to is `reject(docId, opId, "notSubscribed", 0)`, a 
 `docDeleted(docId)`, and a `frame` for an unsubscribed document is dropped. (The watch messages a
 browser page sends still answer with `error` — only pages watch.)
 
-The version check is **exact equality** (`WireProtocol.version`, currently 12), and that is
+The version check is **exact equality** (`WireProtocol.version`, currently 13), and that is
 deliberate: both decoders throw on an unknown message `type` rather than ignoring it, so an older
 peer does not degrade gracefully — it would die on the first message it cannot decode, arbitrarily
 long after connecting, with no diagnosable cause. Refusing at the handshake converts that into a
@@ -48,7 +48,10 @@ clean, immediate error. Consequently **every wire addition bumps the version**, 
 version that is **not yet released**: while no `v*` tag of this repository contains the commit that
 introduced the current version, a further wire change folds into that same version instead of
 bumping again (both ends deploy together, and no released peer speaks it yet). Once a tag contains
-it, the next wire change bumps.
+it, the next wire change bumps. **A version must never carry two meanings**, which is the other
+half of the rule: wire 12 was folded while unreleased, but `main` already carried it with documents
+addressed by NAME, so documents-by-`documentId` took **13** — a wire-12 peer of either meaning
+decodes the other's messages silently and acts on the wrong identity.
 
 `capabilities` declares what the client can do for the server — device-relayed ops (`render`,
 `createDoc`, `authorStrokes`, `authorText`, `authorImage`, `authorGrids`, `mergeDocs`,

@@ -1398,7 +1398,8 @@ public actor MCPAdapter {
             description: """
                 Replaces a document's raw bytes wholesale, keeping its id. When no document \
                 has that id or name, creates a NEW document with that name and its own id, \
-                replying with JSON {docId, name, seq}; a replace replies "replaced <id> at seq \
+                replying with JSON {docId, name, seq} — except a reference shaped like an id, \
+                which is a stale id and is refused unknownDoc; a replace replies "replaced <id> at seq \
                 <n>". The bytes are opaque to the server — the agent owns their validity, \
                 the same trust any other writer on the network has. \(writeToolCaveats)
                 """,
@@ -3837,6 +3838,9 @@ public actor MCPAdapter {
             // its own fresh id — the reference was never an id the agent could choose.
             if !docIdResolved {
                 guard let name = Self.newDocumentName(docId) else { return Self.blankNameResult("docId") }
+                // …unless it is shaped like an id: that is a stale id (a deleted document, another
+                // server's), and a document labelled with a UUID is not what the agent asked for.
+                if UUID(uuidString: name) != nil { return Self.errorResult("unknownDoc") }
                 if let refusal = await claimNameForCreate(name) { return refusal }
                 defer { releaseName(name) }
                 return await createNamedDocument(newId: mintDocumentId(), name: name, bytes: bytes) { id, seq in

@@ -29,7 +29,9 @@ import InfSketchWire
         /// v12 (2026-09-28): `helloAck.serverId`, `frame.seq`, the `spec` bundle part, and per-document
         /// answers (`reject notSubscribed`, `subscribeFailed alreadySubscribed`) where a docId-less
         /// `error` used to fail every pending request on the connection.
-        #expect(WireProtocol.version == 12)
+        /// v13 (2026-09-29): docId IS the documentId, names are labels. Same message shapes as a
+        /// `main` wire 12 that addressed documents by name, so 12 could not keep both meanings.
+        #expect(WireProtocol.version == 13)
     }
 
     @Test func clientMessagesRoundTrip() throws {

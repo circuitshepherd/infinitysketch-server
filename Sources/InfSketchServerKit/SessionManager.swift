@@ -767,7 +767,7 @@ public actor SessionManager {
     /// user's file to a UUID, and that device then advertised the UUID stem as the name.
     /// (`StoredDocInfo.name` falls back to the id itself when there is no label.)
     private func listedName(stored info: StoredDocInfo) -> String {
-        if store.name(of: info.docId) != nil { return info.name }
+        if info.labelled { return info.name }
         if let advertised = liveIndexEntry(info.docId)?.name, !Self.isIdItself(advertised, docId: info.docId) {
             return advertised
         }
@@ -826,10 +826,17 @@ public actor SessionManager {
         // A STORED document without a label takes the advertised name — what restores the labels
         // after `.names.json` was lost. A labelled document keeps its label: a name changes only
         // through `renameDoc`.
-        for ad in unlabelled {
-            let docId = canonicalDocId(ad.docId)
-            guard store.name(of: docId) == nil, (try? store.exists(docId: docId)) ?? false else { continue }
-            try? store.setName(ad.name, for: docId)
+        // The stored ids are listed ONCE for the batch — per advertisement it was a directory
+        // listing per document, O(N²) on this actor for a device advertising a large library.
+        if !unlabelled.isEmpty, let stored = try? store.list().map(\.docId) {
+            let exact = Set(stored)
+            var folded: [String: String] = [:]
+            for id in stored.sorted() where folded[id.lowercased()] == nil { folded[id.lowercased()] = id }
+            for ad in unlabelled {
+                guard let docId = exact.contains(ad.docId) ? ad.docId : folded[ad.docId.lowercased()],
+                      store.name(of: docId) == nil else { continue }
+                try? store.setName(ad.name, forStoredId: docId)
+            }
         }
         announceLiveIndexChange(from: before)
     }

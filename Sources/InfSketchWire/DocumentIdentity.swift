@@ -16,8 +16,8 @@ import Foundation
 ///    document's id. Replacing the content is an edit of that document; taking the id the
 ///    agent's bytes happen to carry would make every device holding a lineage of it refuse the
 ///    lineage and union the old content back in.
-/// Bytes with no `documentId` (a legacy document) are left without one: the app mints an id when
-/// it loads such a file.
+/// Both paths use `settingDocumentId`, so bytes with no `documentId` (a legacy document) GAIN one —
+/// the store keys a document by its id, and the bytes must say the same.
 ///
 /// **Byte-level, never decode and re-encode**: the same rule every server-side document edit
 /// keeps — the document stays exactly the bytes it was except for the one value, the key order is

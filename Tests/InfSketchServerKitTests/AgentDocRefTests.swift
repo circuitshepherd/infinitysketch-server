@@ -107,6 +107,24 @@ struct AgentDocRefTests {
         #expect(DocumentIdentity.documentId(of: stored) == created?.docId)
     }
 
+    /// A reference shaped like an id that reaches nothing is a STALE id (a deleted document, one
+    /// from another server), never a name an agent chose — creating a document labelled with a
+    /// UUID would give the agent a success for a document it never meant. Refused `unknownDoc`.
+    @Test func replacingAnUnknownIdShapedRefIsRefused() async throws {
+        let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart"])
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+        let stale = UUID().uuidString
+        for ref in [stale, stale.lowercased()] {
+            let (content, isError) = try await c.callTool(
+                name: "replace_doc",
+                arguments: ["docId": .string(ref), "bytes": .string(Fixtures.docBytes.base64EncodedString())])
+            #expect(isError == true)
+            #expect(text(content).hasPrefix("unknownDoc"))
+        }
+        #expect(try store.list().map(\.docId) == ["A-1"])
+    }
+
     /// `replace_doc` of a NAME replaces that document and keeps its id.
     @Test func replacingANamedDocumentKeepsItsId() async throws {
         let (_, port, task, store) = try await startServer(labelled: ["A-1": "Chart"])

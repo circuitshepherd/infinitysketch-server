@@ -32,9 +32,13 @@ public enum WireProtocol {
     // `subscribe.fromSeq` (always nil, always ignored), `resyncRequired` and `transferAbort` (never
     // sent by anyone).
     //
-    // identity (2026-09-28, still v12 while unreleased): docId IS the documentId; names are labels
-    // (subscribe.name, advertisement/listing name, renameDoc/docRenamed).
-    public static let version = 12
+    // v13 (2026-09-29): docId IS the documentId; names are labels (subscribe.name,
+    // advertisement/listing name, renameDoc/docRenamed). Wire 12 was never tagged, but `main`
+    // carried it with NAME identity, and the message shapes are the same — so a wire-12 app and a
+    // wire-13 server (or the reverse) would decode each other silently while meaning different
+    // things by a docId: an old app creates stem-named duplicates here, and a new app adopts a
+    // stem as an id and rewrites every legacy file's documentId to it. One version, one meaning.
+    public static let version = 13
 }
 
 /// A bulk byte field on a wire message: inline for small payloads (v0 shape),
