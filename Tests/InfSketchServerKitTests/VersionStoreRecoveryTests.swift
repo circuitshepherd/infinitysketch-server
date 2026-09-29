@@ -177,3 +177,33 @@ extension VersionStoreRecoveryTests {
         #expect(reopened.load(docId: "doc", hash: hash) == v)
     }
 }
+
+extension VersionStoreRecoveryTests {
+    /// A delete killed before its queued `removeAll` ran: the document file is gone (in the trash)
+    /// while its version folder still has its index and a device's hold. A delete removes the
+    /// versions AND the holds (spec §1), so the next start finishes it — folder and blobs — while a
+    /// document that still exists keeps its versions and holds untouched.
+    @Test func aDeleteKilledBeforeItsRemoveAllIsFinishedAtStart() throws {
+        let dir = try VersionFixtures.temporaryDirectory()
+        let store = DirectoryVersionStore(directory: dir)
+        var hashes: [String: String] = [:]
+        for (id, seed) in [("deleted", UInt8(74)), ("alive", UInt8(75))] {
+            let v = VersionFixtures.document(marker: id, images: [(UUID(), VersionFixtures.image(seed: seed))],
+                                             documentId: id)
+            let hash = VersionDigest.hex(of: v)
+            try store.record(docId: id, bytes: v, hash: hash)
+            #expect(store.setHold(docId: id, deviceId: "device", slot: .base, hash: hash, now: Date(), sparing: []))
+            hashes[id] = hash
+        }
+        try Data("x".utf8).write(to: dir.appendingPathComponent("alive.infsketch"))
+        let blobs = dir.appendingPathComponent(DirectoryVersionStore.blobsDirectoryName)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: blobs.path).count == 2)
+
+        let reopened = DirectoryVersionStore(directory: dir)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent(".versions/deleted").path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: blobs.path).count == 1)
+        #expect(reopened.holds(docId: "alive")["device"]?.base == hashes["alive"])
+        #expect(reopened.load(docId: "alive", hash: try #require(hashes["alive"])) != nil)
+        #expect(reopened.verify().isEmpty)
+    }
+}

@@ -309,6 +309,9 @@ import InfSketchWire
             for key in original.manifest.keys { wrong[key] = String(repeating: "e", count: 64) }
             try StoredVersion(manifest: wrong, stripped: original.stripped).encoded().write(to: v1File, options: .atomic)
         }
+        // The document exists: versions exist only for stored documents, and a start removes the
+        // versions of one whose file is gone (a deleted document, Task 4.3).
+        try v2.write(to: dir.appendingPathComponent("doc.infsketch"))
         // Restart: the scan counts the WRONG sha for v1 and the real one only once, from v2.
         let reopened = DirectoryVersionStore(directory: dir)
         // Repair v1 by recording the same bytes again — this must restore the real blob's count

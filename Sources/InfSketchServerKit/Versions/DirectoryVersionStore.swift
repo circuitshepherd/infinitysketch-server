@@ -27,7 +27,8 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
 
     /// Also cleans up after a process that was killed part-way through a write (Task 4.3), BEFORE
     /// anything can use the store — this runs before the server accepts a connection, so before any
-    /// `VersionWork` job: a version folder an interrupted `removeAll` left behind, then every blob
+    /// `VersionWork` job: the version folder of a deleted document an interrupted (or never run)
+    /// `removeAll` left behind, then every blob
     /// no version file on disk references (an interrupted `record` or sweep).
     public init(directory: URL) {
         root = directory
@@ -462,15 +463,18 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
         }
     }
 
-    /// A `.versions/<id>/` folder with no `holds.json`, no quarantined index and no document file
-    /// under that id is what a `removeAll` killed after its index went leaves behind: its versions
-    /// belong to nothing (the document is gone), so the folder is removed. Its blobs are not
-    /// released here — the reference counts are built only afterwards, from what is left on disk.
+    /// A `.versions/<id>/` folder whose document file is gone belongs to a DELETED document: ids
+    /// are stable and versions exist only for stored documents, so a delete is the only way the
+    /// file disappears — and spec §1 has a delete remove the versions AND the holds (every device
+    /// was already told `docDeleted`). A kill can interrupt that removal before it starts (the
+    /// queued `removeAll` never ran — the folder still has its index) or part-way (index gone):
+    /// either way the folder is removed here. Its blobs are not released here — the reference
+    /// counts are built only afterwards, from what is left on disk.
     ///
-    /// Never removed: a folder with an index (every write keeps one), one with a QUARANTINED index
-    /// (the holds it recorded are unreadable, not absent — see `sweep`), and one whose document
-    /// file exists under that id, in any letter case — that is a first `record` killed before its
-    /// index was written, and the document's next write writes the index.
+    /// Never removed: a folder whose document file exists under that id in any letter case (a
+    /// first `record` killed before its index was written — the next write writes it), and one
+    /// with a QUARANTINED index (its holds are unreadable, not absent — see `sweep` — so there is
+    /// no certainty to act on).
     private func pruneAbandonedFolders() {
         let fm = FileManager.default
         let docFiles = Set(((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])
@@ -480,12 +484,11 @@ public final class DirectoryVersionStore: VersionStore, @unchecked Sendable {
             let dir = versionsDir.appendingPathComponent(doc, isDirectory: true)
             var isDirectory: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue,
-                  !fm.fileExists(atPath: dir.appendingPathComponent(Self.holdsFileName).path),
                   !hasQuarantinedIndex(dir),
                   !docFiles.contains(doc.lowercased())
             else { continue }
             if (try? fm.removeItem(at: dir)) != nil {
-                ServerLog.verbose("[versions] removed '\(doc)': no index and no document — an interrupted delete")
+                ServerLog.verbose("[versions] removed '\(doc)': its document is gone — an interrupted delete")
             }
         }
     }
