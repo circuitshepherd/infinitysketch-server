@@ -605,14 +605,18 @@ THE LIST IS ORDERED BY DISTANCE, AND DISTANCE IS NOT A RECOMMENDATION. Measured 
 
 maxCandidates (default 64) is a SAFETY VALVE, not a working parameter: truncation drops the FARTHEST candidates, which are usually the coarse VISIBLE ones you want — lowering it can silently delete the answer you need. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Read-only: no write, no seq bump.
 
-REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from.
+OBJECTS: pass objects: true to also get the points of the drawing itself within objectRadius (canvas points, default 50) — stroke ends, midpoints, crossings of two strokes, where a stroke crosses a grid line, the corners, edge middles and center of images and texts, and text baselines. They come back in a separate objectCandidates list, ordered by distance, each naming the element(s) it belongs to by the same ids list_strokes, list_texts and list_images report — so you can connect a new line to a SPECIFIC stroke's end. Needs a device with the snapObjects capability (noDeviceAvailable otherwise).
+
+REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from. With objects: true each entry also carries `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, boxEdgeMiddle, boxCenter, textBaseline.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `canvasPoints` | array | yes | Canvas-space [x, y] points to find snap candidates for. |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
-| `gridIds` | array | no | Consider only these grids (ids from render_sketch's metadata). Default: all of them, including invisible and disabled ones. |
-| `maxCandidates` | integer | no | Per point; default 64. The cap drops the FARTHEST candidates. |
+| `gridIds` | array | no | Consider only these grids (ids from render_sketch's metadata) — for the grid candidates and for objectCandidates' grid-line crossings. Default: all of them, including invisible and disabled ones. |
+| `maxCandidates` | integer | no | Per point; default 64. The cap drops the FARTHEST candidates (applies to each list). |
+| `objectRadius` | number | no | Canvas points around each point to look for objectCandidates in; default 50. |
+| `objects` | boolean | no | Also return objectCandidates: the points of strokes, images and texts near each point. Default false. |
 
 ---
 
