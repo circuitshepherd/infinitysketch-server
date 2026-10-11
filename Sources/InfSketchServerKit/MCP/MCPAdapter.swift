@@ -2050,11 +2050,25 @@ public actor MCPAdapter {
                 is connected and deviceTimeout if it doesn't respond in time. Read-only: \
                 no write, no seq bump.
 
+                OBJECTS: pass objects: true to also get the points of the drawing itself \
+                within objectRadius (canvas points, default 50) — stroke ends, midpoints, \
+                crossings of two strokes, where a stroke crosses a grid line, the corners, \
+                edge middles and center of images and texts, and text baselines. They come \
+                back in a separate objectCandidates list, ordered by distance, each naming \
+                the element(s) it belongs to by the same ids list_strokes, list_texts and \
+                list_images report — so you can connect a new line to a SPECIFIC stroke's \
+                end. Needs a device with the snapObjects capability (noDeviceAvailable \
+                otherwise).
+
                 REPLY: an ARRAY, one entry per point you asked about, each \
                 `{canvasPoint, candidates}` where a candidate is \
                 `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid \
                 line, or an intersection of two families) and `parents` names the grid(s) and \
-                families it came from.
+                families it came from. With objects: true each entry also carries \
+                `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus \
+                `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of \
+                endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, \
+                boxEdgeMiddle, boxCenter, textBaseline.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2072,14 +2086,23 @@ public actor MCPAdapter {
                     "gridIds": .object([
                         "type": "array",
                         "description": """
-                            Consider only these grids (ids from render_sketch's metadata). \
-                            Default: all of them, including invisible and disabled ones.
+                            Consider only these grids (ids from render_sketch's metadata) — \
+                            for the grid candidates and for objectCandidates' grid-line \
+                            crossings. Default: all of them, including invisible and disabled ones.
                             """,
                         "items": .object(["type": "integer"]),
                     ]),
                     "maxCandidates": .object([
                         "type": "integer",
-                        "description": "Per point; default 64. The cap drops the FARTHEST candidates.",
+                        "description": "Per point; default 64. The cap drops the FARTHEST candidates (applies to each list).",
+                    ]),
+                    "objects": .object([
+                        "type": "boolean",
+                        "description": "Also return objectCandidates: the points of strokes, images and texts near each point. Default false.",
+                    ]),
+                    "objectRadius": .object([
+                        "type": "number",
+                        "description": "Canvas points around each point to look for objectCandidates in; default 50.",
                     ]),
                 ]),
                 "required": .array(["docId", "canvasPoints"].map(Value.string)),
@@ -4898,11 +4921,16 @@ public actor MCPAdapter {
             // Only the keys the caller actually supplied — deep validation
             // (unknown gridId, maxCandidates <= 0) is the device's job,
             // surfaced verbatim as `deviceFailed: <reason>`.
-            for name in ["gridIds", "maxCandidates"] {
+            for name in ["gridIds", "maxCandidates", "objects", "objectRadius"] {
                 if let value = arguments?[name] {
                     envelope[name] = value
                 }
             }
+            // Object candidates need a device that knows them: an older app would drop the keys
+            // and answer with grid candidates alone, silently. Routing by capability turns that
+            // into noDeviceAvailable instead, with no wire-version bump.
+            let wantsObjects: Bool
+            if case .bool(true)? = arguments?["objects"] { wantsObjects = true } else { wantsObjects = false }
 
             let spec: Data
             do {
@@ -4913,7 +4941,8 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: wantsObjects ? "snapObjects" : "authorStrokes")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

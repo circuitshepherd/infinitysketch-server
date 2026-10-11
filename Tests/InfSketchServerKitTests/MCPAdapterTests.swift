@@ -3237,6 +3237,62 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Object snap candidates (Josef, 2026-10-10): `objects`/`objectRadius` reach the device
+    /// envelope, and the request goes ONLY to a device advertising `snapObjects` — an app that
+    /// predates them would drop the keys and answer with grid candidates alone, silently.
+    @Test func snapPointsWithObjectsRelaysThemToASnapObjectsDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reply = Data(#"[{"canvasPoint":[1,1],"candidates":[],"objectCandidates":[]}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply),
+                                                  capabilities: ["authorStrokes", "snapObjects"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.double(1), .double(1)])]),
+            "objects": .bool(true),
+            "objectRadius": .double(30),
+        ])
+        #expect(isError != true)
+        #expect(toolResultText(content).contains("objectCandidates"))
+        let received = try #require(await device.receivedRequests.first)
+        let specJSON = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(Set(specJSON.keys) == ["op", "canvasPoints", "objects", "objectRadius"])
+        #expect(specJSON["objects"] as? Bool == true)
+        #expect(specJSON["objectRadius"] as? Double == 30)
+
+        await server.stop()
+    }
+
+    @Test func snapPointsWithObjectsRefusesADeviceWithoutSnapObjects() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d",
+            "canvasPoints": .array([.array([.double(1), .double(1)])]),
+            "objects": .bool(true),
+        ])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        #expect(await device.receivedRequests.isEmpty)
+
+        // Without `objects` the same device still answers, as before.
+        let (_, plainError) = try await client.callTool(name: "snap_points", arguments: [
+            "docId": "d", "canvasPoints": .array([.array([.double(1), .double(1)])]),
+        ])
+        #expect(plainError != true)
+
+        await server.stop()
+    }
+
     @Test func snapPointsWithNoDeviceErrors() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
