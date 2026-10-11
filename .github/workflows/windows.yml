@@ -48,7 +48,11 @@ jobs:
       # invalid before compiling anything.
       - uses: ilammy/msvc-dev-cmd@v1
       - run: swift build
-      - run: swift test
+      # Serial on purpose: the runner has 2 vCPUs and slow file writes, and the version-store
+      # tests write thousands of files synchronously. Run in parallel they held the cooperative
+      # threads for 15-60 s at a time, and every test with a time bound in it then failed together
+      # (2026-10-11: 18 to 53 failures per run, a different count each time, none on Linux or macOS).
+      - run: swift test --no-parallel
 
   # Builds the self-contained "unzip and run" package: the release executable plus the Swift
   # redistributable runtime, so a user needs no Swift, no Visual Studio and no Developer Mode.
