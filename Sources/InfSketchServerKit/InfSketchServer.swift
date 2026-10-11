@@ -39,10 +39,20 @@ public final class InfSketchServer: Sendable {
     /// Set by `stop()` BEFORE the socket closes, so the accept failure that closing it produces
     /// ends `run()` instead of being retried as descriptor exhaustion.
     private let stopFlag = StopFlag()
+    /// Listening and verified to own its port on the loopback addresses (`LoopbackPort`).
+    private let readiness = Readiness()
 
     private actor StopFlag {
         private(set) var isSet = false
         func set() { isSet = true }
+    }
+
+    /// Listening AND verified to own the loopback addresses — what `waitUntilListening` waits for.
+    private actor Readiness {
+        private(set) var verified = false
+        private(set) var failure: (any Error)?
+        func markVerified() { verified = true }
+        func fail(_ error: any Error) { failure = error }
     }
 
     public convenience init(
@@ -94,10 +104,13 @@ public final class InfSketchServer: Sendable {
         // The pool is wrapped so a peer that stops reading loses its SOCKET, not only its
         // subscriptions — see `WriteStallTimeoutPool`. The address mirrors FlyingFox's own
         // `init(port:)`, which cannot take a pool.
+        // An automatic port is picked so it cannot be one another program holds on 127.0.0.1
+        // (`LoopbackPort`); a fixed one is used as asked and verified once listening.
+        let bindPort = port == 0 ? ((try? LoopbackPort.pickFree()) ?? 0) : port
         #if canImport(WinSDK)
-        let address = sockaddr_in.inet(port: port)
+        let address = sockaddr_in.inet(port: bindPort)
         #else
-        let address = sockaddr_in6.inet6(port: port)
+        let address = sockaddr_in6.inet6(port: bindPort)
         #endif
         let pool = WriteStallTimeoutPool(inner: socketPool ?? HTTPServer.defaultPool(),
                                          timeout: config.writeStallTimeout)
@@ -124,24 +137,63 @@ public final class InfSketchServer: Sendable {
     /// An `accept` failure — EMFILE when descriptors run out — is not the end of the server: it
     /// waits briefly and listens again (see `AcceptResilience`). Listening again drops the
     /// connections the failed loop held, which is also what frees the descriptors.
+    ///
+    /// Once listening, it checks that it OWNS its port on 127.0.0.1 and ::1 (`LoopbackPort`): when
+    /// another program answers there, it stops and `run()` throws `LoopbackPortTaken` — reported as
+    /// "port in use" — instead of serving while the Mac's own connections go elsewhere.
     public func run() async throws {
         await configureRoutes()
         let stopFlag = self.stopFlag
-        try await AcceptResilience.run(
-            delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
-            shouldStop: { await stopFlag.isSet }
-        ) {
-            try await http.run()
+        let http = self.http
+        let readiness = self.readiness
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await AcceptResilience.run(
+                        delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
+                        shouldStop: { await stopFlag.isSet }
+                    ) {
+                        try await http.run()
+                    }
+                }
+                group.addTask { [self] in
+                    try await http.waitUntilListening(timeout: 30)
+                    let port = await self.listeningPort ?? self.requestedPort
+                    if let foreign = LoopbackPort.foreignOwner(port: port) {
+                        // Recorded BEFORE stopping, so it is what `run()` reports — stopping makes
+                        // the accept loop fail on its own (a closed descriptor), and that error
+                        // would otherwise hide the real cause.
+                        await readiness.fail(LoopbackPortTaken(port: port, address: foreign))
+                        await stopFlag.set()
+                        await http.stop(timeout: 0)
+                        return
+                    }
+                    await readiness.markVerified()
+                }
+                try await group.waitForAll()
+            }
+        } catch {
+            if let recorded = await readiness.failure { throw recorded }
+            await readiness.fail(error)
+            throw error
         }
+        if let recorded = await readiness.failure { throw recorded }
     }
 
-    /// Throws if the socket is not accepting within `timeout`. The default matches FlyingFox's own.
+    /// Throws if the server is not listening — and verified to own its loopback addresses — within
+    /// `timeout`, or as soon as `run()` has failed. The default matches FlyingFox's own.
     ///
     /// The caller that passes a SHORTER one is the startup path: it is deciding whether to open a
     /// browser, and the failure it is really waiting out — a port already in use — has already
     /// surfaced through `run()` by then.
     public func waitUntilListening(timeout: TimeInterval = 5) async throws {
-        try await http.waitUntilListening(timeout: timeout)
+        let deadline = ContinuousClock.now + .milliseconds(Int(timeout * 1000))
+        while true {
+            if await readiness.verified { return }
+            if let failure = await readiness.failure { throw failure }
+            if ContinuousClock.now >= deadline { throw SocketError.disconnected }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     /// `timeout: 0` is deliberate, and it does NOT make the shutdown abrupt.
