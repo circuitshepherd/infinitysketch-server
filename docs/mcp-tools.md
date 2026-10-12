@@ -465,7 +465,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place).
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -502,7 +502,7 @@ Place an image into a document. `path` names an image FILE ON THE MACHINE THIS S
 
 Lists a document's placed images, one per image, as {id, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags}`. The box is `canvasBounds`, NOT `bounds`. An empty array means the document has no images.
+REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags, layer}`. The box is `canvasBounds`, NOT `bounds`. `layer` is `front` or `back` — where the image paints when unpinned; a pinned image paints under everything but the paper. An empty array means the document has no images.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|

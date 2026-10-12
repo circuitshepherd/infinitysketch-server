@@ -94,15 +94,22 @@ public enum DocJSON {
         var doc = try parseDocument(bytes)
         let darkColorScheme = (doc["darkColorScheme"] as? Bool) ?? false
         var elements = rawTextElements(of: doc)
-        elements.append(makeEntry(
+        var entry = makeEntry(
             id: id.uuidString,
             text: text,
             x: x,
             y: y,
             pinned: pinned,
             colorSchemeIsDark: darkColorScheme
-        ))
-        doc["placedTextsData"] = elements
+        )
+        if usesObjectList(doc) {
+            // Format 5: an element of the one object list names its kind and its layer —
+            // a new text goes in front of the strokes, where texts have always been.
+            entry["kind"] = ElementKind.text.rawValue
+            entry["layer"] = "front"
+        }
+        elements.append(entry)
+        setElements(elements, .text, in: &doc)
         return try serialize(doc)
     }
 
@@ -152,7 +159,7 @@ public enum DocJSON {
         }
 
         elements[index] = entry
-        doc["placedTextsData"] = elements
+        setElements(elements, .text, in: &doc)
         return try serialize(doc)
     }
 
@@ -166,7 +173,7 @@ public enum DocJSON {
             throw DocJSONError.textNotFound
         }
         elements.remove(at: index)
-        doc["placedTextsData"] = elements
+        setElements(elements, .text, in: &doc)
         return try serialize(doc)
     }
 
@@ -179,13 +186,13 @@ public enum DocJSON {
     /// if no placed image matches `imageId`.
     public static func removeImage(from bytes: Data, imageId: String) throws -> Data {
         var doc = try parseDocument(bytes)
-        var placed = (doc["placedImagesData"] as? [Any]) ?? []
+        var placed = elements(.image, of: doc)
         guard let index = entryIndex(withId: imageId, in: placed) else {
             throw DocJSONError.imageNotFound
         }
         let removedPastedId = (placed[index] as? [String: Any])?["pastedImageDataId"] as? String
         placed.remove(at: index)
-        doc["placedImagesData"] = placed
+        setElements(placed, .image, in: &doc)
         // Orphan-prune the backing blob IFF no remaining placement references it (images can share a blob).
         if let removedPastedId,
            !placed.contains(where: { ($0 as? [String: Any])?["pastedImageDataId"] as? String == removedPastedId }) {
@@ -206,8 +213,8 @@ public enum DocJSON {
     /// field and are not involved.
     public static func setPinned(from bytes: Data, ids: [String], pinned: Bool) throws -> Data {
         var doc = try parseDocument(bytes)
-        let texts = (doc["placedTextsData"] as? [Any]) ?? []
-        let images = (doc["placedImagesData"] as? [Any]) ?? []
+        let texts = elements(.text, of: doc)
+        let images = elements(.image, of: doc)
 
         // Validate BEFORE mutating (atomic): every requested id must be present.
         let present = Set((texts + images).compactMap { ($0 as? [String: Any])?["id"] as? String })
@@ -227,8 +234,13 @@ public enum DocJSON {
         }
         // Only write back arrays that were actually present (don't add an empty
         // key to a doc that had no texts or no images).
-        if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
-        if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
+        if usesObjectList(doc) {
+            setElements(repin(texts), .text, in: &doc)
+            setElements(repin(images), .image, in: &doc)
+        } else {
+            if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
+            if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
+        }
         return try serialize(doc)
     }
 
@@ -331,7 +343,54 @@ public enum DocJSON {
     /// would empty the reads and make `addText` write back an array containing
     /// only the new entry (destroying every existing text).
     private static func rawTextElements(of doc: [String: Any]) -> [Any] {
-        (doc["placedTextsData"] as? [Any]) ?? []
+        elements(.text, of: doc)
+    }
+
+    // MARK: - Format 5: one object list
+
+    /// Since document format 5 (object layers) texts and images are ONE list, `placedObjects`,
+    /// whose elements carry `kind`; an older document keeps the two per-kind arrays. Every read
+    /// and write here goes through these two functions, so both shapes are edited in place and
+    /// a format-5 document never gains a stray old key (the app would still keep its elements,
+    /// but the list's order and layers are the source of truth).
+    enum ElementKind: String { case text, image
+        var legacyKey: String { self == .text ? "placedTextsData" : "placedImagesData" }
+    }
+
+    static func usesObjectList(_ doc: [String: Any]) -> Bool { doc["placedObjects"] is [Any] }
+
+    /// The elements of `kind`, in list order, each left as `Any` (the robustness rule above).
+    static func elements(_ kind: ElementKind, of doc: [String: Any]) -> [Any] {
+        if let objects = doc["placedObjects"] as? [Any] {
+            return objects.filter { (($0 as? [String: Any])?["kind"] as? String) == kind.rawValue }
+        }
+        return (doc[kind.legacyKey] as? [Any]) ?? []
+    }
+
+    /// Write back `kind`'s elements after an edit. In the one-list shape that kind's elements
+    /// are replaced BY ID: a kept one takes its new value IN ITS SLOT, a missing id is removed,
+    /// a new id goes on top (the end of the list). Elements of the other kind, unrecognized
+    /// elements and an element without an id keep their slots untouched.
+    static func setElements(_ new: [Any], _ kind: ElementKind, in doc: inout [String: Any]) {
+        guard let objects = doc["placedObjects"] as? [Any] else {
+            doc[kind.legacyKey] = new
+            return
+        }
+        func id(_ element: Any) -> String? { (element as? [String: Any])?["id"] as? String }
+        var newById: [String: Any] = [:]
+        for element in new { if let eid = id(element), newById[eid] == nil { newById[eid] = element } }
+        var placed = Set<String>()
+        var out: [Any] = []
+        for element in objects {
+            guard (element as? [String: Any])?["kind"] as? String == kind.rawValue,
+                  let eid = id(element) else { out.append(element); continue }
+            if let replacement = newById[eid], !placed.contains(eid) {
+                out.append(replacement)
+                placed.insert(eid)
+            }
+        }
+        for element in new { if let eid = id(element), !placed.contains(eid) { out.append(element); placed.insert(eid) } }
+        doc["placedObjects"] = out
     }
 
     /// Index of the dictionary element whose `id` matches, ignoring
