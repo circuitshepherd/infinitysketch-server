@@ -192,8 +192,11 @@ private actor NotificationSink {
 }
 
 /// Polls (bounded by `timeoutMS`) rather than a fixed sleep, so the happy
-/// path resolves as soon as the notification actually arrives.
-private func waitFor(_ sink: NotificationSink, atLeast n: Int, timeoutMS: Int = 2000) async -> Bool {
+/// path resolves as soon as the notification actually arrives. The bound is
+/// GENEROUS on purpose: every caller expects the notification, so it costs
+/// time only when the code is broken — a 2 s bound failed on a loaded machine
+/// (2026-10-13, load average ~95) with nothing wrong.
+private func waitFor(_ sink: NotificationSink, atLeast n: Int, timeoutMS: Int = 30_000) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: .milliseconds(timeoutMS))
     while ContinuousClock.now < deadline {
         if await sink.uris.count >= n { return true }
@@ -216,7 +219,8 @@ private func primePushChannel(
         _ = await server.manager.submit(
             docId: docId, opId: "prime-\(attempt)",
             payload: OpPayload(type: "fullDoc", data: Data([0xEE])))
-        if await waitFor(sink, atLeast: 1, timeoutMS: 700) { break }
+        // 3 s per attempt (30 s in all): 700 ms gave up after 7 s under load.
+        if await waitFor(sink, atLeast: 1, timeoutMS: 3000) { break }
     }
     #expect(await sink.uris.count >= 1, "push channel never became live")
     #expect(await sink.uris.first == "infsketch://doc/\(docId)")
