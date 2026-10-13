@@ -78,4 +78,36 @@ import Testing
         #expect(try Self.ids(out) == [Self.t1, Self.i1, Self.t2])
         #expect(try Self.object(out)["placedTextsData"] == nil)
     }
+
+    // Document format 6: an arrow element is another kind in the list. Every per-kind edit keeps
+    // it in its slot, and set_pinned reaches it.
+    static let a1 = "DDDDDDDD-0000-0000-0000-000000000001"
+    static var withArrow: Data {
+        var obj = try! object(fixture)
+        var list = obj["placedObjects"] as! [Any]
+        list.insert(["kind": "arrow", "layer": "front", "id": a1, "pinned": false, "width": 3,
+                     "startHead": "flatEnd", "endHead": "filledTriangle",
+                     "points": [["x": 0, "y": 0], ["x": 50, "y": 0]],
+                     "color": ["red": 0, "green": 0, "blue": 0, "alpha": 1]] as [String: Any], at: 1)
+        obj["placedObjects"] = list
+        obj["formatVersion"] = 6
+        return try! JSONSerialization.data(withJSONObject: obj)
+    }
+
+    @Test func anArrowKeepsItsSlotThroughTextAndImageEdits() throws {
+        let added = try DocJSON.addText(to: Self.withArrow, id: UUID(), text: "New", x: 1, y: 2, pinned: false)
+        #expect(try Self.ids(added).prefix(4) == [Self.t1, Self.a1, Self.i1, Self.t2])
+        let removed = try DocJSON.removeText(from: Self.withArrow, textId: Self.t1)
+        #expect(try Self.ids(removed) == [Self.a1, Self.i1, Self.t2])
+        let noImage = try DocJSON.removeImage(from: Self.withArrow, imageId: Self.i1)
+        #expect(try Self.ids(noImage) == [Self.t1, Self.a1, Self.t2])
+        #expect(try DocJSON.summary(from: Self.withArrow).texts.map(\.id) == [Self.t1, Self.t2])
+    }
+
+    @Test func setPinnedReachesAnArrow() throws {
+        let out = try DocJSON.setPinned(from: Self.withArrow, ids: [Self.a1], pinned: true)
+        let objects = try Self.object(out)["placedObjects"] as! [[String: Any]]
+        #expect(objects.map { $0["pinned"] as? Bool } == [false, true, false, false])
+        #expect(try Self.ids(out) == [Self.t1, Self.a1, Self.i1, Self.t2])
+    }
 }

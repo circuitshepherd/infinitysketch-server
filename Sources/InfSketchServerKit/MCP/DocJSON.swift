@@ -203,7 +203,7 @@ public enum DocJSON {
         return try serialize(doc)
     }
 
-    /// Sets the `pinned` flag to `pinned` on every placed text or image whose
+    /// Sets the `pinned` flag to `pinned` on every placed text, image or arrow whose
     /// `id` is in `ids`. `ids` may mix text ids and image ids — both arrays are
     /// scanned. ATOMIC: every id must resolve to a text or image, else
     /// `.elementNotFound` is thrown and nothing is mutated. Only the `pinned`
@@ -215,9 +215,10 @@ public enum DocJSON {
         var doc = try parseDocument(bytes)
         let texts = elements(.text, of: doc)
         let images = elements(.image, of: doc)
+        let arrows = usesObjectList(doc) ? elements(.arrow, of: doc) : []
 
         // Validate BEFORE mutating (atomic): every requested id must be present.
-        let present = Set((texts + images).compactMap { ($0 as? [String: Any])?["id"] as? String })
+        let present = Set((texts + images + arrows).compactMap { ($0 as? [String: Any])?["id"] as? String })
         for id in ids where !present.contains(id) {
             throw DocJSONError.elementNotFound
         }
@@ -237,6 +238,7 @@ public enum DocJSON {
         if usesObjectList(doc) {
             setElements(repin(texts), .text, in: &doc)
             setElements(repin(images), .image, in: &doc)
+            if !arrows.isEmpty { setElements(repin(arrows), .arrow, in: &doc) }
         } else {
             if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
             if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
@@ -353,8 +355,15 @@ public enum DocJSON {
     /// and write here goes through these two functions, so both shapes are edited in place and
     /// a format-5 document never gains a stray old key (the app would still keep its elements,
     /// but the list's order and layers are the source of truth).
-    enum ElementKind: String { case text, image
-        var legacyKey: String { self == .text ? "placedTextsData" : "placedImagesData" }
+    /// `arrow` (document format 6) exists only in the one list; its legacy key is never present.
+    enum ElementKind: String { case text, image, arrow
+        var legacyKey: String {
+            switch self {
+            case .text: return "placedTextsData"
+            case .image: return "placedImagesData"
+            case .arrow: return "placedArrowsData"
+            }
+        }
     }
 
     static func usesObjectList(_ doc: [String: Any]) -> Bool { doc["placedObjects"] is [Any] }
