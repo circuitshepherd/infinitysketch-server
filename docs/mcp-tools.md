@@ -543,7 +543,7 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAn
 
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, a solid line, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`; an omitted layer is the user's new-arrow layer). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, a solid line, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -557,7 +557,7 @@ Places an arrow — the same object the app's Arrow tool draws: a straight line 
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
 | `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
-| `layer` | string — `front`, `back` | no | front (default, above the strokes) or back (behind strokes and grids). |
+| `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 

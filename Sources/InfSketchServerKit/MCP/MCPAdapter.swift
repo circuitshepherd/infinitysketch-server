@@ -1623,7 +1623,7 @@ public actor MCPAdapter {
             description: """
                 Places an arrow — the same object the app's Arrow tool draws: a straight line from \
                 the first to the last of `canvasPoints` with a shape at each end, on top of Front \
-                objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` \
+                objects (or `layer: "back"`; an omitted layer is the user's new-arrow layer). Omitted styles take the defaults: `startHead` \
                 flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, \
                 a solid line, black. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
@@ -1655,7 +1655,7 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
-                                      "description": "front (default, above the strokes) or back (behind strokes and grids)."]),
+                                      "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                 ]),
                 "required": .array(["docId", "canvasPoints"].map(Value.string)),
             ])
