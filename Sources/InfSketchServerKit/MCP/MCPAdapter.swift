@@ -1628,8 +1628,10 @@ public actor MCPAdapter {
                 routes the request. Never writes.
 
                 REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
-                headLength, headAngle, dashPattern, color, opacity, layer}` — the same fields and \
-                units list_arrows reports; `color` is light-canonical `#RRGGBBAA`.
+                headLength, headAngle, dashPattern, color, opacity, layer, duplicateName}` — the same \
+                fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
+                repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
+                and `preset` then takes the FIRST of them.
                 """,
             inputSchema: .object([
                 "type": "object",

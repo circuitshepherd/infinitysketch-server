@@ -547,7 +547,7 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAn
 
 Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only routes the request. Never writes.
 
-REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, color, opacity, layer}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`.
+REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, color, opacity, layer, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
