@@ -1602,7 +1602,8 @@ public actor MCPAdapter {
                 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch \
                 device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-                REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, drawnWidth, \
+                REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, \
+                endAnchor, drawnWidth, \
                 color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas \
                 space, start first (an arrow has no transform: moving one rewrites its points). \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
@@ -1635,10 +1636,14 @@ public actor MCPAdapter {
                         "description": "[[x, y], [x, y]] — start, then end, in canvas points.",
                         "items": .object(["type": "array", "items": .object(["type": "number"])]),
                     ]),
-                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
                                           "description": "The shape at the start."]),
-                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
                                         "description": "The shape at the end — the head."]),
+                    "startAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                            "description": "Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                          "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -1665,10 +1670,14 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object(["type": "array", "items": .object(["type": "string"]),
                                     "description": "Arrow ids, from list_arrows."]),
-                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
                                           "description": "The shape at the start."]),
-                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
                                         "description": "The shape at the end — the head."]),
+                    "startAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                            "description": "Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                          "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -4309,8 +4318,8 @@ public actor MCPAdapter {
             }
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
-                ? ["canvasPoints", "startHead", "endHead", "drawnWidth", "color", "colorAppearance", "layer"]
-                : ["ids", "startHead", "endHead", "drawnWidth", "color", "colorAppearance", "opacity"]
+                ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "color", "colorAppearance", "layer"]
+                : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "color", "colorAppearance", "opacity"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }

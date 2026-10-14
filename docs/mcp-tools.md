@@ -535,7 +535,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, drawnWidth, color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas space, start first (an arrow has no transform: moving one rewrites its points). `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas space, start first (an arrow has no transform: moving one rewrites its points). `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -552,9 +552,11 @@ Places an arrow — the same object the app's Arrow tool draws: a straight line 
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
-| `endHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
 | `layer` | string — `front`, `back` | no | front (default, above the strokes) or back (behind strokes and grids). |
-| `startHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ### `restyle_arrows`
 
@@ -567,9 +569,11 @@ Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
-| `endHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
 | `opacity` | number | no | 0…1. |
-| `startHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ---
 
