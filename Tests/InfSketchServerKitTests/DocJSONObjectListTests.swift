@@ -65,6 +65,23 @@ import Testing
         #expect(throws: DocJSON.DocJSONError.textNotFound) { try DocJSON.removeText(from: Self.fixture, textId: Self.i1) }
     }
 
+    /// Review I2 (2026-10-15): an agent could not delete an arrow from a CLOSED document — the
+    /// only door was select_elements + delete_selection, which needs it open on a device.
+    @Test func removeArrowRemovesOnlyThatArrowFromTheList() throws {
+        var obj = try Self.object(Self.fixture)
+        let arrowId = "DDDDDDDD-0000-0000-0000-000000000001"
+        var list = obj["placedObjects"] as! [Any]
+        list.insert(["kind": "arrow", "layer": "front", "id": arrowId,
+                     "points": [["x": 0, "y": 0], ["x": 50, "y": 0]], "width": 2, "pinned": false] as [String: Any], at: 1)
+        obj["placedObjects"] = list
+        obj["formatVersion"] = 6
+        let withArrow = try JSONSerialization.data(withJSONObject: obj)
+        let out = try DocJSON.removeArrow(from: withArrow, arrowId: arrowId)
+        #expect(try Self.ids(out) == [Self.t1, Self.i1, Self.t2])
+        #expect(throws: DocJSON.DocJSONError.arrowNotFound) { try DocJSON.removeArrow(from: withArrow, arrowId: Self.t1) }
+        #expect(throws: DocJSON.DocJSONError.arrowNotFound) { try DocJSON.removeArrow(from: Self.fixture, arrowId: arrowId) }
+    }
+
     @Test func removeImageRemovesItFromTheListAndPrunesTheBlob() throws {
         let out = try DocJSON.removeImage(from: Self.fixture, imageId: Self.i1)
         #expect(try Self.ids(out) == [Self.t1, Self.t2])

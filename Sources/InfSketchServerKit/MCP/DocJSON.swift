@@ -48,6 +48,7 @@ public enum DocJSON {
         case imageNotFound
         case elementNotFound
         case invalidColor
+        case arrowNotFound
     }
 
     // MARK: - Read
@@ -174,6 +175,23 @@ public enum DocJSON {
         }
         elements.remove(at: index)
         setElements(elements, .text, in: &doc)
+        return try serialize(doc)
+    }
+
+    /// Removes a placed arrow by id from the object list, every other slot left in place. An arrow
+    /// is plain JSON (`kind: "arrow"`), so this needs no device and works on a closed document —
+    /// the agent's one door for deleting an arrow without a live selection (review I2,
+    /// 2026-10-15). Throws `.arrowNotFound` when no arrow has that id (a document without an
+    /// object list has no arrows).
+    public static func removeArrow(from bytes: Data, arrowId: String) throws -> Data {
+        var doc = try parseDocument(bytes)
+        guard usesObjectList(doc) else { throw DocJSONError.arrowNotFound }
+        var arrows = elements(.arrow, of: doc)
+        guard let index = entryIndex(withId: arrowId, in: arrows) else {
+            throw DocJSONError.arrowNotFound
+        }
+        arrows.remove(at: index)
+        setElements(arrows, .arrow, in: &doc)
         return try serialize(doc)
     }
 

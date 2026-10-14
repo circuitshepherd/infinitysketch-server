@@ -801,8 +801,9 @@ private actor FakeStrokeOpDevice {
     /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
     /// list_arrows / add_arrow / restyle_arrows (arrows, 2026-10-14) added three, renaming this
     /// from `listToolsContainsAllFiftyFourTools`. list_arrow_presets (round F) added one, renaming
-    /// this from `listToolsContainsAllFiftySevenTools`.
-    @Test func listToolsContainsAllFiftyEightTools() async throws {
+    /// this from `listToolsContainsAllFiftySevenTools`. remove_arrow (review I2) added one,
+    /// renaming this from `listToolsContainsAllFiftyEightTools`.
+    @Test func listToolsContainsAllFiftyNineTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -825,7 +826,7 @@ private actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
-            "list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows",
+            "list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows", "remove_arrow",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2148,6 +2149,20 @@ private actor FakeStrokeOpDevice {
         let received = try #require(await new.receivedRequests.first)
         let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(spec["op"] as? String == "listArrows")
+        await server.stop()
+    }
+
+    /// remove_arrow is server-side — no device needed, so it works on a closed document — and an
+    /// id that names no arrow is refused by name.
+    @Test func removeArrowRefusesAnUnknownIdWithoutADevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(name: "remove_arrow",
+                                                           arguments: ["docId": "d", "arrowId": "nope"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("arrowNotFound"))
         await server.stop()
     }
 

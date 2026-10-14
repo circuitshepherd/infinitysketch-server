@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-59 tools, served over streamable HTTP at `/mcp`.
+60 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -78,6 +78,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or… |
 | [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color`… |
+| [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
 
 ## Grids
 
@@ -593,6 +594,15 @@ Changes the style of named arrows — a `preset`, and/or any of `startHead`, `en
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+### `remove_arrow`
+
+Removes an arrow from a document by id (from list_arrows). Done by the SERVER, so it needs no connected device and works on a document nobody has open. arrowNotFound when no arrow has that id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `arrowId` | string | yes | The id of the arrow to remove, from list_arrows. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 
 ---
 

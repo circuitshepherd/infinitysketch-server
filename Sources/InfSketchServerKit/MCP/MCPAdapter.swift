@@ -1722,6 +1722,22 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "remove_arrow",
+            description: """
+                Removes an arrow from a document by id (from list_arrows). Done by the SERVER, so it \
+                needs no connected device and works on a document nobody has open. arrowNotFound when \
+                no arrow has that id. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "arrowId": .object(["type": "string", "description": "The id of the arrow to remove, from list_arrows."]),
+                ]),
+                "required": .array(["docId", "arrowId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "list_images",
             description: """
                 Lists a document's placed images, one per image, as \
@@ -3382,6 +3398,7 @@ public actor MCPAdapter {
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
+        case "remove_arrow": return await callRemoveArrow(arguments)
         case "delete_doc": return await callDeleteDoc(arguments)
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
@@ -3849,6 +3866,32 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "removed \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `remove_arrow` — server-side, like remove_text: no device, works on a closed document.
+    private func callRemoveArrow(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let arrowId = try Self.nonEmptyStringArg(arguments, "arrowId")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.removeArrow(from: bytes, arrowId: arrowId)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "removed arrow \(arrowId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -6417,6 +6460,7 @@ public actor MCPAdapter {
         case .imageNotFound: return "imageNotFound"
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
+        case .arrowNotFound: return "arrowNotFound"
         }
     }
 
