@@ -76,7 +76,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 |---|---|
 | [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or… |
-| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and… |
+| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color` (light-canonical, or… |
 
 ## Grids
 
@@ -535,7 +535,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas space, start first (an arrow has no transform: moving one rewrites its points). `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, color, opacity, pinned, layer, tags}`. `headLength` (widths) and `headAngle` (degrees) shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's points in canvas space, start first (an arrow has no transform: moving one rewrites its points). `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -543,7 +543,7 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAn
 
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 3, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, a solid line, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -551,16 +551,19 @@ Places an arrow — the same object the app's Arrow tool draws: a straight line 
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `dashPattern` | array | no | The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash. |
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
 | `layer` | string — `front`, `back` | no | front (default, above the strokes) or back (behind strokes and grids). |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ### `restyle_arrows`
 
-Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and `opacity`; what you omit stays. ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and `opacity`; what you omit stays. ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -568,9 +571,12 @@ Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth
 | `ids` | array | yes | Arrow ids, from list_arrows. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `dashPattern` | array | no | The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash. |
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
 | `opacity` | number | no | 0…1. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |

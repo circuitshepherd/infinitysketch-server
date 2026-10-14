@@ -1603,8 +1603,9 @@ public actor MCPAdapter {
                 device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, \
-                endAnchor, drawnWidth, \
-                color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas \
+                endAnchor, drawnWidth, headLength, headAngle, dashPattern, \
+                color, opacity, pinned, layer, tags}`. `headLength` (widths) and `headAngle` (degrees) \
+                shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's points in canvas \
                 space, start first (an arrow has no transform: moving one rewrites its points). \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
                 light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
@@ -1623,7 +1624,8 @@ public actor MCPAdapter {
                 Places an arrow — the same object the app's Arrow tool draws: a straight line from \
                 the first to the last of `canvasPoints` with a shape at each end, on top of Front \
                 objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` \
-                flatEnd, `endHead` filledTriangle, `drawnWidth` 3, black. `color` is light-canonical \
+                flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, \
+                a solid line, black. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
                 the `arrows` capability. REPLY: the seq and `arrowId`. \(writeToolCaveats)
                 """,
@@ -1645,6 +1647,10 @@ public actor MCPAdapter {
                     "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
                                           "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
@@ -1657,7 +1663,8 @@ public actor MCPAdapter {
         Tool(
             name: "restyle_arrows",
             description: """
-                Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, \
+                Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, \
+                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
                 too) and `opacity`; what you omit stays. \
                 ATOMIC: every id must resolve or nothing changes. Their points never change \
@@ -1679,6 +1686,10 @@ public actor MCPAdapter {
                     "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
                                           "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
@@ -4318,8 +4329,10 @@ public actor MCPAdapter {
             }
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
-                ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "color", "colorAppearance", "layer"]
-                : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "color", "colorAppearance", "opacity"]
+                ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer"]
+                : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
