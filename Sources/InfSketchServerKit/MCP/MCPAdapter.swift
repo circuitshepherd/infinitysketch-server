@@ -6396,7 +6396,12 @@ public actor MCPAdapter {
             for key in ["strokeIds", "textIds", "imageIds", "arrowIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
-            let namesArrows = envelope["arrowIds"] != nil
+            // Names arrows only with a NON-EMPTY list: `arrowIds: []` must not exclude an older
+            // app (review M4, 2026-10-14).
+            let namesArrows: Bool = {
+                if case .array(let ids)? = envelope["arrowIds"] { return !ids.isEmpty }
+                return false
+            }()
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }

@@ -2169,6 +2169,23 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// An EMPTY arrowIds names no arrow: the call still reaches an app without the capability.
+    @Test func transformElementsWithAnEmptyArrowIdsStillReachesAnOlderApp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["transformElements"])
+        defer { Task { await old.close() } }
+        _ = try await client.callTool(
+            name: "transform_elements",
+            arguments: ["docId": "d", "strokeIds": .array(["S1"]), "arrowIds": .array([]),
+                        "canvasTranslate": .array([1, 2])])
+        #expect(await old.receivedRequests.count == 1)
+        await server.stop()
+    }
+
     /// Pins the capability gate: a device advertising ONLY "authorStrokes"
     /// (no "authorText") must NOT be selected for list_texts — mirrors
     /// styledAddTextWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable.
