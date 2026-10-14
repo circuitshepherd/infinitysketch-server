@@ -901,7 +901,7 @@ public actor MCPAdapter {
         Tool(
             name: "transform_elements",
             description: """
-                Move, scale or rotate named strokes, texts AND images together — on ANY document, \
+                Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, \
                 open or not. This is how you reposition a placed image: transform_strokes takes \
                 strokes only, and edit_text can move a text but not turn or resize it, so before \
                 this an image could be named, pinned, reordered, copied and deleted but never \
@@ -932,6 +932,10 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Placed-image ids, as returned by list_images.",
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width.",
                     ]),
                     "canvasTranslate": .object([
                         "type": "array", "items": .object(["type": "number"]),
@@ -1590,6 +1594,88 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list placed texts from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_arrows",
+            description: """
+                Lists a document's arrows, one per arrow — authored by a connected InfinitySketch \
+                device with the `arrows` capability (noDeviceAvailable if none). Never writes.
+
+                REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, drawnWidth, \
+                color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas \
+                space, start first (an arrow has no transform: moving one rewrites its points). \
+                `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
+                light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list arrows from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_arrow",
+            description: """
+                Places an arrow — the same object the app's Arrow tool draws: a straight line from \
+                the first to the last of `canvasPoints` with a shape at each end, on top of Front \
+                objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` \
+                flatEnd, `endHead` filledTriangle, `drawnWidth` 3, black. `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
+                the `arrows` capability. REPLY: the seq and `arrowId`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "[[x, y], [x, y]] — start, then end, in canvas points.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                          "description": "The shape at the start."]),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                        "description": "The shape at the end — the head."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front (default, above the strokes) or back (behind strokes and grids)."]),
+                ]),
+                "required": .array(["docId", "canvasPoints"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "restyle_arrows",
+            description: """
+                Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, \
+                `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
+                too) and `opacity`; what you omit stays. \
+                ATOMIC: every id must resolve or nothing changes. Their points never change \
+                (move them with transform_elements' `arrowIds`). REQUIRES a device with the \
+                `arrows` capability. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "ids": .object(["type": "array", "items": .object(["type": "string"]),
+                                    "description": "Arrow ids, from list_arrows."]),
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                          "description": "The shape at the start."]),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "flatEndInset", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                        "description": "The shape at the end — the head."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "opacity": .object(["type": "number", "description": "0…1."]),
+                ]),
+                "required": .array(["docId", "ids"].map(Value.string)),
             ])
         ),
         Tool(
@@ -2595,8 +2681,8 @@ public actor MCPAdapter {
                 Select specific elements by id on a connected device's live rect-select, replacing \
                 any existing selection. Pass `strokeIds` (stroke ids, from \
                 `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
-                `get_selection` or the document summary) — at least one id across the three arrays \
-                is required (enforced device-side). By default the selection rectangle is resized \
+                `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — \
+                at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized \
                 to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee \
                 exactly where they dragged it. REQUIRES a connected `controlSelection` device.
                 """,
@@ -2617,6 +2703,11 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array",
                         "description": "Placed-image ids to select.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to select, from list_arrows or get_selection.",
                         "items": .object(["type": "string"]),
                     ]),
                     "keepRect": .object([
@@ -2835,6 +2926,11 @@ public actor MCPAdapter {
                         "description": "Placed-image ids to clone, from list_images.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to clone, from list_arrows.",
+                        "items": .object(["type": "string"]),
+                    ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
             ])
@@ -2876,6 +2972,11 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array",
                         "description": "Placed-image ids to reorder, from list_images.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to reorder, from list_arrows.",
                         "items": .object(["type": "string"]),
                     ]),
                     "mode": .object([
@@ -3248,6 +3349,9 @@ public actor MCPAdapter {
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
         case "list_texts": return await callListTexts(arguments)
+        case "list_arrows": return await callListArrows(arguments)
+        case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
+        case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
         case "list_images": return await callListImages(arguments)
         case "list_grids": return await callListGrids(arguments)
         case "add_grid": return await callAddGrid(arguments)
@@ -4164,6 +4268,82 @@ public actor MCPAdapter {
     /// this read (agent-list-elements spec, Task 2). Never writes: the
     /// device's listing bytes are decoded as UTF-8 and passed straight
     /// through as the tool result's text content.
+    // MARK: - arrows (the parity list, 2026-10-14)
+
+    /// `list_arrows` — read-only, relayed to a device with the `arrows` capability (an older app
+    /// has none and is never asked).
+    private func callListArrows(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string("listArrows")])) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec, capability: "arrows")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
+    /// as for `transform_elements`), the result written back under the byte CAS.
+    private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string(op)]
+            let keys = op == "addArrow"
+                ? ["canvasPoints", "startHead", "endHead", "drawnWidth", "color", "colorAppearance", "layer"]
+                : ["ids", "startHead", "endHead", "drawnWidth", "color", "colorAppearance", "opacity"]
+            for key in keys {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "arrows")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in
+                var summary = op == "addArrow" ? "added arrow to \(docId) at seq \(seq)"
+                                               : "restyled arrows in \(docId) at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
+                   let id = decoded["arrowId"] {
+                    summary += "\narrowId: \(id)"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callListTexts(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -4557,26 +4737,30 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             let mode = try Self.stringArg(arguments, "mode")
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
-            let count = strokeIds.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            var reorderEnvelope: [String: Value] = [
+                "op": .string("reorderElements"),
+                "strokeIds": .array(strokeIds.map(Value.string)),
+                "textIds": .array(textIds.map(Value.string)),
+                "imageIds": .array(imageIds.map(Value.string)),
+                "mode": .string(mode),
+            ]
+            if !arrowIds.isEmpty { reorderEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("reorderElements"),
-                    "strokeIds": .array(strokeIds.map(Value.string)),
-                    "textIds": .array(textIds.map(Value.string)),
-                    "imageIds": .array(imageIds.map(Value.string)),
-                    "mode": .string(mode),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(reorderEnvelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "reorderElements")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
+                                                       capability: arrowIds.isEmpty ? "reorderElements" : "reorderElements+arrows")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5494,6 +5678,7 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds")
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds")
             let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
@@ -5513,6 +5698,9 @@ public actor MCPAdapter {
             if let imageIds {
                 envelope["imageIds"] = .array(imageIds.map(Value.string))
             }
+            if let arrowIds, !arrowIds.isEmpty {
+                envelope["arrowIds"] = .array(arrowIds.map(Value.string))
+            }
 
             let spec: Data
             do {
@@ -5524,7 +5712,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+                    docId: docId, docBytes: docBytes, spec: spec,
+                    capability: (arrowIds?.isEmpty ?? true) ? "controlSelection" : "controlSelection+arrows")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5868,29 +6057,33 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
             guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
-            let count = strokeIds.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            var copyEnvelope: [String: Value] = [
+                "op": .string("copyElements"),
+                "strokeIds": .array(strokeIds.map(Value.string)),
+                "textIds": .array(textIds.map(Value.string)),
+                "imageIds": .array(imageIds.map(Value.string)),
+            ]
+            if !arrowIds.isEmpty { copyEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             let spec: Data
             do {
                 // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
                 // chunked (see `OpSpecBundle`).
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("copyElements"),
-                    "strokeIds": .array(strokeIds.map(Value.string)),
-                    "textIds": .array(textIds.map(Value.string)),
-                    "imageIds": .array(imageIds.map(Value.string)),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(copyEnvelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements",
+                    docId: target, docBytes: targetBytes, spec: spec,
+                    capability: arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
                     specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
@@ -5926,6 +6119,9 @@ public actor MCPAdapter {
                     }
                     if let ids = decoded["createdImageIds"], !ids.isEmpty {
                         summary += "\ncreatedImageIds: \(ids.joined(separator: ", "))"
+                    }
+                    if let ids = decoded["createdArrowIds"], !ids.isEmpty {
+                        summary += "\ncreatedArrowIds: \(ids.joined(separator: ", "))"
                     }
                 }
                 return summary
@@ -6197,9 +6393,10 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
-            for key in ["strokeIds", "textIds", "imageIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
+            for key in ["strokeIds", "textIds", "imageIds", "arrowIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
+            let namesArrows = envelope["arrowIds"] != nil
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
@@ -6207,7 +6404,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: "transformElements")
+                                                       capability: namesArrows ? "transformElements+arrows" : "transformElements")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

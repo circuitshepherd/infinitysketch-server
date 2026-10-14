@@ -63,6 +63,10 @@ public actor DeviceCommandBroker {
         case requireOpen
 
         static func `for`(capability: String) -> Routing {
+            // A joined capability (`controlSelection+arrows`) routes by its live-state part.
+            if capability.contains("+") {
+                return DeviceCommandBroker.parts(of: capability).contains("controlSelection") ? .requireOpen : .preferOpen
+            }
             switch capability {
             case "controlSelection": return .requireOpen
             case "createDoc", "provideContent": return .any
@@ -242,8 +246,9 @@ public actor DeviceCommandBroker {
     /// document open).
     private func pickConnection(capability: String, deviceId: String?,
                                 excluding: Set<UUID> = [], within: Set<UUID>? = nil) -> Connection? {
-        connections.enumerated()
-            .filter { $0.element.capabilities.contains(capability)
+        let required = Self.parts(of: capability)
+        return connections.enumerated()
+            .filter { required.isSubset(of: $0.element.capabilities)
                 && (deviceId == nil || $0.element.deviceId == deviceId)
                 && !excluding.contains($0.element.id)
                 && (within == nil || within!.contains($0.element.id)) }
@@ -254,6 +259,13 @@ public actor DeviceCommandBroker {
     /// Ops that act on LIVE state on the device (a user's selection) and so must never be sent
     /// twice: a device that was merely slow may still apply the first.
     private static let neverRetriedCapabilities: Set<String> = ["controlSelection"]
+
+    /// A capability may JOIN several with `+` (`controlSelection+arrows`, 2026-10-14): the request
+    /// goes only to a device that has every part — how an op naming a newer element kind avoids an
+    /// older app that would ignore it and answer success, with no wire-version bump.
+    nonisolated static func parts(of capability: String) -> Set<String> {
+        Set(capability.split(separator: "+").map(String.init))
+    }
 
     /// How many devices are connected, and the union of what they can do. Read only to make
     /// `noDeviceAvailable` say WHY (spec 2026-07-27-actionable-tool-errors-design.md): "no device
@@ -599,7 +611,7 @@ public actor DeviceCommandBroker {
                 takesDocumentLock: takesDocumentLock, send: send)
         } catch let error as DeviceCommandError
             where (error == .deviceTimeout || error == .deviceDisconnected)
-                && deviceId == nil && !Self.neverRetriedCapabilities.contains(capability) {
+                && deviceId == nil && Self.neverRetriedCapabilities.isDisjoint(with: Self.parts(of: capability)) {
             // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
             // device that answers late (or went away) costs nothing but a discarded reply. A
             // request addressed to one named device (a holder fetch) has no other device to ask.

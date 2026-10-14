@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-55 tools, served over streamable HTTP at `/mcp`.
+58 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -68,6 +68,16 @@ Plain text is written server-side; styled text and every listing need a connecte
 | [`list_images`](#list_images) | Lists a document's placed images, one per image, as {id, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. |
 | [`remove_image`](#remove_image) | Remove a placed image from a document by its id (as returned by add_image or reported by get_selection). unknownDoc if the document doesn't exist; imageNotFound if no placed image… |
 
+## Arrows
+
+Arrows have no transform: their `canvasPoints` are where they are, and moving one rewrites them. Move, copy, reorder, tag and select them with the element and selection tools' `arrowIds`. Need a device with the `arrows` capability.
+
+| Tool | Summary |
+|---|---|
+| [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
+| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or… |
+| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and… |
+
 ## Grids
 
 `visible` (drawn) and `enabled` (snapped-to) are independent. `snap` is a MULTIPLIER of `spacing`, not a distance.
@@ -91,7 +101,7 @@ Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to
 | [`tag_elements`](#tag_elements) | Give elements durable TAGS, so you can find your own work again later — the strokes that make up a roof, the series of markers on a plot, the text that titles a chart. |
 | [`find_elements`](#find_elements) | Resolve TAGS to element ids, so you can act on them with any tool that takes ids. |
 | [`list_tags`](#list_tags) | Every tag in a document, with how many live things carry it, split by family. |
-| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts AND images together — on ANY document, open or not. |
+| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. |
 | [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` (background) flag on the named placed texts and/or images of a document. `ids` may mix text ids and image ids (as returned by… |
@@ -519,6 +529,50 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 ---
 
+## Arrows — reference
+
+### `list_arrows`
+
+Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
+
+REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, drawnWidth, color, opacity, pinned, layer, tags}`. `canvasPoints` are the arrow's points in canvas space, start first (an arrow has no transform: moving one rewrites its points). `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list arrows from. |
+
+### `add_arrow`
+
+Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 3, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `canvasPoints` | array | yes | [[x, y], [x, y]] — start, then end, in canvas points. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `layer` | string — `front`, `back` | no | front (default, above the strokes) or back (behind strokes and grids). |
+| `startHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+### `restyle_arrows`
+
+Changes the style of named arrows — any of `startHead`, `endHead`, `drawnWidth`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and `opacity`; what you omit stays. ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `ids` | array | yes | Arrow ids, from list_arrows. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `opacity` | number | no | 0…1. |
+| `startHead` | string — `roundEnd`, `flatEnd`, `flatEndInset`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+---
+
 ## Grids — reference
 
 ### `list_grids`
@@ -668,7 +722,7 @@ REPLY: an OBJECT mapping each tag to `{"elements": N, "grids": M}` — live elem
 
 ### `transform_elements`
 
-Move, scale or rotate named strokes, texts AND images together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
+Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
 
 Ops are named, never a raw matrix, and mean exactly what they mean on transform_strokes: `scale` then `rotate`, both about `anchor`, then `translate`. `anchor` defaults to the centre of the whole set's bounding box across all three kinds. Identity survives — a stroke keeps its id and its width-edit history, texts and images keep theirs; this is a MOVE, not a copy.
 
@@ -677,6 +731,7 @@ ATOMIC: every id must resolve or nothing moves, so a set can never end up sheare
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width. |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
@@ -705,6 +760,7 @@ Sets the z-order (draw order) of named strokes/texts/images within ONE document 
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type. |
+| `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to reorder, from list_texts. |
@@ -729,6 +785,7 @@ REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and `created
 |---|---|---|---|
 | `source` | string | yes | The document to copy FROM (left unchanged). |
 | `target` | string | yes | The document to copy INTO (gains the clones). |
+| `arrowIds` | array | no | Arrow ids to clone, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to clone, from list_images. |
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
@@ -747,11 +804,12 @@ Select every stroke, placed text, and placed image in the document on a connecte
 
 ### `select_elements`
 
-Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary) — at least one id across the three arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
+Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name). |
+| `arrowIds` | array | no | Arrow ids to select, from list_arrows or get_selection. |
 | `imageIds` | array | no | Placed-image ids to select. |
 | `keepRect` | boolean | no | Keep the existing selection rectangle instead of resizing it to the chosen elements. Defaults to false. |
 | `strokeIds` | array | no | Stroke ids to select. |

@@ -206,6 +206,45 @@ private actor SentBox {
         #expect(await sentA.all().isEmpty, "a live-state op must not be sent to a second device")
     }
 
+    // MARK: - Joined capabilities (arrows, 2026-10-14)
+
+    /// `controlSelection+arrows` asks for a device with BOTH: an op naming arrows must never reach
+    /// an older app that would ignore the arrows and answer success.
+    @Test func aJoinedCapabilityNeedsEveryPart() async throws {
+        let broker = DeviceCommandBroker()
+        let sentOld = SentBox()
+        let sentNew = SentBox()
+        let old = UUID(), new = UUID()
+        await broker.register(connectionId: old, capabilities: ["controlSelection"]) { msg in Task { await sentOld.set(msg) } }
+        await broker.register(connectionId: new, capabilities: ["controlSelection", "arrows"]) { msg in Task { await sentNew.set(msg) } }
+        await broker.noteActivity(connectionId: old)   // the old one is the most active
+        await broker.setSubscriberLookup { _ in [old, new] }
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                           capability: "controlSelection+arrows") }
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sentNew.awaitMessage() else {
+            Issue.record("the op must reach the device that has both capabilities"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await sentOld.all().isEmpty)
+    }
+
+    /// A joined capability containing `controlSelection` is live state: it routes only to a device
+    /// with the document open, and is never retried.
+    @Test func aJoinedSelectionCapabilityIsLiveState() {
+        #expect(DeviceCommandBroker.Routing.for(capability: "controlSelection+arrows") == .requireOpen)
+        #expect(DeviceCommandBroker.Routing.for(capability: "transformElements+arrows") == .preferOpen)
+    }
+
+    @Test func noDeviceWithEveryPartIsNoDeviceAvailable() async {
+        let broker = DeviceCommandBroker()
+        await broker.register(connectionId: UUID(), capabilities: ["transformElements"]) { _ in }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                 capability: "transformElements+arrows")
+        }
+    }
+
     // MARK: - Routing to the device with the document open (review finding 20)
 
     /// A live-state op goes to the device that has the document OPEN, even when another device

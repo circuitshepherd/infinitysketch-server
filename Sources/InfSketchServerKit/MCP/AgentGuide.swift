@@ -152,6 +152,18 @@ enum AgentGuide {
     photo is thousands of points across; the reply names the bounds it actually occupied and the \
     source's pixel size, so size it from that rather than from a render.
 
+    ## Arrows
+
+    **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a straight \
+    line between two `canvasPoints`, a shape at each end (`startHead`, `endHead`), a `drawnWidth` \
+    in canvas points and a light-canonical `color`. Place one with `add_arrow`, read them with \
+    `list_arrows`, restyle with `restyle_arrows`. **It has no transform**: moving, turning or \
+    scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
+    its heads never skew. `arrowIds` also work in `select_elements`, `copy_elements` and \
+    `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
+    `snap_points` candidates with `objects: true`. These need a device with the `arrows` \
+    capability — an older app has none and is never asked.
+
     ## Working alongside a person
 
     - **Tag what you may need again.** `tag_elements`, or `tags` at creation. Tags live in the \

@@ -799,7 +799,9 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllFiftyTwoTools`.
     /// restore_stroke_widths (the agent door onto the app's "Restore original stroke
     /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
-    @Test func listToolsContainsAllFiftyFourTools() async throws {
+    /// list_arrows / add_arrow / restyle_arrows (arrows, 2026-10-14) added three, renaming this
+    /// from `listToolsContainsAllFiftyFourTools`.
+    @Test func listToolsContainsAllFiftySevenTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -822,6 +824,7 @@ private actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
+            "list_arrows", "add_arrow", "restyle_arrows",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2115,6 +2118,54 @@ private actor FakeStrokeOpDevice {
         #expect(specJSON["op"] as? String == "listTexts")
         #expect(Set(specJSON.keys) == ["op"])
 
+        await server.stop()
+    }
+
+    // MARK: arrows (2026-10-14)
+
+    /// list_arrows goes only to a device that says `arrows` — an older app would answer
+    /// `invalidSpec(unknown op)` at best.
+    @Test func listArrowsRelaysToAnArrowsCapableDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)),
+                                               capabilities: ["authorText", "transformElements"])
+        defer { Task { await old.close() } }
+        let (content, isError) = try await client.callTool(name: "list_arrows", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+
+        let listing = Data(#"[{"id":"A1"}]"#.utf8)
+        let new = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listing), capabilities: ["arrows"])
+        defer { Task { await new.close() } }
+        let (content2, isError2) = try await client.callTool(name: "list_arrows", arguments: ["docId": "d"])
+        #expect(isError2 != true)
+        #expect(toolResultText(content2) == #"[{"id":"A1"}]"#)
+        let received = try #require(await new.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "listArrows")
+        await server.stop()
+    }
+
+    /// transform_elements naming arrows needs `transformElements` AND `arrows`: an older app has
+    /// the first only and would move the other kinds and silently leave the arrows behind.
+    @Test func transformElementsWithArrowIdsSkipsADeviceWithoutArrows() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["transformElements"])
+        defer { Task { await old.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "transform_elements",
+            arguments: ["docId": "d", "arrowIds": .array(["A1"]), "canvasTranslate": .array([1, 2])])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
         await server.stop()
     }
 
@@ -4068,7 +4119,8 @@ private actor FakeStrokeOpDevice {
     @Test func everyColourTakingToolAdvertisesColorAppearance() throws {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
-                                     "add_text", "edit_text", "render_sketch"]
+                                     "add_text", "edit_text", "render_sketch",
+                                     "add_arrow", "restyle_arrows"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
             .map(\.name))
