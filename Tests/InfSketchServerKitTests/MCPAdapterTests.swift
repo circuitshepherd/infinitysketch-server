@@ -800,8 +800,9 @@ private actor FakeStrokeOpDevice {
     /// restore_stroke_widths (the agent door onto the app's "Restore original stroke
     /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
     /// list_arrows / add_arrow / restyle_arrows (arrows, 2026-10-14) added three, renaming this
-    /// from `listToolsContainsAllFiftyFourTools`.
-    @Test func listToolsContainsAllFiftySevenTools() async throws {
+    /// from `listToolsContainsAllFiftyFourTools`. list_arrow_presets (round F) added one, renaming
+    /// this from `listToolsContainsAllFiftySevenTools`.
+    @Test func listToolsContainsAllFiftyEightTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -824,7 +825,7 @@ private actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
-            "list_arrows", "add_arrow", "restyle_arrows",
+            "list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2147,6 +2148,25 @@ private actor FakeStrokeOpDevice {
         let received = try #require(await new.receivedRequests.first)
         let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
         #expect(spec["op"] as? String == "listArrows")
+        await server.stop()
+    }
+
+    /// list_arrow_presets relays `listArrowPresets` to an arrows-capable device and passes its
+    /// listing through; add_arrow / restyle_arrows forward `preset` to the device.
+    @Test func arrowPresetsRelayToTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listing = Data(#"[{"name":"Line"}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listing), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(name: "list_arrow_presets", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"[{"name":"Line"}]"#)
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "listArrowPresets")
         await server.stop()
     }
 

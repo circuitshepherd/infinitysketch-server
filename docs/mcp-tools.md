@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-58 tools, served over streamable HTTP at `/mcp`.
+59 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -75,8 +75,9 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | Tool | Summary |
 |---|---|
 | [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
+| [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or… |
-| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color` (light-canonical, or… |
+| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color`… |
 
 ## Grids
 
@@ -541,9 +542,19 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAn
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to list arrows from. |
 
+### `list_arrow_presets`
+
+Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only routes the request. Never writes.
+
+REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, color, opacity, layer}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask. |
+
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`; an omitted layer is the user's new-arrow layer). Omitted styles take the defaults: `startHead` flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, a solid line, black. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or `layer: "back"`). Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -558,12 +569,13 @@ Places an arrow — the same object the app's Arrow tool draws: a straight line 
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
 | `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
 | `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
+| `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ### `restyle_arrows`
 
-Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and `opacity`; what you omit stays. ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too) and `opacity`; what you omit stays. ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -578,6 +590,7 @@ Changes the style of named arrows — any of `startHead`, `endHead`, `startAncho
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
 | `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
 | `opacity` | number | no | 0…1. |
+| `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 

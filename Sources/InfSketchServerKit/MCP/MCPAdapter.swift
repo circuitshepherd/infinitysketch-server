@@ -1619,13 +1619,34 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_arrow_presets",
+            description: """
+                Lists the user's arrow style presets — app-wide on the connected device, in the order \
+                the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, \
+                Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to \
+                add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only \
+                routes the request. Never writes.
+
+                REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
+                headLength, headAngle, dashPattern, color, opacity, layer}` — the same fields and \
+                units list_arrows reports; `color` is light-canonical `#RRGGBBAA`.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "add_arrow",
             description: """
                 Places an arrow — the same object the app's Arrow tool draws: a straight line from \
                 the first to the last of `canvasPoints` with a shape at each end, on top of Front \
-                objects (or `layer: "back"`; an omitted layer is the user's new-arrow layer). Omitted styles take the defaults: `startHead` \
-                flatEnd, `endHead` filledTriangle, `drawnWidth` 4, `headLength` 4, `headAngle` 32, \
-                a solid line, black. `color` is light-canonical \
+                objects (or `layer: "back"`). Every style field you omit takes the USER'S NEW-ARROW STYLE \
+                (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
+                or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
                 the `arrows` capability. REPLY: the seq and `arrowId`. \(writeToolCaveats)
                 """,
@@ -1654,6 +1675,7 @@ public actor MCPAdapter {
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                 ]),
@@ -1663,7 +1685,7 @@ public actor MCPAdapter {
         Tool(
             name: "restyle_arrows",
             description: """
-                Changes the style of named arrows — any of `startHead`, `endHead`, `startAnchor`, \
+                Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
                 `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
                 too) and `opacity`; what you omit stays. \
@@ -1694,6 +1716,7 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
                 ]),
                 "required": .array(["docId", "ids"].map(Value.string)),
             ])
@@ -3369,7 +3392,8 @@ public actor MCPAdapter {
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
         case "list_texts": return await callListTexts(arguments)
-        case "list_arrows": return await callListArrows(arguments)
+        case "list_arrows": return await callListArrows(arguments, op: "listArrows")
+        case "list_arrow_presets": return await callListArrows(arguments, op: "listArrowPresets")
         case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
         case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
         case "list_images": return await callListImages(arguments)
@@ -4292,14 +4316,16 @@ public actor MCPAdapter {
 
     /// `list_arrows` — read-only, relayed to a device with the `arrows` capability (an older app
     /// has none and is never asked).
-    private func callListArrows(_ arguments: [String: Value]?) async -> CallTool.Result {
+    /// `list_arrow_presets` the same way (`op: "listArrowPresets"`): the presets are app-wide on the
+    /// device, the `docId` only routes the request, as for `list_fonts`.
+    private func callListArrows(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let spec: Data
-            do { spec = try JSONEncoder().encode(Value.object(["op": .string("listArrows")])) }
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string(op)])) }
             catch { return Self.errorResult("invalidArguments") }
             let out: DeviceCommandBroker.StrokeOpReply
             do {
@@ -4330,9 +4356,9 @@ public actor MCPAdapter {
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
                 ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }

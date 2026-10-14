@@ -157,7 +157,10 @@ enum AgentGuide {
     **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a straight \
     line between two `canvasPoints`, a shape at each end (`startHead`, `endHead`), a `drawnWidth` \
     in canvas points and a light-canonical `color`. Place one with `add_arrow`, read them with \
-    `list_arrows`, restyle with `restyle_arrows`. **It has no transform**: moving, turning or \
+    `list_arrows`, restyle with `restyle_arrows`. **What you omit is the user's new-arrow style** \
+    (what their Arrow tool draws now), and `preset` names one of the user's presets \
+    (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line. \
+    **It has no transform**: moving, turning or \
     scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
     its heads never skew. `arrowIds` also work in `select_elements`, `copy_elements` and \
     `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
