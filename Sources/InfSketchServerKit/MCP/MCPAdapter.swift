@@ -1858,7 +1858,8 @@ public actor MCPAdapter {
                 Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' \
                 shape: corner / smooth / manual with handles) — keeping its id, style, layer, tags \
                 and place in the stacking order. Read the current nodes with list_arrows, change what \
-                you need, send them back. REQUIRES a device with the `arrows` capability. \
+                you need, send them back. A pinned arrow is reshaped too, as transform_elements moves \
+                one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. \
                 \(writeToolCaveats)
                 """,
             inputSchema: .object([

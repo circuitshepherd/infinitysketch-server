@@ -154,11 +154,16 @@ enum AgentGuide {
 
     ## Arrows
 
-    **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a straight \
-    line between two `canvasPoints`, a shape at each end (`startHead`, `endHead`), a `drawnWidth` \
-    in canvas points and a light-canonical `color`. Place one with `add_arrow`, read them with \
-    `list_arrows`, restyle with `restyle_arrows`, delete with `remove_arrow` (server-side, works on a \
-    closed document). **What you omit is the user's new-arrow style** \
+    **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a line \
+    through its NODES, a shape at each end (`startHead`, `endHead`), a `drawnWidth` in canvas \
+    points and a light-canonical `color`. Two `canvasPoints` make a straight arrow, more make \
+    sharp corners (an L or Z connector); `nodes` instead give each point a type — `corner`, \
+    `smooth` (the curve passes through it smoothly, an S-curve from a few points) or `manual` \
+    (cubic handles `handleIn`/`handleOut`, offsets from the node; Edit arc writes these). Place \
+    one with `add_arrow`, read them with `list_arrows` (`nodes`, and `canvasBounds` of the curve \
+    as drawn), change one's shape with `reshape_arrow` (same id, style and order — read the \
+    nodes, edit, send back), restyle with `restyle_arrows`, delete with `remove_arrow` \
+    (server-side, works on a closed document). **What you omit is the user's new-arrow style** \
     (what their Arrow tool draws now), and `preset` names one of the user's presets \
     (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line. \
     **It has no transform**: moving, turning or \
