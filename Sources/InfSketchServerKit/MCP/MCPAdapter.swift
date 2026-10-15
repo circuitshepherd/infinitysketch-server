@@ -913,6 +913,9 @@ public actor MCPAdapter {
                 kinds. Identity survives — a stroke keeps its id and its width-edit history, texts \
                 and images keep theirs; this is a MOVE, not a copy.
 
+                An ARROW is baked: its points move; a `scale` changes its drawnWidth only when its \
+                `keepsWidth` is false (list_arrows reports both afterwards — `drawnWidth` and \
+                `unscaledWidth`); with keepsWidth true (the default) width, heads and dashes stay. \
                 ATOMIC: every id must resolve or nothing moves, so a set can never end up sheared \
                 half-way. Use transform_strokes when you want grid snapping (`snapToGrid` / \
                 `snapTo`), which is stroke-lattice specific and stays there. \(writeToolCaveats)
@@ -1603,8 +1606,10 @@ public actor MCPAdapter {
                 device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, \
-                endAnchor, drawnWidth, headLength, headAngle, dashPattern, \
-                color, opacity, pinned, layer, tags}`. `headLength` (widths) and `headAngle` (degrees) \
+                endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, \
+                color, opacity, pinned, layer, tags}`. `keepsWidth` true: a scale moves the points and \
+                keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
+                width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
                 shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's points in canvas \
                 space, start first (an arrow has no transform: moving one rewrites its points). \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
@@ -1628,7 +1633,7 @@ public actor MCPAdapter {
                 routes the request. Never writes.
 
                 REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
-                headLength, headAngle, dashPattern, color, opacity, layer, duplicateName}` — the same \
+                headLength, headAngle, dashPattern, color, opacity, layer, keepsWidth, duplicateName}` — the same \
                 fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
                 repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
                 and `preset` then takes the FIRST of them.
@@ -1650,7 +1655,9 @@ public actor MCPAdapter {
                 (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
                 or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
-                the `arrows` capability. REPLY: the seq and `arrowId`. \(writeToolCaveats)
+                the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) \
+                decides whether a later scale changes the arrow's width. REPLY: the seq and \
+                `arrowId`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1680,6 +1687,7 @@ public actor MCPAdapter {
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
                 "required": .array(["docId", "canvasPoints"].map(Value.string)),
             ])
@@ -1690,7 +1698,8 @@ public actor MCPAdapter {
                 Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
                 `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
-                too) and `opacity`; what you omit stays. \
+                too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
+                the current width as it is (restore_stroke_widths takes an earlier scale back). \
                 ATOMIC: every id must resolve or nothing changes. Their points never change \
                 (move them with transform_elements' `arrowIds`). REQUIRES a device with the \
                 `arrows` capability. \(writeToolCaveats)
@@ -1719,6 +1728,7 @@ public actor MCPAdapter {
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
                 "required": .array(["docId", "ids"].map(Value.string)),
             ])
@@ -2373,7 +2383,10 @@ public actor MCPAdapter {
                 no scale is LEFT ALONE and counted in the reply, not an error, and when \
                 that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply \
                 says "no change" and quotes no seq). drawnWidth is not touched — to \
-                change the drawn thickness itself, use restyle_strokes. \(writeToolCaveats)
+                change the drawn thickness itself, use restyle_strokes. ARROW ids work too: an arrow \
+                whose `keepsWidth` is false was thickened or thinned by a scale, and this sets its \
+                drawnWidth back to list_arrows' `unscaledWidth` (heads and dashes, in widths, \
+                follow); an arrow never scaled is reported unchanged. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2383,8 +2396,8 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": """
                             Composite stroke ids, as returned by list_strokes or \
-                            draw_strokes. Ids that carry no scale are accepted and \
-                            reported back as unchanged.
+                            draw_strokes, and/or arrow ids from list_arrows. Ids that \
+                            carry no scale are accepted and reported back as unchanged.
                             """,
                         "items": .object(["type": "string"]),
                     ]),
@@ -2575,8 +2588,9 @@ public actor MCPAdapter {
                 flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none \
                 is set the op fails (noReferencePoint); placing it yourself is not supported yet. Pass \
                 `expect` = a prior get_selection's `signature` to be rejected if the user changed the \
-                selection since (selectionChanged). REQUIRES a connected device with an active \
-                selection.
+                selection since (selectionChanged). Selected ARROWS scale their width with them only \
+                when their `keepsWidth` is false (list_arrows); otherwise points move and width, heads \
+                and dashes stay. REQUIRES a connected device with an active selection.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2829,7 +2843,8 @@ public actor MCPAdapter {
                 selected element (and, with includePoints, each stroke's transformed points), \
                 the overall selection bounds/referencePoint, and — per grid — the same line \
                 families render_sketch reports, so you can align the proposed transform before \
-                committing it. `include`: "withContext" (default) renders the grid and the \
+                committing it. Arrows preview as they will commit: a scale keeps an arrow's width \
+                unless its `keepsWidth` is false. `include`: "withContext" (default) renders the grid and the \
                 rest of the document's content behind the moved selection; "selectionOnly" \
                 renders just the transformed selection, transparent background, no grid pixels \
                 (grid metadata is still reported). `rect` bounds the render like \
@@ -2893,7 +2908,8 @@ public actor MCPAdapter {
                 provisional copy in place — like the toolbar's duplicate, it commits on a later \
                 edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as \
                 transform_selection's, composed left-to-right around the single reference \
-                point): clone + transform as one "stamp" undo step. Returns the new elements' \
+                point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width \
+                unless its `keepsWidth` is false). Returns the new elements' \
                 keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if \
                 the user changed the selection since (selectionChanged). REQUIRES a connected \
                 `controlSelection` device with an active selection.
@@ -4401,9 +4417,9 @@ public actor MCPAdapter {
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
                 ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }

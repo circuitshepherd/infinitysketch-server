@@ -2185,6 +2185,26 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// add_arrow and restyle_arrows forward `keepsWidth` to the device (Josef, 2026-10-15).
+    @Test func arrowWritesForwardKeepsWidth() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false])
+        _ = try await client.callTool(name: "restyle_arrows", arguments: [
+            "docId": "d", "ids": .array(["A1"]), "keepsWidth": true])
+        let requests = await device.receivedRequests
+        #expect(requests.count == 2)
+        let specs = try requests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
+        #expect(specs.first?["keepsWidth"] as? Bool == false)
+        #expect(specs.last?["keepsWidth"] as? Bool == true)
+        await server.stop()
+    }
+
     /// transform_elements naming arrows needs `transformElements` AND `arrows`: an older app has
     /// the first only and would move the other kinds and silently leave the arrows behind.
     @Test func transformElementsWithArrowIdsSkipsADeviceWithoutArrows() async throws {

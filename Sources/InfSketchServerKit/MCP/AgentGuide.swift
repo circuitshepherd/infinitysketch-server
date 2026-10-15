@@ -163,7 +163,9 @@ enum AgentGuide {
     (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line. \
     **It has no transform**: moving, turning or \
     scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
-    its heads never skew. `arrowIds` also work in `select_elements`, `copy_elements` and \
+    its heads never skew. **A scale keeps its width** while `keepsWidth` is true (the default, \
+    also of the built-in presets); with it false the width, heads and dashes scale too and \
+    `restore_stroke_widths` takes it back (`list_arrows`' `unscaledWidth`). `arrowIds` also work in `select_elements`, `copy_elements` and \
     `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
     `snap_points` candidates with `objects: true`. These need a device with the `arrows` \
     capability — an older app has none and is never asked.
