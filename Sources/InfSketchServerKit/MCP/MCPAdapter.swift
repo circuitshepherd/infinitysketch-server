@@ -5685,6 +5685,19 @@ public actor MCPAdapter {
     /// An ABSENT or undecodable `meta` is treated as "everything was restored" and
     /// written: the bytes are the device's own product, the write is CAS-guarded, and
     /// silently dropping a real edit is far worse than a redundant one.
+    /// What `restore_stroke_widths` was given, by name: an arrow id is a UUID, a stroke id the
+    /// composite key — "2 strokes and 1 arrow", "1 arrow" (whole-branch review #5).
+    static func restoreTargetsNoun(_ ids: [String]) -> String {
+        let arrows = ids.filter { UUID(uuidString: $0) != nil }.count
+        let strokes = ids.count - arrows
+        func n(_ c: Int, _ word: String) -> String { "\(c) \(word)\(c == 1 ? "" : "s")" }
+        switch (strokes, arrows) {
+        case (_, 0): return strokes == 1 ? "stroke" : "strokes"
+        case (0, _): return arrows == 1 ? "arrow" : "arrows"
+        default: return "elements (\(n(strokes, "stroke")) and \(n(arrows, "arrow")))"
+        }
+    }
+
     private func callRestoreStrokeWidths(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -5722,9 +5735,9 @@ public actor MCPAdapter {
             let unchangedCount = meta?.unchangedIds.count ?? 0
 
             guard restoredCount > 0 else {
-                let plural = ids.count == 1 ? "" : "s"
                 return CallTool.Result(content: [.text(
-                    text: "no change: all \(ids.count) stroke\(plural) already carry the ink width "
+                    text: "no change: \(ids.count == 1 ? "the" : "all \(ids.count)") \(Self.restoreTargetsNoun(ids)) "
+                        + "already \(ids.count == 1 ? "has" : "have") the width "
                         + "they were drawn with (none had a scale to factor out) — nothing was written",
                     annotations: nil, _meta: nil)])
             }
@@ -5734,7 +5747,7 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                var summary = "restored \(restoredCount) of \(ids.count) stroke(s) at seq \(seq)"
+                var summary = "restored \(restoredCount) of \(ids.count) \(Self.restoreTargetsNoun(ids)) at seq \(seq)"
                 if unchangedCount > 0 {
                     summary += "; \(unchangedCount) had no scale to factor out"
                 }

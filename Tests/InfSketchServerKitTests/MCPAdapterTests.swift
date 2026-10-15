@@ -2279,6 +2279,16 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// restore_stroke_widths names what it was given (whole-branch review #5).
+    @Test func restoreWidthsNamesStrokesAndArrows() {
+        let arrow = UUID().uuidString
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"]) == "stroke")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"]) == "strokes")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow]) == "arrow")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString]) == "arrows")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow]) == "elements (1 stroke and 1 arrow)")
+    }
+
     /// The preset writes relay their arguments to an `arrowPresetWrites` device and pass its reply
     /// through; a device with `arrows` alone (an older app) is never asked.
     @Test func arrowPresetWritesRelayToACapableDeviceOnly() async throws {
@@ -3631,7 +3641,7 @@ private actor FakeStrokeOpDevice {
             "ids": .array([.string("seed123:1.0")]),
         ])
         #expect(isError != true)
-        #expect(toolResultText(content) == "restored 1 of 1 stroke(s) at seq 1")
+        #expect(toolResultText(content) == "restored 1 of 1 stroke at seq 1")
 
         let received = try #require(await device.receivedRequests.first)
         #expect(received.docId == "d")
@@ -3693,7 +3703,7 @@ private actor FakeStrokeOpDevice {
             "ids": .array([.string("a"), .string("b"), .string("c")]),
         ])
         let text = toolResultText(content)
-        #expect(text.hasPrefix("restored 1 of 3 stroke(s) at seq 1"))
+        #expect(text.hasPrefix("restored 1 of 3 strokes at seq 1"))
         #expect(text.contains("2 had no scale to factor out"), "got \(text)")
 
         await server.stop()

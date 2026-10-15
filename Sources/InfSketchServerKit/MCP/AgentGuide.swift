@@ -170,7 +170,17 @@ enum AgentGuide {
     scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
     its heads never skew. **A scale keeps its width** while `keepsWidth` is true (the default, \
     also of the built-in presets); with it false the width, heads and dashes scale too and \
-    `restore_stroke_widths` takes it back (`list_arrows`' `unscaledWidth`). `arrowIds` also work in `select_elements`, `copy_elements` and \
+    `restore_stroke_widths` takes it back (`list_arrows`' `unscaledWidth`; the user's Unscale \
+    button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `fitGaps` \
+    (default — dashes exact, gaps adjusted, ends as `dashEndsOn`), `fitPattern`, `exact` (from \
+    `dashAnchor`) or `corners` (a dash centred on every sharp corner), shifted by `dashOffset` \
+    (widths). **The user's presets and new-arrow style are writable**: `save_arrow_preset`, \
+    `rename_arrow_preset`, `delete_arrow_preset`, `move_arrow_preset`, `restore_arrow_presets`, \
+    and `get_new_arrow_style` / `set_new_arrow_style` — device settings, not document edits, \
+    so they write no document and have no undo. **Preview before committing**: \
+    `render_sketch` takes ephemeral `arrows` (add_arrow's fields) and `restyle` (restyle_arrows' \
+    fields with `arrowIds`), drawn by the commit's own code so the picture is what the commit \
+    will draw; `include: "arrows"` with `arrowIds` renders only those arrows, a clean swatch. `arrowIds` also work in `select_elements`, `copy_elements` and \
     `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
     `snap_points` candidates with `objects: true`. These need a device with the `arrows` \
     capability — an older app has none and is never asked.
