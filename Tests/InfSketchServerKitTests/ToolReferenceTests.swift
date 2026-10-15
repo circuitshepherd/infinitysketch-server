@@ -69,7 +69,9 @@ enum ToolReference {
               blurb: "Arrows have no transform: their `canvasPoints` are where they are, and moving "
                    + "one rewrites them. Move, copy, reorder, tag and select them with the element "
                    + "and selection tools' `arrowIds`. Need a device with the `arrows` capability.",
-              tools: ["list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows", "remove_arrow"]),
+              tools: ["list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows", "remove_arrow",
+                      "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
+                      "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style"]),
         Group(title: "Grids",
               blurb: "`visible` (drawn) and `enabled` (snapped-to) are independent. `snap` is a "
                    + "MULTIPLIER of `spacing`, not a distance.",

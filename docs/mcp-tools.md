@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-60 tools, served over streamable HTTP at `/mcp`.
+67 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -79,6 +79,13 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a straight line from the first to the last of `canvasPoints` with a shape at each end, on top of Front objects (or… |
 | [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`,… |
 | [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
+| [`save_arrow_preset`](#save_arrow_preset) | Saves an arrow style preset. |
+| [`rename_arrow_preset`](#rename_arrow_preset) | Renames an arrow style preset. |
+| [`delete_arrow_preset`](#delete_arrow_preset) | Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). |
+| [`move_arrow_preset`](#move_arrow_preset) | Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id or name). |
+| [`restore_arrow_presets`](#restore_arrow_presets) | Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a deleted one returns at the front); the user's own presets are kept — the app's… |
+| [`get_new_arrow_style`](#get_new_arrow_style) | Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted fields take. |
+| [`set_new_arrow_style`](#set_new_arrow_style) | Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) and/or the style fields given; what is not given stays (`color` is light-canonical,… |
 
 ## Grids
 
@@ -547,7 +554,9 @@ REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAn
 
 Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only routes the request. Never writes.
 
-REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, opacity, layer, keepsWidth, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
+Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
+
+REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, opacity, layer, keepsWidth, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -613,6 +622,112 @@ Removes an arrow from a document by id (from list_arrows). Done by the SERVER, s
 |---|---|---|---|
 | `arrowId` | string | yes | The id of the arrow to remove, from list_arrows. |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+
+### `save_arrow_preset`
+
+Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `docId`), from the user's new-arrow style (`fromNewArrowStyle: true`, also the default source), with any style fields overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` and a new `name` are given). Every ArrowStyle field can be given; `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `arrowId` | string | no | Take the style of this arrow (list_arrows) in docId. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
+| `dashOffset` | number | no | The pattern's offset in widths (−50…50). |
+| `dashPattern` | array | no | Dash, gap … in widths; [] is solid. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `fromNewArrowStyle` | boolean | no | Take the user's new-arrow style (the default source). |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
+| `headLength` | number | no | Head length in arrow widths (2–10). |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `keepsWidth` | boolean | no | Keep width when scaling (default true). |
+| `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+| `opacity` | number | no | 0…1. |
+| `replace` | boolean | no | Overwrite the named preset's style instead of adding one. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits on its point. |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+### `rename_arrow_preset`
+
+Renames an arrow style preset. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `newName` | string | yes | The new name. |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+
+### `delete_arrow_preset`
+
+Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+
+### `move_arrow_preset`
+
+Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id or name). Exactly one of the three. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `after` | string | no | Another preset (id or name): move just after it. |
+| `before` | string | no | Another preset (id or name): move just before it. |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+| `toIndex` | integer | no | The position to move to, 0-based. |
+
+### `restore_arrow_presets`
+
+Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a deleted one returns at the front); the user's own presets are kept — the app's "Restore built-in presets". These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+
+### `get_new_arrow_style`
+
+Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted fields take. Never writes. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+
+### `set_new_arrow_style`
+
+Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) and/or the style fields given; what is not given stays (`color` is light-canonical, `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
+| `dashOffset` | number | no | The pattern's offset in widths (−50…50). |
+| `dashPattern` | array | no | Dash, gap … in widths; [] is solid. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
+| `headLength` | number | no | Head length in arrow widths (2–10). |
+| `keepsWidth` | boolean | no | Keep width when scaling (default true). |
+| `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
+| `opacity` | number | no | 0…1. |
+| `preset` | string | no | A preset (id or name) whose whole style is the base; the style fields override it. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits on its point. |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ---
 

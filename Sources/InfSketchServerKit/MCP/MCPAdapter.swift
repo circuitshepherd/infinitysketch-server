@@ -1634,7 +1634,10 @@ public actor MCPAdapter {
                 add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only \
                 routes the request. Never writes.
 
-                REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
+                Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, \
+                move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
+
+                REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
                 headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, \
                 opacity, layer, keepsWidth, duplicateName}` — the same \
                 fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
@@ -1646,6 +1649,146 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask."]),
                 ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "save_arrow_preset",
+            description: """
+                Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `docId`), from the user's \
+                new-arrow style (`fromNewArrowStyle: true`, also the default source), with any style fields \
+                overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES \
+                the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` \
+                and a new `name` are given). Every ArrowStyle field can be given; `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "replace": .object(["type": "boolean", "description": "Overwrite the named preset's style instead of adding one."]),
+                    "arrowId": .object(["type": "string", "description": "Take the style of this arrow (list_arrows) in docId."]),
+                    "fromNewArrowStyle": .object(["type": "boolean", "description": "Take the user's new-arrow style (the default source)."]),
+                ], MCPAdapter.arrowStyleProperties)),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "rename_arrow_preset",
+            description: """
+                Renames an arrow style preset. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "newName": .object(["type": "string", "description": "The new name."]),
+                ], [:])),
+                "required": .array(["docId", "newName"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "delete_arrow_preset",
+            description: """
+                Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "move_arrow_preset",
+            description: """
+                Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id \
+                or name). Exactly one of the three. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "toIndex": .object(["type": "integer", "description": "The position to move to, 0-based."]),
+                    "before": .object(["type": "string", "description": "Another preset (id or name): move just before it."]),
+                    "after": .object(["type": "string", "description": "Another preset (id or name): move just after it."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "restore_arrow_presets",
+            description: """
+                Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a \
+                deleted one returns at the front); the user's own presets are kept — the app's "Restore built-in \
+                presets". These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "get_new_arrow_style",
+            description: """
+                Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted \
+                fields take. Never writes. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. \
+                REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "set_new_arrow_style",
+            description: """
+                Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) \
+                and/or the style fields given; what is not given stays (`color` is light-canonical, \
+                `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. \
+                These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "preset": .object(["type": "string", "description": "A preset (id or name) whose whole style is the base; the style fields override it."]),
+                ], MCPAdapter.arrowStyleProperties)),
                 "required": .array(["docId"].map(Value.string)),
             ])
         ),
@@ -3447,6 +3590,13 @@ public actor MCPAdapter {
         case "list_texts": return await callListTexts(arguments)
         case "list_arrows": return await callListArrows(arguments, op: "listArrows")
         case "list_arrow_presets": return await callListArrows(arguments, op: "listArrowPresets")
+        case "save_arrow_preset": return await callArrowPresetOp(arguments, op: "saveArrowPreset")
+        case "rename_arrow_preset": return await callArrowPresetOp(arguments, op: "renameArrowPreset")
+        case "delete_arrow_preset": return await callArrowPresetOp(arguments, op: "deleteArrowPreset")
+        case "move_arrow_preset": return await callArrowPresetOp(arguments, op: "moveArrowPreset")
+        case "restore_arrow_presets": return await callArrowPresetOp(arguments, op: "restoreArrowPresets")
+        case "get_new_arrow_style": return await callArrowPresetOp(arguments, op: "getNewArrowStyle")
+        case "set_new_arrow_style": return await callArrowPresetOp(arguments, op: "setNewArrowStyle")
         case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
         case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
         case "list_images": return await callListImages(arguments)
@@ -4422,6 +4572,79 @@ public actor MCPAdapter {
         } catch {
             return Self.errorResult("invalidArguments")
         }
+    }
+
+    /// The arrow preset writes and the new-arrow style (`arrowPresetWrites`): every argument but
+    /// `docId` relayed verbatim (the device validates), the device's JSON reply passed through.
+    /// Nothing is written to any document.
+    private func callArrowPresetOp(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string(op)]
+            for key in Self.arrowPresetOpKeys {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: "arrowPresetWrites")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Every key the preset ops relay — the preset addressing and the style fields.
+    static let arrowPresetOpKeys = ["id", "name", "newName", "replace", "arrowId", "fromNewArrowStyle",
+                                    "toIndex", "before", "after", "preset"] + arrowStyleKeys
+
+    /// The style fields an agent can name, flat as on add_arrow — `ArrowAuthoring.StyleArgs` on the device.
+    static let arrowStyleKeys = ["startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "headLength",
+                                 "headAngle", "dashPattern", "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset",
+                                 "color", "colorAppearance", "opacity", "layer", "keepsWidth"]
+
+    static func mergeProperties(_ a: [String: Value], _ b: [String: Value]) -> [String: Value] {
+        a.merging(b) { first, _ in first }
+    }
+
+    /// The schema of every style field (`arrowStyleKeys`), shared by the preset tools.
+    static var arrowStyleProperties: [String: Value] {
+        let heads = Value.array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string))
+        let anchors = Value.array(["endsAtPoint", "centeredOnPoint"].map(Value.string))
+        return [
+            "startHead": .object(["type": "string", "enum": heads, "description": "The shape at the start."]),
+            "endHead": .object(["type": "string", "enum": heads, "description": "The shape at the end — the head."]),
+            "startAnchor": .object(["type": "string", "enum": anchors, "description": "Where the start's ink sits on its point."]),
+            "endAnchor": .object(["type": "string", "enum": anchors, "description": "Where the end's ink sits on its point."]),
+            "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+            "headLength": .object(["type": "number", "description": "Head length in arrow widths (2–10)."]),
+            "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60)."]),
+            "dashPattern": .object(["type": "array", "items": .object(["type": "number"]), "description": "Dash, gap … in widths; [] is solid."]),
+            "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
+            "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)), "description": "Where an exact pattern starts."]),
+            "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)), "description": "What a fitted shaft's ends finish on."]),
+            "dashOffset": .object(["type": "number", "description": "The pattern's offset in widths (−50…50)."]),
+            "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
+            "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)), "description": "\"dark\" when `color` was chosen for a dark page."]),
+            "opacity": .object(["type": "number", "description": "0…1."]),
+            "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)), "description": "Where an arrow in this style goes: front or back."]),
+            "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling (default true)."]),
+        ]
     }
 
     /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,

@@ -803,7 +803,9 @@ private actor FakeStrokeOpDevice {
     /// from `listToolsContainsAllFiftyFourTools`. list_arrow_presets (round F) added one, renaming
     /// this from `listToolsContainsAllFiftySevenTools`. remove_arrow (review I2) added one,
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
-    @Test func listToolsContainsAllFiftyNineTools() async throws {
+    /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
+    /// `listToolsContainsAllFiftyNineTools`.
+    @Test func listToolsContainsAllSixtySixTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -827,6 +829,8 @@ private actor FakeStrokeOpDevice {
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
             "list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows", "remove_arrow",
+            "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
+            "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2206,6 +2210,45 @@ private actor FakeStrokeOpDevice {
         #expect(specs.last?["keepsWidth"] as? Bool == true)
         #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
         #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
+        await server.stop()
+    }
+
+    /// The preset writes relay their arguments to an `arrowPresetWrites` device and pass its reply
+    /// through; a device with `arrows` alone (an older app) is never asked.
+    @Test func arrowPresetWritesRelayToACapableDeviceOnly() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("{}".utf8)), capabilities: ["arrows"])
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(name: "rename_arrow_preset",
+            arguments: ["docId": "d", "name": "Line", "newName": "Rule"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let reply = Data(#"{"presets":[]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows", "arrowPresetWrites"])
+        defer { Task { await device.close() } }
+        for (tool, args, op) in [
+            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "corners", "keepsWidth": false], "saveArrowPreset"),
+            ("rename_arrow_preset", ["id": "X", "newName": "Rule"], "renameArrowPreset"),
+            ("delete_arrow_preset", ["name": "Line"], "deleteArrowPreset"),
+            ("move_arrow_preset", ["name": "Line", "toIndex": 2], "moveArrowPreset"),
+            ("restore_arrow_presets", [:], "restoreArrowPresets"),
+            ("get_new_arrow_style", [:], "getNewArrowStyle"),
+            ("set_new_arrow_style", ["preset": "Line", "drawnWidth": 3], "setNewArrowStyle"),
+        ] as [(String, [String: Value], String)] {
+            var a = args
+            a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError != true, "\(tool): \(toolResultText(content))")
+            #expect(toolResultText(content) == #"{"presets":[]}"#)
+            let last = try #require(await device.receivedRequests.last)
+            let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+            #expect(spec["op"] as? String == op)
+            for key in args.keys { #expect(spec[key] != nil, "\(tool) relays \(key)") }
+        }
         await server.stop()
     }
 
@@ -4196,7 +4239,7 @@ private actor FakeStrokeOpDevice {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
                                      "add_text", "edit_text", "render_sketch",
-                                     "add_arrow", "restyle_arrows"]
+                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
             .map(\.name))
