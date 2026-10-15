@@ -1833,6 +1833,7 @@ public actor MCPAdapter {
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
+                    "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
                     "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
                                               "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands), corners (each run between sharp bends fitted on its own, a dash centred on every corner and both ends). Ignored for a solid line."]),
                     "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
@@ -2173,13 +2174,43 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to render."]),
                     "include": .object([
                         "type": "string",
-                        "enum": .array(["document", "strokes", "none"].map(Value.string)),
+                        "enum": .array(["document", "strokes", "arrows", "none"].map(Value.string)),
                         "description": """
                             What document content to render, alongside any ephemeral \
-                            strokes below. "document" (default): every stroke, placed \
-                            image, and placed text. "strokes": only the strokes named \
-                            by strokeIds — no images or texts. "none": nothing from \
+                            strokes and arrows below. "document" (default): every stroke, placed \
+                            image, text and arrow. "strokes": only the strokes named \
+                            by strokeIds — no images or texts. "arrows": only the arrows named \
+                            by arrowIds (and restyle.arrowIds) — a clean swatch. "none": nothing from \
                             the document.
+                            """,
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "With include: \"arrows\", the arrow ids (list_arrows) to show.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrows": .object([
+                        "type": "array",
+                        "description": """
+                            EPHEMERAL candidate arrows to render over the document — never written. \
+                            Each takes EXACTLY add_arrow's fields (canvasPoints, preset, every style \
+                            field, layer) and is built by the same code, so the preview is what \
+                            add_arrow would place; omitted fields take the user's new-arrow style. \
+                            Iterate: render → adjust → render → add_arrow. The reply's metadata \
+                            `arrows` reports each one's `canvasBounds` and the `style` it resolved to \
+                            (preset + overrides, clamps included).
+                            """,
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "restyle": .object([
+                        "type": "object",
+                        "description": """
+                            Render EXISTING arrows as if restyled — the document unchanged: \
+                            `arrowIds` plus any of restyle_arrows' fields (preset, heads, widths, \
+                            dash, color, opacity, keepsWidth …), applied by the same code \
+                            restyle_arrows uses. Iterate: render → adjust → render → restyle_arrows. \
+                            The metadata's `restyledArrows` reports each one's `canvasBounds` and \
+                            resolved `style`. Combine with include: "arrows" for an isolated swatch.
                             """,
                     ]),
                     "strokeIds": .object([
@@ -4658,7 +4689,7 @@ public actor MCPAdapter {
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
                 ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth",
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
@@ -5272,6 +5303,9 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            // A preview takes EXACTLY what the commit takes: an ephemeral arrow add_arrow's fields,
+            // a restyle restyle_arrows' — so nothing previews that add_arrow / restyle_arrows refuse.
+            if let refusal = Self.arrowPreviewKeyRefusal(arguments) { return Self.errorResult(refusal) }
             var specFields: [String: Value] = ["op": .string("render")]
             for key in Self.renderSpecParameterNames {
                 if let value = arguments?[key] {
@@ -5288,7 +5322,12 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+                // A render that names arrows goes only to a device that can build them: an older
+                // app would ignore the keys and answer a render WITHOUT them (`authorStrokes+arrows`).
+                let wantsArrows = arguments?["arrows"] != nil || arguments?["restyle"] != nil
+                    || arguments?["arrowIds"] != nil || arguments?["include"] == .string("arrows")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: wantsArrows ? "authorStrokes+arrows" : "authorStrokes")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5364,9 +5403,35 @@ public actor MCPAdapter {
     /// The Global-Constraints parameter names `render_sketch` relays
     /// verbatim into the op-spec envelope alongside `"op": "render"` — every
     /// one of them optional; see `callRenderSketch`.
+    /// The first key of an ephemeral `arrows` item or of `restyle` that add_arrow / restyle_arrows
+    /// would not take, as an `invalidArgument` reason; nil when every key is one of theirs.
+    static func arrowPreviewKeyRefusal(_ arguments: [String: Value]?) -> String? {
+        func declared(_ tool: String) -> Set<String> {
+            guard let t = toolDefinitions.first(where: { $0.name == tool }) else { return [] }
+            return declaredArguments(of: t).subtracting(["docId"])
+        }
+        if case .array(let items)? = arguments?["arrows"] {
+            let allowed = declared("add_arrow")
+            for (index, item) in items.enumerated() {
+                guard case .object(let fields) = item else { return "invalidArgument: arrows[\(index)] must be an object" }
+                if let bad = fields.keys.sorted().first(where: { !allowed.contains($0) }) {
+                    return "invalidArgument: arrows[\(index)].\(bad) — an ephemeral arrow takes add_arrow's fields: \(allowed.sorted().joined(separator: ", "))"
+                }
+            }
+        }
+        if let restyle = arguments?["restyle"] {
+            guard case .object(let fields) = restyle else { return "invalidArgument: restyle must be an object" }
+            let allowed = declared("restyle_arrows").subtracting(["ids"]).union(["arrowIds"])
+            if let bad = fields.keys.sorted().first(where: { !allowed.contains($0) }) {
+                return "invalidArgument: restyle.\(bad) — restyle takes arrowIds and restyle_arrows' fields: \(allowed.sorted().joined(separator: ", "))"
+            }
+        }
+        return nil
+    }
+
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
-        "scale", "appearance", "colorAppearance",
+        "scale", "appearance", "colorAppearance", "arrowIds", "arrows", "restyle",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):

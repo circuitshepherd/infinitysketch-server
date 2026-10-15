@@ -2189,6 +2189,43 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// render_sketch relays `arrows`, `restyle` and `arrowIds` — and a render naming arrows goes only
+    /// to a device that can build them (`authorStrokes+arrows`), never to an older app that would
+    /// answer without them.
+    @Test func renderSketchWithArrowsNeedsTheArrowsCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data([0x89])), capabilities: ["authorStrokes"])
+        defer { Task { await old.close() } }
+        let args: [String: Value] = ["docId": "d", "include": "arrows", "arrowIds": .array(["A1"]),
+                                     "arrows": .array([.object(["canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "preset": "Arrow"])]),
+                                     "restyle": .object(["arrowIds": .array(["A1"]), "drawnWidth": 6])]
+        let (refused, refusedIsError) = try await client.callTool(name: "render_sketch", arguments: args)
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data([0x89])), capabilities: ["authorStrokes", "arrows"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "render_sketch", arguments: args)
+        let last = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+        #expect(spec["arrows"] != nil && spec["restyle"] != nil && spec["arrowIds"] != nil)
+        await server.stop()
+    }
+
+    /// A preview takes exactly what the commit takes: a key add_arrow / restyle_arrows would refuse
+    /// is refused in render_sketch's `arrows` / `restyle` too, before any device is asked.
+    @Test func arrowPreviewsTakeExactlyTheCommitsFields() {
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["arrows": .array([.object(["canvasPoints": .array([]), "opacity": 0.5])])]) == nil)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["arrows": .array([.object(["canvasPoints": .array([]), "wobble": 1])])])?
+            .hasPrefix("invalidArgument: arrows[0].wobble") == true)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["restyle": .object(["arrowIds": .array([]), "drawnWidth": 3])]) == nil)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["restyle": .object(["ids": .array([])])])?
+            .hasPrefix("invalidArgument: restyle.ids") == true)
+    }
+
     /// add_arrow and restyle_arrows forward `keepsWidth` to the device (Josef, 2026-10-15).
     @Test func arrowWritesForwardKeepsWidth() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
