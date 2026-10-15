@@ -2194,14 +2194,18 @@ private actor FakeStrokeOpDevice {
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
         defer { Task { await device.close() } }
         _ = try await client.callTool(name: "add_arrow", arguments: [
-            "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false])
+            "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false,
+            "dashAlignment": "corners", "dashOffset": 1.5])
         _ = try await client.callTool(name: "restyle_arrows", arguments: [
-            "docId": "d", "ids": .array(["A1"]), "keepsWidth": true])
+            "docId": "d", "ids": .array(["A1"]), "keepsWidth": true,
+            "dashAlignment": "exact", "dashAnchor": "end", "dashEndsOn": "gap"])
         let requests = await device.receivedRequests
         #expect(requests.count == 2)
         let specs = try requests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
         #expect(specs.first?["keepsWidth"] as? Bool == false)
         #expect(specs.last?["keepsWidth"] as? Bool == true)
+        #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
+        #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
         await server.stop()
     }
 

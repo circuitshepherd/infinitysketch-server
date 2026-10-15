@@ -1607,7 +1607,9 @@ public actor MCPAdapter {
 
                 REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, \
-                color, opacity, pinned, layer, tags}`. `keepsWidth` true: a scale moves the points and \
+                dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, opacity, pinned, layer, tags}`. \
+                `dashAlignment` (fitGaps / fitPattern / exact / corners) with `dashAnchor`, `dashEndsOn` and \
+                `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and \
                 keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
                 width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
                 shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's points in canvas \
@@ -1633,7 +1635,8 @@ public actor MCPAdapter {
                 routes the request. Never writes.
 
                 REPLY: an ARRAY of `{name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
-                headLength, headAngle, dashPattern, color, opacity, layer, keepsWidth, duplicateName}` — the same \
+                headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, \
+                opacity, layer, keepsWidth, duplicateName}` — the same \
                 fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
                 repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
                 and `preset` then takes the FIRST of them.
@@ -1687,6 +1690,13 @@ public actor MCPAdapter {
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands), corners (each run between sharp bends fitted on its own, a dash centred on every corner and both ends). Ignored for a solid line."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
+                    "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
+                                           "description": "What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash."]),
+                    "dashOffset": .object(["type": "number", "description": "Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern."]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
                 "required": .array(["docId", "canvasPoints"].map(Value.string)),
@@ -1696,7 +1706,8 @@ public actor MCPAdapter {
             name: "restyle_arrows",
             description: """
                 Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
-                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, \
+                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `dashAlignment`, \
+                `dashAnchor`, `dashEndsOn`, `dashOffset`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
                 too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
                 the current width as it is (restore_stroke_widths takes an earlier scale back). \
@@ -1728,6 +1739,13 @@ public actor MCPAdapter {
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands), corners (each run between sharp bends fitted on its own, a dash centred on every corner and both ends). Ignored for a solid line."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
+                    "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
+                                           "description": "What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash."]),
+                    "dashOffset": .object(["type": "number", "description": "Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern."]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
                 "required": .array(["docId", "ids"].map(Value.string)),
@@ -4417,9 +4435,11 @@ public actor MCPAdapter {
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "addArrow"
                 ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth",
+                   "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth"]
+                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
+                   "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
