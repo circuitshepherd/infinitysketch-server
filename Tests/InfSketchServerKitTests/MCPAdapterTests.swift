@@ -828,7 +828,7 @@ private actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
-            "list_arrows", "list_arrow_presets", "add_arrow", "restyle_arrows", "remove_arrow",
+            "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
             "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
         ])
@@ -2247,6 +2247,35 @@ private actor FakeStrokeOpDevice {
         #expect(specs.last?["keepsWidth"] as? Bool == true)
         #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
         #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
+        await server.stop()
+    }
+
+    /// Curves stage 1: add_arrow and reshape_arrow relay `nodes` (and reshape its `arrowId`) to
+    /// the device verbatim; a node with an unknown key is refused by the closed item schema's
+    /// documentation, and the device validates the rest.
+    @Test func arrowNodesAndReshapeAreRelayed() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        let nodes: Value = .array([
+            .object(["canvasX": 0, "canvasY": 0]),
+            .object(["canvasX": 50, "canvasY": 30, "type": "smooth"]),
+            .object(["canvasX": 100, "canvasY": 0, "type": "manual", "handleIn": .array([-10, 5])]),
+        ])
+        let (_, addError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "nodes": nodes])
+        #expect(addError != true)
+        let (reshaped, reshapeError) = try await client.callTool(name: "reshape_arrow", arguments: [
+            "docId": "d", "arrowId": "A1", "canvasPoints": .array([.array([0, 0]), .array([40, 40]), .array([80, 0])])])
+        #expect(reshapeError != true)
+        #expect(toolResultText(reshaped).contains("reshaped arrow"))
+        let specs = try await device.receivedRequests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
+        #expect(specs.count == 2)
+        #expect(specs.first?["op"] as? String == "addArrow" && (specs.first?["nodes"] as? [Any])?.count == 3)
+        #expect(specs.last?["op"] as? String == "reshapeArrow" && specs.last?["arrowId"] as? String == "A1")
+        #expect((specs.last?["canvasPoints"] as? [Any])?.count == 3)
         await server.stop()
     }
 

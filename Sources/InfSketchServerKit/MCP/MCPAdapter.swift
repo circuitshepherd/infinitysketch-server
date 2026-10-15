@@ -1605,15 +1605,19 @@ public actor MCPAdapter {
                 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch \
                 device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-                REPLY: an ARRAY of `{id, canvasPoints, canvasBounds, startHead, endHead, startAnchor, \
+                REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, \
                 dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, opacity, pinned, layer, tags}`. \
                 `dashAlignment` (fitGaps / fitPattern / exact / corners) with `dashAnchor`, `dashEndsOn` and \
                 `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and \
                 keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
                 width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
-                shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's points in canvas \
-                space, start first (an arrow has no transform: moving one rewrites its points). \
+                shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas \
+                space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` \
+                gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?}`: type `corner` (a \
+                sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from \
+                its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] \
+                from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
                 light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
                 """,
@@ -1795,9 +1799,10 @@ public actor MCPAdapter {
         Tool(
             name: "add_arrow",
             description: """
-                Places an arrow — the same object the app's Arrow tool draws: a straight line from \
-                the first to the last of `canvasPoints` with a shape at each end, on top of Front \
-                objects (or `layer: "back"`). Every style field you omit takes the USER'S NEW-ARROW STYLE \
+                Places an arrow — the same object the app's Arrow tool draws: a line through \
+                `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth \
+                points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front \
+                objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE \
                 (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
                 or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
@@ -1811,9 +1816,10 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "canvasPoints": .object([
                         "type": "array",
-                        "description": "[[x, y], [x, y]] — start, then end, in canvas points.",
+                        "description": "[[x, y], …] — at least two points, start first, in canvas points; each is a sharp corner. Or give `nodes`.",
                         "items": .object(["type": "array", "items": .object(["type": "number"])]),
                     ]),
+                    "nodes": MCPAdapter.arrowNodesProperty,
                     "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
                                           "description": "The shape at the start."]),
                     "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
@@ -1843,7 +1849,31 @@ public actor MCPAdapter {
                     "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern."]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
-                "required": .array(["docId", "canvasPoints"].map(Value.string)),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "reshape_arrow",
+            description: """
+                Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' \
+                shape: corner / smooth / manual with handles) — keeping its id, style, layer, tags \
+                and place in the stacking order. Read the current nodes with list_arrows, change what \
+                you need, send them back. REQUIRES a device with the `arrows` capability. \
+                \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "arrowId": .object(["type": "string", "description": "The arrow (list_arrows' `id`)."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "[[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "nodes": MCPAdapter.arrowNodesProperty,
+                ]),
+                "required": .array(["docId", "arrowId"].map(Value.string)),
             ])
         ),
         Tool(
@@ -3630,6 +3660,7 @@ public actor MCPAdapter {
         case "set_new_arrow_style": return await callArrowPresetOp(arguments, op: "setNewArrowStyle")
         case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
         case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
+        case "reshape_arrow": return await callArrowWrite(arguments, op: "reshapeArrow")
         case "list_images": return await callListImages(arguments)
         case "list_grids": return await callListGrids(arguments)
         case "add_grid": return await callAddGrid(arguments)
@@ -4678,6 +4709,26 @@ public actor MCPAdapter {
         ]
     }
 
+    /// An arrow's nodes, as add_arrow and reshape_arrow take them and list_arrows reports them.
+    static var arrowNodesProperty: Value {
+        .object([
+            "type": "array",
+            "description": "At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints.",
+            "items": .object([
+                "type": "object",
+                "properties": .object([
+                    "canvasX": .object(["type": "number"]),
+                    "canvasY": .object(["type": "number"]),
+                    "type": .object(["type": "string", "enum": .array(["corner", "smooth", "manual"].map(Value.string))]),
+                    "handleIn": .object(["type": "array", "items": .object(["type": "number"]), "description": "[dx, dy] — manual nodes only."]),
+                    "handleOut": .object(["type": "array", "items": .object(["type": "number"]), "description": "[dx, dy] — manual nodes only."]),
+                ]),
+                "required": .array(["canvasX", "canvasY"].map(Value.string)),
+                "additionalProperties": .bool(false),
+            ]),
+        ])
+    }
+
     /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
     /// as for `transform_elements`), the result written back under the byte CAS.
     private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
@@ -4687,8 +4738,8 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
-            let keys = op == "addArrow"
-                ? ["canvasPoints", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
+            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
+                ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
@@ -4712,7 +4763,8 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
                 var summary = op == "addArrow" ? "added arrow to \(docId) at seq \(seq)"
-                                               : "restyled arrows in \(docId) at seq \(seq)"
+                    : op == "reshapeArrow" ? "reshaped arrow in \(docId) at seq \(seq)"
+                    : "restyled arrows in \(docId) at seq \(seq)"
                 if let meta = out.meta,
                    let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
                    let id = decoded["arrowId"] {
