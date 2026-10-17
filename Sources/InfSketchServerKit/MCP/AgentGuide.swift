@@ -171,9 +171,9 @@ enum AgentGuide {
     its heads never skew. **A scale keeps its width** while `keepsWidth` is true (the default, \
     also of the built-in presets); with it false the width, heads and dashes scale too and \
     `restore_stroke_widths` takes it back (`list_arrows`' `unscaledWidth`; the user's Unscale \
-    button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `fitGaps` \
-    (default — dashes exact, gaps adjusted, ends as `dashEndsOn`), `fitPattern`, `exact` (from \
-    `dashAnchor`) or `corners` (a dash centred on every sharp corner), shifted by `dashOffset` \
+    button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `corners` \
+    (default — a dash centred on every sharp corner and both ends), `fitGaps` (dashes exact, gaps \
+    adjusted, ends as `dashEndsOn`), `fitPattern` or `exact` (from `dashAnchor`), shifted by `dashOffset` \
     (widths). **Corners turn round by default**: each interior corner point has its own `join` \
     (`round`, `miter` — sharp, cut to a bevel past its `miterLimit` in half widths — or `bevel`) in \
     `nodes`, and `cornerJoin` / `cornerMiterLimit` on add / restyle set every corner at once. \
