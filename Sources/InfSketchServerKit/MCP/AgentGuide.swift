@@ -174,7 +174,10 @@ enum AgentGuide {
     button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `fitGaps` \
     (default — dashes exact, gaps adjusted, ends as `dashEndsOn`), `fitPattern`, `exact` (from \
     `dashAnchor`) or `corners` (a dash centred on every sharp corner), shifted by `dashOffset` \
-    (widths). **The user's presets and new-arrow style are writable**: `save_arrow_preset`, \
+    (widths). **Corners turn round by default**: each interior corner point has its own `join` \
+    (`round`, `miter` — sharp, cut to a bevel past its `miterLimit` in half widths — or `bevel`) in \
+    `nodes`, and `cornerJoin` / `cornerMiterLimit` on add / restyle set every corner at once. \
+    **The user's presets and new-arrow style are writable**: `save_arrow_preset`, \
     `rename_arrow_preset`, `delete_arrow_preset`, `move_arrow_preset`, `restore_arrow_presets`, \
     and `get_new_arrow_style` / `set_new_arrow_style` — device settings, not document edits, \
     so they write no document and have no undo. **Preview before committing**: \

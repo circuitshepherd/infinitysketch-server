@@ -545,7 +545,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, opacity, pinned, layer, tags}`. `dashAlignment` (fitGaps / fitPattern / exact / corners) with `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact / corners) with `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -573,6 +573,8 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each is a sharp corner. Or give `nodes`. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
+| `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
 | `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands), corners (each run between sharp bends fitted on its own, a dash centred on every corner and both ends). Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -585,7 +587,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
 | `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
 | `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?, join?, miterLimit?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints. |
 | `opacity` | number | no | 0…1 — the color's alpha (overrides the alpha of `color`). |
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
@@ -599,6 +601,8 @@ Each item of `nodes`:
 | `canvasY` | number | yes |  |
 | `handleIn` | array | no | [dx, dy] — manual nodes only. |
 | `handleOut` | array | no | [dx, dy] — manual nodes only. |
+| `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth / manual node. |
+| `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `type` | string — `corner`, `smooth`, `manual` | no |  |
 
 ### `reshape_arrow`
@@ -610,7 +614,7 @@ Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_
 | `arrowId` | string | yes | The arrow (list_arrows' `id`). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`. |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?, join?, miterLimit?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints. |
 
 Each item of `nodes`:
 
@@ -620,6 +624,8 @@ Each item of `nodes`:
 | `canvasY` | number | yes |  |
 | `handleIn` | array | no | [dx, dy] — manual nodes only. |
 | `handleOut` | array | no | [dx, dy] — manual nodes only. |
+| `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth / manual node. |
+| `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `type` | string — `corner`, `smooth`, `manual` | no |  |
 
 ### `restyle_arrows`
@@ -632,6 +638,8 @@ Changes the style of named arrows — a `preset`, and/or any of `startHead`, `en
 | `ids` | array | yes | Arrow ids, from list_arrows. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
+| `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
 | `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands), corners (each run between sharp bends fitted on its own, a dash centred on every corner and both ends). Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -667,6 +675,8 @@ Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `doc
 | `arrowId` | string | no | Take the style of this arrow (list_arrows) in docId. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
+| `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
 | `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
@@ -746,6 +756,8 @@ Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `pre
 | `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
+| `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
 | `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
