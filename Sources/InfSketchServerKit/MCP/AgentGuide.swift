@@ -158,8 +158,9 @@ enum AgentGuide {
     through its NODES, a shape at each end (`startHead`, `endHead`), a `drawnWidth` in canvas \
     points and a light-canonical `color`. Two `canvasPoints` make a straight arrow, more make \
     sharp corners (an L or Z connector); `nodes` instead give each point a type — `corner`, \
-    `smooth` (the curve passes through it smoothly, an S-curve from a few points) or `manual` \
-    (cubic handles `handleIn`/`handleOut`, offsets from the node; Edit arc writes these). Place \
+    `smooth` (the curve passes through it smoothly, an S-curve from a few points) or `arc` \
+    (along the circle through it and its neighbours, kept a circle when points move; Edit arc \
+    writes these). Place \
     one with `add_arrow`, read them with `list_arrows` (`nodes`, and `canvasBounds` of the curve \
     as drawn), change one's shape with `reshape_arrow` (same id, style and order — read the \
     nodes, edit, send back), restyle with `restyle_arrows`, delete with `remove_arrow` \

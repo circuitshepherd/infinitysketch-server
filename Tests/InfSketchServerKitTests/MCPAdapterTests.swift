@@ -2263,7 +2263,7 @@ private actor FakeStrokeOpDevice {
         let nodes: Value = .array([
             .object(["canvasX": 0, "canvasY": 0]),
             .object(["canvasX": 50, "canvasY": 30, "type": "smooth"]),
-            .object(["canvasX": 100, "canvasY": 0, "type": "manual", "handleIn": .array([-10, 5])]),
+            .object(["canvasX": 100, "canvasY": 0, "type": "arc"]),
         ])
         let (_, addError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "nodes": nodes])
         #expect(addError != true)
