@@ -836,6 +836,10 @@ public actor SessionManager {
         statusSubscribers.removeValue(forKey: token)?.finish()
     }
 
+    /// Browsers watching `docId` right now. Lets a test wait for a watch to be registered
+    /// instead of sleeping a fixed time.
+    func watcherCount(docId: String) -> Int { watcherCounts[docId] ?? 0 }
+
     public func liveInfo() async -> [String: LiveDocInfo] {
         var info: [String: LiveDocInfo] = [:]
         for (docId, session) in sessions {

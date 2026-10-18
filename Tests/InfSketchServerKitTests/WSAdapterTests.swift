@@ -485,6 +485,18 @@ private struct ServerMessageReader {
 }
 
 @Suite struct WSAdapterWatchAndFrameTests {
+    /// Polls `condition` until it holds or `timeout` passes. The deadline is generous on
+    /// purpose: it only costs time when the test is already failing.
+    static func waitUntil(timeout: Duration = .seconds(10),
+                          _ condition: () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return await condition()
+    }
+
     /// Two connections against one manager: an app (subscriber) and a browser (watcher).
     @Test func watchFrameCycle() async throws {
         let manager = try makeManager()
@@ -573,7 +585,10 @@ private struct ServerMessageReader {
         try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await reader.next()
         try browser.send(.watchDoc(docId: "d", framePx: nil))
-        try await Task.sleep(for: .milliseconds(30))
+        // Wait for the watch to be REGISTERED: a fixed 30 ms sleep deleted the document before
+        // the watch existed whenever the machine was busy.
+        let watching = await Self.waitUntil { await manager.watcherCount(docId: "d") == 1 }
+        #expect(watching)
 
         try await manager.deleteDoc(docId: "d")
         #expect(try await reader.next() == .error(reason: "watchDropped"))
@@ -587,6 +602,7 @@ private struct ServerMessageReader {
         let device = ArrivalFlag()
         struct NoDevice: Error {}
         await manager.setFrameProvider { _, _, _ in
+            await device.noteAttempt()
             guard await device.arrived else { throw NoDevice() }
             return (png: Data([5]), canvasRect: nil)
         }
@@ -595,7 +611,9 @@ private struct ServerMessageReader {
         try browser.send(.hello(protocolVersion: WireProtocol.version, capabilities: [], deviceId: nil))
         _ = try await browserReader.next()
         try browser.send(.watchDoc(docId: "d", framePx: nil))
-        try await Task.sleep(for: .milliseconds(50))   // the relay tried and found no device
+        // The relay tried and found no device — waited for, not slept on.
+        let tried = await Self.waitUntil { await device.attempts > 0 }
+        #expect(tried)
 
         await device.set()
         let app = try await Harness(manager: manager)
@@ -607,7 +625,9 @@ private struct ServerMessageReader {
 
     private actor ArrivalFlag {
         private(set) var arrived = false
+        private(set) var attempts = 0
         func set() { arrived = true }
+        func noteAttempt() { attempts += 1 }
     }
 }
 
