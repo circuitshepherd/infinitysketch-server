@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-68 tools, served over streamable HTTP at `/mcp`.
+69 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -104,7 +104,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 
 ## Elements
 
-Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
+Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
 
 | Tool | Summary |
 |---|---|
@@ -114,6 +114,7 @@ Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to
 | [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. |
 | [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
+| [`set_layer`](#set_layer) | Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by… |
 | [`copy_elements`](#copy_elements) | Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
 
@@ -409,7 +410,7 @@ Deletes one or more strokes from a document by their composite stroke keys (as r
 
 ### `add_text`
 
-Appends a placed-text entry to a document: a new id, the document's current colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text box's top-left corner. Give color/fontSize/bold/italic/family to style the WHOLE label, or a `spans` array to style parts of it independently (e.g. a subscript). A whole-field style is the base each span overrides. Styling needs a connected device; plain text does not. Returns the new text's id so you can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts — call it before setting a `family`. `anchor` picks the point of the box that stays put as the text grows, as the app's anchor grid does (needs a device). Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Appends a placed-text entry to a document: a new id, the document's current colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text box's top-left corner. Give color/fontSize/bold/italic/family to style the WHOLE label, or a `spans` array to style parts of it independently (e.g. a subscript). A whole-field style is the base each span overrides. Styling needs a connected device; plain text does not. Returns the new text's id so you can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts — call it before setting a `family`. `anchor` picks the point of the box that stays put as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the strokes (both need a device). Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -425,9 +426,12 @@ Appends a placed-text entry to a document: a new id, the document's current colo
 | `family` | string | no | A font family name from list_fonts. An unknown family fails with unknownFont. |
 | `fontSize` | number | no | Point size, 1–512. |
 | `italic` | boolean | no |  |
+| `layer` | string — `front`, `back` | no | front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device. |
 | `pinned` | boolean | no | Excludes the text from selection transforms. Defaults to false. |
 | `spans` | array | no | Style parts of the text independently instead of a single `text` string. Each span is {text, color?, fontSize?, bold?, italic?, family?}; any whole-field color/fontSize/bold/italic/ family above is the base a span's own value overrides. Supply `text` OR `spans`, not both. Requires a connected device. |
 | `tags` | array | no | Durable tags for this text, so find_elements can reach it later. |
+| `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
+| `wrapWidth` | number | no | Wrap at this box width (turns wordWrap on), in the text's own points before its transform — the space fontSize is in, so canvas points for an unscaled text. At least 24, rounded to a whole point. Needs a connected device. |
 
 Each item of `spans`:
 
@@ -442,7 +446,7 @@ Each item of `spans`:
 
 ### `edit_text`
 
-Mutates an existing placed text by id: replace its string and/or move it, or restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` array (parts of it independently — a whole-field style is the base each span overrides). WARNING: replacing the text via PLAIN `text` (no style/spans) resets that entry's rich formatting to plain defaults — the attributed run's bold/italic/font/colour attributes are UIKit-archived data no server-side code can synthesize, so a new plain text run always replaces the old ones wholesale. A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles the EXISTING characters (or replaces them with `text`/`spans` if given) and needs a connected device — plain edits do not. Position-only edits (canvasX and/or canvasY with no text/style) do not touch formatting. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts. `anchor` sets or clears ("automatic") the point of the box that stays put as the text grows (needs a device); an anchored text keeps that point when its characters change. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Mutates an existing placed text by id: replace its string and/or move it, or restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` array (parts of it independently — a whole-field style is the base each span overrides). WARNING: replacing the text via PLAIN `text` (no style/spans) resets that entry's rich formatting to plain defaults — the attributed run's bold/italic/font/colour attributes are UIKit-archived data no server-side code can synthesize, so a new plain text run always replaces the old ones wholesale. A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles the EXISTING characters (or replaces them with `text`/`spans` if given) and needs a connected device — plain edits do not. Position-only edits (canvasX and/or canvasY with no text/style) do not touch formatting. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts. `anchor` sets or clears ("automatic") the point of the box that stays put as the text grows (needs a device); an anchored text keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word wrap on or off and set its width (needs a device). To move a text between layers use set_layer. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -460,6 +464,8 @@ Mutates an existing placed text by id: replace its string and/or move it, or res
 | `italic` | boolean | no |  |
 | `spans` | array | no | Replace the text with independently-styled parts instead of a single `text` string. Same shape as add_text's `spans`. Requires a connected device. |
 | `text` | string | no | Replacement text. Plain (no style/spans), this resets formatting to plain defaults — see the tool description. Styled (with color/fontSize/bold/italic/family/spans), it replaces the characters with the new style instead. |
+| `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
+| `wrapWidth` | number | no | Wrap at this box width (turns wordWrap on), in the text's own points before its transform — the space fontSize is in, so canvas points for an unscaled text. At least 24, rounded to a whole point. Needs a connected device. |
 
 Each item of `spans`:
 
@@ -485,7 +491,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`.
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, fontSize, family, bold, italic} each) and no top-level style. `color` is light-canonical and ABSENT for the automatic color; `family` is absent for the system font. `alignment` is left / center / right / justified / natural, or mixed. `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it (the text's own points, before its transform).
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -515,6 +521,7 @@ Place an image into a document. `path` names an image FILE ON THE MACHINE THIS S
 | `path` | string | yes | Absolute path to a PNG/JPEG/GIF (or anything else the device can decode) on the server's own filesystem. A leading ~ is expanded; a relative path is refused rather than resolved against a working directory you cannot see. |
 | `canvasHeight` | number | no | Canvas-point height. Omit both for the image's natural pixel size; give one to preserve aspect ratio. |
 | `canvasWidth` | number | no | Canvas-point width. Omit both for the image's natural pixel size; give one to preserve aspect ratio. |
+| `layer` | string — `front`, `back` | no | back (behind strokes and grids; the default for images) or front (above the strokes). Move it later with set_layer. |
 | `opacity` | number | no | 0..1. Defaults to 1. |
 | `tags` | array | no | Durable tags for this image, so find_elements can reach it later. |
 
@@ -983,6 +990,16 @@ Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE do
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to reorder, from list_texts. |
+
+### `set_layer`
+
+Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. Each one that changes layer lands on TOP of its new layer; one already there stays where it is. `ids` may mix text, image and arrow ids. A pinned image paints in the pinned-images layer whatever its layer, and returns to this one when unpinned (set_pinned). Atomic: an unknown id fails with elementNotFound and nothing moves. REQUIRES a connected device with the objectLayerWrites capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `ids` | array | yes | Text, image and/or arrow ids — a non-empty list. |
+| `layer` | string — `front`, `back` | yes | front or back. |
 
 ### `set_pinned`
 

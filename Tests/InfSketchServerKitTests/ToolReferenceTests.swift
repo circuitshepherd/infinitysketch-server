@@ -78,11 +78,11 @@ enum ToolReference {
               tools: ["list_grids", "add_grid", "update_grid", "remove_grid", "reorder_grids",
                       "set_grid_origin", "snap_points"]),
         Group(title: "Elements",
-              blurb: "Strokes, texts and images addressed by id, whatever their kind. Resolve a "
+              blurb: "Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve a "
                    + "tag to ids with `find_elements`, then act with the id-taking tools.",
               tools: ["tag_elements", "find_elements", "list_tags", "transform_elements",
                       "reset_element_transforms",
-                      "reorder_elements", "set_pinned", "copy_elements"]),
+                      "reorder_elements", "set_layer", "set_pinned", "copy_elements"]),
         Group(title: "Selection",
               blurb: "These act on the LIVE rect-select session on a connected device, not on "
                    + "document bytes, and land as one undo step each.",

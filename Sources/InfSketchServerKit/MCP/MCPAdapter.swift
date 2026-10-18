@@ -483,6 +483,16 @@ public actor MCPAdapter {
     // envelope-contract tests (mirroring drawStrokesSpecEnvelopeMatchesCanonicalShape).
     private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "spans"]
 
+    /// The capability a text write needs: `authorText`, joined with the newer parts the call
+    /// actually uses — an older app decodes an unknown key by ignoring it and answers success.
+    static func textWriteCapability(_ arguments: [String: Value]?) -> String {
+        func has(_ key: String) -> Bool { arguments?[key].map { !$0.isNull } ?? false }
+        var parts = ["authorText"]
+        if has("wordWrap") || has("wrapWidth") { parts.append("textWrap") }
+        if has("layer") { parts.append("objectLayerWrites") }
+        return parts.joined(separator: "+")
+    }
+
     /// True iff any style/spans argument is present (and not an explicit
     /// JSON null) — the plain-vs-styled routing decision for
     /// `callAddText`/`callEditText`.
@@ -492,11 +502,26 @@ public actor MCPAdapter {
     /// document format, none of which the server-side `DocJSON` path writes — so a tagged or
     /// anchored call must take the device path or the argument would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        (styleArgKeys + ["tags", "anchor", "anchorParagraphs"]).contains { key in
+        (styleArgKeys + ["tags", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
     }
+
+    /// Word wrap, the Text Format panel's Word Wrap card as arguments. Device-relayed under
+    /// `authorText+textWrap`: an app without it would ignore the keys and answer success.
+    private static let textWrapProperties: [String: Value] = [
+        "wordWrap": .object(["type": "boolean", "description": """
+            true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; \
+            false: no wrapping, the box grows to the longest line (the default for a new text). \
+            Needs a connected device.
+            """]),
+        "wrapWidth": .object(["type": "number", "minimum": 24, "description": """
+            Wrap at this box width (turns wordWrap on), in the text's own points before its \
+            transform — the space fontSize is in, so canvas points for an unscaled text. At \
+            least 24, rounded to a whole point. Needs a connected device.
+            """]),
+    ]
 
     /// A text's anchor — the point of its box that stays put as it grows — and what picking
     /// one does to the paragraphs' alignment; the Properties panel's anchor grid, as arguments.
@@ -711,7 +736,9 @@ public actor MCPAdapter {
                 can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
                 author for the dark canvas). Font families come from list_fonts — call it \
                 before setting a `family`. `anchor` picks the point of the box that stays put \
-                as the text grows, as the app's anchor grid does (needs a device). \(writeToolCaveats)
+                as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / \
+                `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the \
+                strokes (both need a device). \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -741,8 +768,11 @@ public actor MCPAdapter {
                                 """,
                             "items": textSpanItemSchema,
                         ]),
+                        "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                          "description": "front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device."]),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
+                     .merging(textWrapProperties) { current, _ in current }
                 ),
                 "required": .array(["docId", "text", "canvasX", "canvasY"].map(Value.string)),
             ])
@@ -765,7 +795,9 @@ public actor MCPAdapter {
                 canvas). Font \
                 families come from list_fonts. `anchor` sets or clears ("automatic") the point \
                 of the box that stays put as the text grows (needs a device); an anchored text \
-                keeps that point when its characters change. \(writeToolCaveats)
+                keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word \
+                wrap on or off and set its width (needs a device). To move a text between layers \
+                use set_layer. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -796,6 +828,7 @@ public actor MCPAdapter {
                         ]),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
+                     .merging(textWrapProperties) { current, _ in current }
                 ),
                 "required": .array(["docId", "textId"].map(Value.string)),
             ])
@@ -1313,8 +1346,36 @@ public actor MCPAdapter {
                         "description": "Durable tags for this image, so find_elements can reach it later.",
                     ]),
                     "opacity": .object(["type": "number", "description": "0..1. Defaults to 1."]),
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "back (behind strokes and grids; the default for images) or front (above the strokes). Move it later with set_layer."]),
                 ]),
                 "required": .array(["docId", "path", "canvasX", "canvasY"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "set_layer",
+            description: """
+                Moves placed texts, images and arrows into the front object layer (above the \
+                strokes) or the back one (behind strokes and grids) — the app's Layer card. Each \
+                one that changes layer lands on TOP of its new layer; one already there stays \
+                where it is. `ids` may mix text, image and arrow ids. A pinned image paints in \
+                the pinned-images layer whatever its layer, and returns to this one when \
+                unpinned (set_pinned). Atomic: an unknown id fails with elementNotFound and \
+                nothing moves. REQUIRES a connected device with the objectLayerWrites \
+                capability. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "ids": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Text, image and/or arrow ids — a non-empty list.",
+                    ]),
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front or back."]),
+                ]),
+                "required": .array(["docId", "ids", "layer"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1587,13 +1648,21 @@ public actor MCPAdapter {
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
 
-                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer}`. The box \
+                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, \
+                color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth}`. The box \
                 is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
                 picked anchor — the point of its box that stays put as the text grows — as \
                 {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the \
                 first line's baseline keeps its place). `layer` is `front` (in front of the strokes) \
                 or `back` (behind strokes and grids); a document from before object layers has no \
-                such key and lists every text as `front`.
+                such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so \
+                it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, \
+                `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, \
+                fontSize, family, bold, italic} each) and no top-level style. `color` is \
+                light-canonical and ABSENT for the automatic color; `family` is absent for the \
+                system font. `alignment` is left / center / right / justified / natural, or mixed. \
+                `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
+                (the text's own points, before its transform).
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -3737,6 +3806,7 @@ public actor MCPAdapter {
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
         case "reorder_elements": return await callReorderElements(arguments)
+        case "set_layer": return await callSetLayer(arguments)
         case "fetch_doc": return await callFetchDoc(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
@@ -3806,7 +3876,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -3822,7 +3892,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+                    docId: docId, docBytes: docBytes, spec: spec, capability: Self.textWriteCapability(arguments))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -3949,6 +4019,11 @@ public actor MCPAdapter {
             if let height { envelope["canvasHeight"] = .double(height) }
             if let opacity { envelope["opacity"] = .double(opacity) }
             if let tags = try Self.optionalStringArrayArg(arguments, "tags") { envelope["tags"] = .array(tags.map(Value.string)) }
+            let layer = try Self.optionalStringArg(arguments, "layer")
+            if let layer {
+                guard layer == "front" || layer == "back" else { return Self.errorResult("invalidArguments: layer must be front or back") }
+                envelope["layer"] = .string(layer)
+            }
 
             let spec: Data
             do {
@@ -3959,8 +4034,10 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
+                // An app without `objectLayerWrites` would place it in back and answer success.
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorImage",
+                    docId: docId, docBytes: docBytes, spec: spec,
+                    capability: layer == nil ? "authorImage" : "authorImage+objectLayerWrites",
                     specParts: [.imageBytes: imageBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
@@ -4066,7 +4143,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4082,7 +4159,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "authorText")
+                    docId: docId, docBytes: docBytes, spec: spec, capability: Self.textWriteCapability(arguments))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5256,8 +5333,13 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
+                // Objects move within their LAYER only on an `objectLayerWrites` app; an older one
+                // moves them within their kind and still answers success.
+                var parts = ["reorderElements"]
+                if !arrowIds.isEmpty { parts.append("arrows") }
+                if !(textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) { parts.append("objectLayerWrites") }
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: arrowIds.isEmpty ? "reorderElements" : "reorderElements+arrows")
+                                                       capability: parts.joined(separator: "+"))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5267,6 +5349,42 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
                 "moved \(count) element(s) to \(mode) in \(docId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `set_layer`: texts, images and arrows into the front or back object layer, each landing on
+    /// top of it — the Properties panel's Layer card, through the same device function.
+    private func callSetLayer(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let ids = try Self.optionalStringArrayArg(arguments, "ids") ?? []
+            let layer = try Self.stringArg(arguments, "layer")
+            guard !ids.isEmpty else { return Self.errorResult("invalidArguments: ids must name at least one element") }
+            guard layer == "front" || layer == "back" else { return Self.errorResult("invalidArguments: layer must be front or back") }
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            let spec: Data
+            do {
+                spec = try JSONEncoder().encode(Value.object([
+                    "op": .string("setLayer"), "ids": .array(ids.map(Value.string)), "layer": .string(layer)]))
+            } catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
+                                                       capability: "reorderElements+objectLayerWrites")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in
+                "moved \(ids.count) element(s) to the \(layer) layer in \(docId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)

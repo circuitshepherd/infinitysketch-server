@@ -825,7 +825,7 @@ private actor FakeStrokeOpDevice {
             "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
+            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
@@ -5467,6 +5467,57 @@ private actor FakeStrokeOpDevice {
         let bytes = data ?? Data(base64Encoded: ImageContainerTests.pngBase64)!
         try? bytes.write(to: url)
         return try await body(url.path)
+    }
+
+    /// Word wrap and object layers reach only a device that writes them (`textWrap`,
+    /// `objectLayerWrites`): an older app would ignore the keys — or reorder within the kind — and
+    /// answer success. Calls without them still reach it.
+    @Test func wrapAndLayerWritesGoOnlyToADeviceThatHasThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["authorText", "authorImage", "reorderElements", "arrows"])
+        defer { Task { await old.close() } }
+        let newer: [(String, [String: Value])] = [
+            ("add_text", ["text": "a", "canvasX": 0, "canvasY": 0, "wrapWidth": 100]),
+            ("add_text", ["text": "a", "canvasX": 0, "canvasY": 0, "layer": "back"]),
+            ("edit_text", ["textId": "T", "wordWrap": false]),
+            ("reorder_elements", ["textIds": .array(["T"]), "mode": "front"]),
+            ("set_layer", ["ids": .array(["T"]), "layer": "back"]),
+        ]
+        for (tool, args) in newer {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(content).hasPrefix("noDeviceAvailable"), "\(tool): \(toolResultText(content))")
+        }
+        try await withPNGFile { path in
+            let (content, _) = try await client.callTool(name: "add_image", arguments: [
+                "docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0, "layer": "front"])
+            #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        }
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, strokeReorderError) = try await client.callTool(name: "reorder_elements", arguments: [
+            "docId": "d", "strokeIds": .array(["k"]), "mode": "front"])
+        #expect(strokeReorderError != true, "a stroke-only reorder still reaches the older app")
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+            capabilities: ["authorText", "authorImage", "reorderElements", "arrows", "textWrap", "objectLayerWrites"])
+        defer { Task { await device.close() } }
+        for (tool, args) in newer {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError != true, "\(tool): \(toolResultText(content))")
+            let last = try #require(await device.receivedRequests.last)
+            let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+            for key in args.keys { #expect(spec[key] != nil, "\(tool) relays \(key)") }
+        }
+        let lastRequest = try #require(await device.receivedRequests.last)
+        let setLayer = try #require(JSONSerialization.jsonObject(with: lastRequest.spec) as? [String: Any])
+        #expect(setLayer["op"] as? String == "setLayer")
+        await server.stop()
     }
 
     /// The exact relayed envelope key set, string-literally (mirroring the
