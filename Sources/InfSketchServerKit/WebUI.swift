@@ -341,6 +341,59 @@ public enum WebUI {
     }
     """#
 
+    /// Which pointer moves pan and which pinch — a standalone constant so the suite drives the
+    /// REAL source. Pure: no DOM. A move answers `{dx, dy, zoom}` (zoom `{x, y, ratio}` in client
+    /// coordinates, or null) or null. The pinch reference is re-taken whenever EXACTLY two
+    /// pointers remain, on a lift as on a press: taken only on a press, lifting a third finger
+    /// left the reference from before it touched down, and the next two-finger move panned and
+    /// zoomed by everything the fingers had done in between.
+    public static let pointerGesturesJS = #"""
+    function makePointerGestures() {
+      const pointers = new Map();
+      let lastMid = null, lastDist = 0;
+      function seedPinch() {
+        if (pointers.size === 2) {
+          const [a, b] = [...pointers.values()];
+          lastMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          lastDist = Math.hypot(a.x - b.x, a.y - b.y);
+        } else {
+          lastMid = null; lastDist = 0;
+        }
+      }
+      return {
+        get size() { return pointers.size; },
+        down(id, x, y) {
+          pointers.set(id, { x: x, y: y, startX: x, startY: y });
+          seedPinch();
+        },
+        move(id, x, y) {
+          const p = pointers.get(id);
+          if (!p) return null;
+          let out = null;
+          if (pointers.size === 1) out = { dx: x - p.x, dy: y - p.y, zoom: null };
+          p.x = x; p.y = y;
+          if (pointers.size === 2 && lastMid) {
+            const [a, b] = [...pointers.values()];
+            const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            const d = Math.hypot(a.x - b.x, a.y - b.y);
+            out = { dx: m.x - lastMid.x, dy: m.y - lastMid.y,
+                    zoom: lastDist > 0 && d > 0 ? { x: m.x, y: m.y, ratio: d / lastDist } : null };
+            lastMid = m; lastDist = d;
+          }
+          return out;
+        },
+        // The lifted pointer's record (its start point decides a tap), or null if unknown.
+        up(id) {
+          const p = pointers.get(id);
+          if (!p) return null;
+          pointers.delete(id);
+          seedPinch();
+          return p;
+        }
+      };
+    }
+    """#
+
     /// The pan/zoom viewport core — a standalone constant so the test suite can
     /// evaluate the REAL source in a JSContext rather than a Swift re-derivation.
     /// Pure: no DOM, no globals; dpr is injected so tests can pin it.
@@ -547,6 +600,7 @@ public enum WebUI {
         const stage = document.getElementById("stage");
 
         \#(viewportJS)
+        \#(pointerGesturesJS)
         \#(singleFlightJS)
         \#(versionReloadJS)
 
@@ -707,56 +761,36 @@ public enum WebUI {
           render();
         }, { passive: false });
 
-        const pointers = new Map();
-        let lastMid = null, lastDist = 0;
+        const gestures = makePointerGestures();
         let lastTapAt = 0, lastTapX = 0, lastTapY = 0;
 
         stage.addEventListener("pointerdown", (e) => {
           // Capture keeps a drag alive outside the stage; synthetic test events
           // have no active pointer to capture, which must not kill the handler.
           try { stage.setPointerCapture(e.pointerId); } catch (err) {}
-          pointers.set(e.pointerId, { x: e.clientX, y: e.clientY,
-                                      startX: e.clientX, startY: e.clientY });
-          if (pointers.size === 2) {
-            const [a, b] = [...pointers.values()];
-            lastMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-            lastDist = Math.hypot(a.x - b.x, a.y - b.y);
-          }
+          gestures.down(e.pointerId, e.clientX, e.clientY);
           stage.classList.add("dragging");
         });
 
         stage.addEventListener("pointermove", (e) => {
-          const p = pointers.get(e.pointerId);
-          if (!p) return;
-          const rect = stage.getBoundingClientRect();
-          if (pointers.size === 1) {
-            vp.panBy(e.clientX - p.x, e.clientY - p.y);
-            render();
+          const g = gestures.move(e.pointerId, e.clientX, e.clientY);
+          if (!g) return;
+          vp.panBy(g.dx, g.dy);
+          if (g.zoom) {
+            const rect = stage.getBoundingClientRect();
+            vp.zoomAbout(g.zoom.x - rect.left, g.zoom.y - rect.top, g.zoom.ratio);
           }
-          p.x = e.clientX; p.y = e.clientY;
-          if (pointers.size === 2 && lastMid) {
-            const [a, b] = [...pointers.values()];
-            const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-            const d = Math.hypot(a.x - b.x, a.y - b.y);
-            vp.panBy(m.x - lastMid.x, m.y - lastMid.y);
-            if (lastDist > 0 && d > 0) {
-              vp.zoomAbout(m.x - rect.left, m.y - rect.top, d / lastDist);
-            }
-            lastMid = m; lastDist = d;
-            render();
-          }
+          render();
         });
 
         function endPointer(e) {
-          const p = pointers.get(e.pointerId);
+          const p = gestures.up(e.pointerId);
           if (!p) return;
-          pointers.delete(e.pointerId);
-          if (pointers.size < 2) { lastMid = null; lastDist = 0; }
-          if (pointers.size === 0) stage.classList.remove("dragging");
+          if (gestures.size === 0) stage.classList.remove("dragging");
           // Double-click and double-tap share one manual path — native dblclick
           // would double-fire on browsers that synthesize it after taps.
           const wasTap = Math.hypot(e.clientX - p.startX, e.clientY - p.startY) < 10;
-          if (wasTap && pointers.size === 0) {
+          if (wasTap && gestures.size === 0) {
             const now = Date.now();
             if (now - lastTapAt < 350
                 && Math.abs(e.clientX - lastTapX) < 30
