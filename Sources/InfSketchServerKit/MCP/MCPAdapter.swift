@@ -1607,10 +1607,10 @@ public actor MCPAdapter {
 
                 REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, \
-                dashAlignment, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
+                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
                 `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
                 join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
-                `dashAlignment` (fitGaps / fitPattern / exact / corners) with `dashAnchor`, `dashEndsOn` and \
+                `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and \
                 `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and \
                 keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
                 width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
@@ -1644,7 +1644,7 @@ public actor MCPAdapter {
                 move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
 
                 REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
-                headLength, headAngle, dashPattern, dashAlignment, dashAnchor, dashEndsOn, dashOffset, color, \
+                headLength, headAngle, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, color, \
                 opacity, layer, keepsWidth, duplicateName}` — the same \
                 fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
                 repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
@@ -1843,7 +1843,8 @@ public actor MCPAdapter {
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
                     "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
-                                              "description": "How a dashed shaft's pattern is laid: corners (default — each run between sharp bends fitted on its own, a dash centred on every corner and both ends), fitGaps (dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). Ignored for a solid line."]),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
                     "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
                                            "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
                     "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
@@ -1888,7 +1889,7 @@ public actor MCPAdapter {
             description: """
                 Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
                 `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `dashAlignment`, \
-                `dashAnchor`, `dashEndsOn`, `dashOffset`, \
+                `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
                 too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
                 the current width as it is (restore_stroke_widths takes an earlier scale back). \
@@ -1921,7 +1922,8 @@ public actor MCPAdapter {
                     "opacity": .object(["type": "number", "description": "0…1."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
                     "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
-                                              "description": "How a dashed shaft's pattern is laid: corners (default — each run between sharp bends fitted on its own, a dash centred on every corner and both ends), fitGaps (dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). Ignored for a solid line."]),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
                     "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
                                            "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
                     "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
@@ -4688,7 +4690,7 @@ public actor MCPAdapter {
 
     /// The style fields an agent can name, flat as on add_arrow — `ArrowAuthoring.StyleArgs` on the device.
     static let arrowStyleKeys = ["startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "headLength",
-                                 "headAngle", "dashPattern", "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset",
+                                 "headAngle", "dashPattern", "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset",
                                  "color", "colorAppearance", "opacity", "layer", "keepsWidth", "cornerJoin", "cornerMiterLimit"]
 
     static func mergeProperties(_ a: [String: Value], _ b: [String: Value]) -> [String: Value] {
@@ -4709,6 +4711,7 @@ public actor MCPAdapter {
             "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60)."]),
             "dashPattern": .object(["type": "array", "items": .object(["type": "number"]), "description": "Dash, gap … in widths; [] is solid."]),
             "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
+            "dashCorners": .object(["type": "boolean", "description": "The fit modes' Corners switch (see add_arrow)."]),
             "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)), "description": "Where an exact pattern starts."]),
             "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)), "description": "What a fitted shaft's ends finish on."]),
             "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "The pattern's offset in widths (−50…50)."]),
@@ -4757,10 +4760,10 @@ public actor MCPAdapter {
             let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
-                   "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
-                   "dashAlignment", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
