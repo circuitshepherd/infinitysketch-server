@@ -171,24 +171,28 @@ private actor SentBox {
 
     /// A pure bytes-in/bytes-out op that times out on one device is tried once on the next.
     @Test func aTimedOutOpIsRetriedOnceOnAnotherDevice() async throws {
-        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(100))
+        // A answers the moment it is asked, from inside its send: the retry's own timeout then
+        // only has to outlast one hop, where the test used to poll every 10 ms and answer after
+        // its loop — under load that came later than the 100 ms the retry allowed.
+        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(300))
         let sentA = SentBox()
         let sentB = SentBox()
-        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentA.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in
+            Task {
+                await sentA.set(msg)
+                if case .strokeOpRequest(let rid, _, _, _, _, _) = msg {
+                    await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)
+                }
+            }
+        }
         await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentB.set(msg) } }
-        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
         // B (newest) is asked first and never answers; A gets the retry.
-        #expect(await sentB.awaitMessage() != nil)
-        var retried: ServerMessage?
-        for _ in 0..<100 where retried == nil {
-            retried = await sentA.all().first
-            try await Task.sleep(for: .milliseconds(10))
+        let result = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
+        #expect(result.bytes == Data("ok".utf8))
+        #expect(await sentB.all().count == 1)
+        guard case .strokeOpRequest(_, "D", _, _, _, _)? = await sentA.all().first else {
+            Issue.record("the op must be retried on the other device"); return
         }
-        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = retried else {
-            Issue.record("the op must be retried on the other device, got \(String(describing: retried))"); return
-        }
-        await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)
-        #expect(try await task.value.bytes == Data("ok".utf8))
     }
 
     /// Selection ops act on live state on the device: a device that was merely slow may still

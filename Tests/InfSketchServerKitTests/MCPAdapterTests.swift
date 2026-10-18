@@ -825,7 +825,7 @@ private actor FakeStrokeOpDevice {
             "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
+            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
@@ -2276,6 +2276,36 @@ private actor FakeStrokeOpDevice {
         #expect(specs.first?["op"] as? String == "addArrow" && (specs.first?["nodes"] as? [Any])?.count == 3)
         #expect(specs.last?["op"] as? String == "reshapeArrow" && specs.last?["arrowId"] as? String == "A1")
         #expect((specs.last?["canvasPoints"] as? [Any])?.count == 3)
+        await server.stop()
+    }
+
+    /// add_arrow's `tags` reach only an `arrowTags` device: an older app would ignore the key and
+    /// answer success with an untagged arrow. A call without tags still reaches it.
+    @Test func addArrowTagsGoOnlyToADeviceThatWritesThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await old.close() } }
+        let line: Value = .array([.array([0, 0]), .array([50, 0])])
+        let (refused, refusedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": line, "tags": .array(["axis"])])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, plainIsError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "arrowTags"])
+        defer { Task { await device.close() } }
+        let (_, taggedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": line, "tags": .array(["axis"])])
+        #expect(taggedIsError != true)
+        let last = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+        #expect(spec["tags"] as? [String] == ["axis"])
         await server.stop()
     }
 
@@ -5439,6 +5469,57 @@ private actor FakeStrokeOpDevice {
         return try await body(url.path)
     }
 
+    /// Word wrap and object layers reach only a device that writes them (`textWrap`,
+    /// `objectLayerWrites`): an older app would ignore the keys — or reorder within the kind — and
+    /// answer success. Calls without them still reach it.
+    @Test func wrapAndLayerWritesGoOnlyToADeviceThatHasThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["authorText", "authorImage", "reorderElements", "arrows"])
+        defer { Task { await old.close() } }
+        let newer: [(String, [String: Value])] = [
+            ("add_text", ["text": "a", "canvasX": 0, "canvasY": 0, "wrapWidth": 100]),
+            ("add_text", ["text": "a", "canvasX": 0, "canvasY": 0, "layer": "back"]),
+            ("edit_text", ["textId": "T", "wordWrap": false]),
+            ("reorder_elements", ["textIds": .array(["T"]), "mode": "front"]),
+            ("set_layer", ["ids": .array(["T"]), "layer": "back"]),
+        ]
+        for (tool, args) in newer {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(content).hasPrefix("noDeviceAvailable"), "\(tool): \(toolResultText(content))")
+        }
+        try await withPNGFile { path in
+            let (content, _) = try await client.callTool(name: "add_image", arguments: [
+                "docId": "d", "path": .string(path), "canvasX": 0, "canvasY": 0, "layer": "front"])
+            #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        }
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, strokeReorderError) = try await client.callTool(name: "reorder_elements", arguments: [
+            "docId": "d", "strokeIds": .array(["k"]), "mode": "front"])
+        #expect(strokeReorderError != true, "a stroke-only reorder still reaches the older app")
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+            capabilities: ["authorText", "authorImage", "reorderElements", "arrows", "textWrap", "objectLayerWrites"])
+        defer { Task { await device.close() } }
+        for (tool, args) in newer {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError != true, "\(tool): \(toolResultText(content))")
+            let last = try #require(await device.receivedRequests.last)
+            let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+            for key in args.keys { #expect(spec[key] != nil, "\(tool) relays \(key)") }
+        }
+        let lastRequest = try #require(await device.receivedRequests.last)
+        let setLayer = try #require(JSONSerialization.jsonObject(with: lastRequest.spec) as? [String: Any])
+        #expect(setLayer["op"] as? String == "setLayer")
+        await server.stop()
+    }
+
     /// The exact relayed envelope key set, string-literally (mirroring the
     /// styled add_text contract test): present-only optional keys, the FILE'S
     /// bytes relayed as the base64 string under `imageBytes`, and the new
@@ -7527,6 +7608,31 @@ private actor FakeStrokeOpDevice {
             name: "fetch_doc", arguments: ["docId": "Ghost"])
         #expect(isError == true)
         #expect(toolResultText(content) == "contentUnavailable")
+
+        await server.stop()
+    }
+
+    /// Every content tool, not only fetch_doc, says `contentUnavailable` for a document a device
+    /// advertises but cannot hand over. They used to say "unknownDoc: no document named "Ghost".
+    /// Documents: "Ghost" …", which contradicts itself.
+    @Test func contentToolsReportContentUnavailableForAnUnreachableHolder() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in
+            throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable
+        }
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        for tool in ["list_strokes", "list_grids", "list_texts", "list_images", "list_arrows"] {
+            let (content, isError) = try await client.callTool(name: tool, arguments: ["docId": "Ghost"])
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(content).hasPrefix("contentUnavailable"), "\(tool): \(toolResultText(content))")
+        }
 
         await server.stop()
     }

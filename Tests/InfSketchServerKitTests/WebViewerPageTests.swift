@@ -18,12 +18,24 @@ import InfSketchWire
         #expect(!page.contains("<script>alert"))
     }
 
-    @Test func theStageOwnsItsGestures() {
+    @Test func theStageOwnsItsGestures() throws {
         // touch-action: none is the mechanism the whole touch story rests on —
         // without it the browser starts its own gesture and preventDefault is ignored.
-        #expect(html.contains("touch-action: none"))
-        #expect(html.contains("user-select: none"))
-        #expect(html.contains("-webkit-touch-callout: none"))
+        // Read inside the `#stage { … }` rule: the CSS comment above it says "touch-action: none"
+        // too, so a page-wide search passed with the declaration itself deleted.
+        let rule = try #require(Self.cssRuleBody(selector: "#stage", in: html))
+        #expect(rule.contains("touch-action: none"))
+        #expect(rule.contains("user-select: none"))
+        #expect(rule.contains("-webkit-touch-callout: none"))
+    }
+
+    /// The body of the first CSS rule whose selector is exactly `selector`, between its braces.
+    static func cssRuleBody(selector: String, in page: String) -> String? {
+        guard let head = page.range(of: "\n" + selector + " {")
+                ?? page.range(of: " " + selector + " {"),
+              let close = page.range(of: "}", range: head.upperBound..<page.endIndex)
+        else { return nil }
+        return String(page[head.upperBound..<close.lowerBound])
     }
 
     @Test func theControlsExist() {

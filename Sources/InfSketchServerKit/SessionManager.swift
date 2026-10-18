@@ -689,7 +689,7 @@ public actor SessionManager {
     /// `writer` defaults to `agent` because this IS the agent path — the doc comment above says so,
     /// and every caller is an MCP tool. It carries no arrival instant, deliberately: opening a
     /// session can load a document from disk, and counting that as queue wait would report an
-    /// inflated one (`docs/BACKLOG.md`).
+    /// inflated one.
     public func submitOpeningSession(
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
         expectation: WriteExpectation = .none, writer: String = "agent"
@@ -835,6 +835,10 @@ public actor SessionManager {
     public func unsubscribeStatus(_ token: UUID) {
         statusSubscribers.removeValue(forKey: token)?.finish()
     }
+
+    /// Browsers watching `docId` right now. Lets a test wait for a watch to be registered
+    /// instead of sleeping a fixed time.
+    func watcherCount(docId: String) -> Int { watcherCounts[docId] ?? 0 }
 
     public func liveInfo() async -> [String: LiveDocInfo] {
         var info: [String: LiveDocInfo] = [:]
