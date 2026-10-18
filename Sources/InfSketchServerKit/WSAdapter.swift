@@ -240,7 +240,7 @@ actor Connection {
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
-                "provideContent", "render", "snapObjects",
+                "provideContent", "render", "snapObjects", "arrows",
             ]) {
                 registeredWithBroker = true
                 await broker.register(connectionId: connectionId, deviceId: deviceId, capabilities: caps) { [weak self] message in

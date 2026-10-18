@@ -152,6 +152,43 @@ enum AgentGuide {
     photo is thousands of points across; the reply names the bounds it actually occupied and the \
     source's pixel size, so size it from that rather than from a render.
 
+    ## Arrows
+
+    **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a line \
+    through its NODES, a shape at each end (`startHead`, `endHead`), a `drawnWidth` in canvas \
+    points and a light-canonical `color`. Two `canvasPoints` make a straight arrow, more make \
+    sharp corners (an L or Z connector); `nodes` instead give each point a type — `corner` \
+    or `smooth` (the curve passes through it smoothly, an S-curve from a few points; Edit arc \
+    writes these). Place \
+    one with `add_arrow`, read them with `list_arrows` (`nodes`, and `canvasBounds` of the curve \
+    as drawn), change one's shape with `reshape_arrow` (same id, style and order — read the \
+    nodes, edit, send back), restyle with `restyle_arrows`, delete with `remove_arrow` \
+    (server-side, works on a closed document). **What you omit is the user's new-arrow style** \
+    (what their Arrow tool draws now), and `preset` names one of the user's presets \
+    (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line. \
+    **It has no transform**: moving, turning or \
+    scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
+    its heads never skew. **A scale keeps its width** while `keepsWidth` is true (the default, \
+    also of the built-in presets); with it false the width, heads and dashes scale too and \
+    `restore_stroke_widths` takes it back (`list_arrows`' `unscaledWidth`; the user's Unscale \
+    button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `fitGaps` \
+    (default — dashes exact, gaps adjusted, ends as `dashEndsOn`), `fitPattern` or `exact` (from \
+    `dashAnchor`), shifted by `dashOffset` (widths); with the fit modes `dashCorners` (default true) \
+    fits each run between corners on its own, a dash centered on every corner (the old value \
+    `corners` still reads as fitGaps with dashCorners true). **Corners turn round by default**: each interior corner point has its own `join` \
+    (`round`, `miter` — sharp, cut to a bevel past its `miterLimit` in half widths — or `bevel`) in \
+    `nodes`, and `cornerJoin` / `cornerMiterLimit` on add / restyle set every corner at once. \
+    **The user's presets and new-arrow style are writable**: `save_arrow_preset`, \
+    `rename_arrow_preset`, `delete_arrow_preset`, `move_arrow_preset`, `restore_arrow_presets`, \
+    and `get_new_arrow_style` / `set_new_arrow_style` — device settings, not document edits, \
+    so they write no document and have no undo. **Preview before committing**: \
+    `render_sketch` takes ephemeral `arrows` (add_arrow's fields) and `restyle` (restyle_arrows' \
+    fields with `arrowIds`), drawn by the commit's own code so the picture is what the commit \
+    will draw; `include: "arrows"` with `arrowIds` renders only those arrows, a clean swatch. `arrowIds` also work in `select_elements`, `copy_elements` and \
+    `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
+    `snap_points` candidates with `objects: true`. These need a device with the `arrows` \
+    capability — an older app has none and is never asked.
+
     ## Working alongside a person
 
     - **Tag what you may need again.** `tag_elements`, or `tags` at creation. Tags live in the \

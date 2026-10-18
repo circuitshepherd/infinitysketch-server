@@ -901,7 +901,7 @@ public actor MCPAdapter {
         Tool(
             name: "transform_elements",
             description: """
-                Move, scale or rotate named strokes, texts AND images together — on ANY document, \
+                Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, \
                 open or not. This is how you reposition a placed image: transform_strokes takes \
                 strokes only, and edit_text can move a text but not turn or resize it, so before \
                 this an image could be named, pinned, reordered, copied and deleted but never \
@@ -913,6 +913,9 @@ public actor MCPAdapter {
                 kinds. Identity survives — a stroke keeps its id and its width-edit history, texts \
                 and images keep theirs; this is a MOVE, not a copy.
 
+                An ARROW is baked: its points move; a `scale` changes its drawnWidth only when its \
+                `keepsWidth` is false (list_arrows reports both afterwards — `drawnWidth` and \
+                `unscaledWidth`); with keepsWidth true (the default) width, heads and dashes stay. \
                 ATOMIC: every id must resolve or nothing moves, so a set can never end up sheared \
                 half-way. Use transform_strokes when you want grid snapping (`snapToGrid` / \
                 `snapTo`), which is stroke-lattice specific and stays there. \(writeToolCaveats)
@@ -932,6 +935,10 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Placed-image ids, as returned by list_images.",
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width.",
                     ]),
                     "canvasTranslate": .object([
                         "type": "array", "items": .object(["type": "number"]),
@@ -1576,11 +1583,13 @@ public actor MCPAdapter {
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
 
-                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. The box \
+                REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer}`. The box \
                 is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
                 picked anchor — the point of its box that stays put as the text grows — as \
                 {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the \
-                first line's baseline keeps its place).
+                first line's baseline keeps its place). `layer` is `front` (in front of the strokes) \
+                or `back` (behind strokes and grids); a document from before object layers has no \
+                such key and lists every text as `front`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1588,6 +1597,370 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list placed texts from."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_arrows",
+            description: """
+                Lists a document's arrows, one per arrow — authored by a connected InfinitySketch \
+                device with the `arrows` capability (noDeviceAvailable if none). Never writes.
+
+                REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
+                endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, \
+                headsLinked, dashPattern, \
+                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
+                `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
+                join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
+                `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and \
+                `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and \
+                keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
+                width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
+                shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's \
+                as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas \
+                space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` \
+                gives each node as `{canvasX, canvasY, type, join?, miterLimit?, roundness?}`: type `corner` (a \
+                sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from \
+                its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1; an Edit arc writes these). `canvasBounds` covers the curve as drawn. \
+                `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
+                light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to list arrows from."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "list_arrow_presets",
+            description: """
+                Lists the user's arrow style presets — app-wide on the connected device, in the order \
+                the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, \
+                Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to \
+                add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only \
+                routes the request. Never writes.
+
+                Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, \
+                move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
+
+                REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
+                headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, \
+                dashAnchor, dashEndsOn, dashOffset, color, \
+                opacity, layer, keepsWidth, duplicateName}` — the same \
+                fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
+                repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
+                and `preset` then takes the FIRST of them.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "save_arrow_preset",
+            description: """
+                Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `docId`), from the user's \
+                new-arrow style (`fromNewArrowStyle: true`, also the default source), with any style fields \
+                overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES \
+                the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` \
+                and a new `name` are given). Every ArrowStyle field can be given; `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "replace": .object(["type": "boolean", "description": "Overwrite the named preset's style instead of adding one."]),
+                    "arrowId": .object(["type": "string", "description": "Take the style of this arrow (list_arrows) in docId."]),
+                    "fromNewArrowStyle": .object(["type": "boolean", "description": "Take the user's new-arrow style (the default source)."]),
+                ], MCPAdapter.arrowStyleProperties)),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "rename_arrow_preset",
+            description: """
+                Renames an arrow style preset. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "newName": .object(["type": "string", "description": "The new name."]),
+                ], [:])),
+                "required": .array(["docId", "newName"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "delete_arrow_preset",
+            description: """
+                Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "move_arrow_preset",
+            description: """
+                Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id \
+                or name). Exactly one of the three. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by \
+                `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "id": .object(["type": "string", "description": "A preset id from list_arrow_presets."]),
+                    "name": .object(["type": "string", "description": "A preset name (any letter case) — or, when saving, the new preset's name."]),
+                    "toIndex": .object(["type": "integer", "description": "The position to move to, 0-based."]),
+                    "before": .object(["type": "string", "description": "Another preset (id or name): move just before it."]),
+                    "after": .object(["type": "string", "description": "Another preset (id or name): move just after it."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "restore_arrow_presets",
+            description: """
+                Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a \
+                deleted one returns at the front); the user's own presets are kept — the app's "Restore built-in \
+                presets". These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
+                list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "get_new_arrow_style",
+            description: """
+                Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted \
+                fields take. Never writes. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. \
+                REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                ], [:])),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "set_new_arrow_style",
+            description: """
+                Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) \
+                and/or the style fields given; what is not given stays (`color` is light-canonical, \
+                `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. \
+                These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                document): no document is written and there is no undo step, and the user sees the change at once \
+                in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object(MCPAdapter.mergeProperties([
+                    "docId": .object(["type": "string", "description": "Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`)."]),
+                    "preset": .object(["type": "string", "description": "A preset (id or name) whose whole style is the base; the style fields override it."]),
+                ], MCPAdapter.arrowStyleProperties)),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_arrow",
+            description: """
+                Places an arrow — the same object the app's Arrow tool draws: a line through \
+                `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth \
+                points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front \
+                objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE \
+                (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
+                or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
+                the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) \
+                decides whether a later scale changes the arrow's width. REPLY: the seq and \
+                `arrowId`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "[[x, y], …] — at least two points, start first, in canvas points; each is a sharp corner. Or give `nodes`.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "nodes": MCPAdapter.arrowNodesProperty,
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                          "description": "The shape at the start."]),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                        "description": "The shape at the end — the head."]),
+                    "startAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                            "description": "Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                          "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default)."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked."]),
+                    "endHeadLength": .object(["type": "number", "description": "The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength."]),
+                    "endHeadAngle": .object(["type": "number", "description": "The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads."]),
+                    "headsLinked": .object(["type": "boolean", "description": "true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
+                    "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
+                    "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
+                                           "description": "What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash."]),
+                    "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern."]),
+                    "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
+                                           "description": "How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`."]),
+                    "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20,
+                                                 "description": "A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "reshape_arrow",
+            description: """
+                Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' \
+                shape: corner / smooth) — keeping its id, style, layer, tags \
+                and place in the stacking order. Read the current nodes with list_arrows, change what \
+                you need, send them back. A pinned arrow is reshaped too, as transform_elements moves \
+                one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. \
+                \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "arrowId": .object(["type": "string", "description": "The arrow (list_arrows' `id`)."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "[[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "nodes": MCPAdapter.arrowNodesProperty,
+                ]),
+                "required": .array(["docId", "arrowId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "restyle_arrows",
+            description: """
+                Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
+                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`, `endHeadAngle`, \
+                `headsLinked`, `dashPattern`, `dashAlignment`, \
+                `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, \
+                `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
+                too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
+                the current width as it is (restore_stroke_widths takes an earlier scale back). \
+                ATOMIC: every id must resolve or nothing changes. Their points never change \
+                (move them with transform_elements' `arrowIds`). REQUIRES a device with the \
+                `arrows` capability. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "ids": .object(["type": "array", "items": .object(["type": "string"]),
+                                    "description": "Arrow ids, from list_arrows."]),
+                    "startHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                          "description": "The shape at the start."]),
+                    "endHead": .object(["type": "string", "enum": .array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string)),
+                                        "description": "The shape at the end — the head."]),
+                    "startAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                            "description": "Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
+                                          "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default)."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked."]),
+                    "endHeadLength": .object(["type": "number", "description": "The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength."]),
+                    "endHeadAngle": .object(["type": "number", "description": "The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads."]),
+                    "headsLinked": .object(["type": "boolean", "description": "true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "opacity": .object(["type": "number", "description": "0…1."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
+                    "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)),
+                                           "description": "What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash."]),
+                    "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern."]),
+                    "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
+                                           "description": "How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`."]),
+                    "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20,
+                                                 "description": "A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
+                ]),
+                "required": .array(["docId", "ids"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "remove_arrow",
+            description: """
+                Removes an arrow from a document by id (from list_arrows). Done by the SERVER, so it \
+                needs no connected device and works on a document nobody has open. arrowNotFound when \
+                no arrow has that id. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "arrowId": .object(["type": "string", "description": "The id of the arrow to remove, from list_arrows."]),
+                ]),
+                "required": .array(["docId", "arrowId"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1600,8 +1973,10 @@ public actor MCPAdapter {
                 respond in time. Returns the device's listing verbatim as text; this call \
                 never writes to the document. unknownDoc if the document doesn't exist.
 
-                REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags}`. The box is \
-                `canvasBounds`, NOT `bounds`. An empty array means the document has no images.
+                REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags, layer}`. The box is \
+                `canvasBounds`, NOT `bounds`. `layer` is `front` or `back` — where the image paints \
+                when unpinned; a pinned image paints under everything but the paper. An empty array \
+                means the document has no images.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1851,13 +2226,43 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to render."]),
                     "include": .object([
                         "type": "string",
-                        "enum": .array(["document", "strokes", "none"].map(Value.string)),
+                        "enum": .array(["document", "strokes", "arrows", "none"].map(Value.string)),
                         "description": """
                             What document content to render, alongside any ephemeral \
-                            strokes below. "document" (default): every stroke, placed \
-                            image, and placed text. "strokes": only the strokes named \
-                            by strokeIds — no images or texts. "none": nothing from \
+                            strokes and arrows below. "document" (default): every stroke, placed \
+                            image, text and arrow. "strokes": only the strokes named \
+                            by strokeIds — no images or texts. "arrows": only the arrows named \
+                            by arrowIds (and restyle.arrowIds) — a clean swatch. "none": nothing from \
                             the document.
+                            """,
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "With include: \"arrows\", the arrow ids (list_arrows) to show.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrows": .object([
+                        "type": "array",
+                        "description": """
+                            EPHEMERAL candidate arrows to render over the document — never written. \
+                            Each takes EXACTLY add_arrow's fields (canvasPoints, preset, every style \
+                            field, layer) and is built by the same code, so the preview is what \
+                            add_arrow would place; omitted fields take the user's new-arrow style. \
+                            Iterate: render → adjust → render → add_arrow. The reply's metadata \
+                            `arrows` reports each one's `canvasBounds` and the `style` it resolved to \
+                            (preset + overrides, clamps included).
+                            """,
+                        "items": .object(["type": "object"]),
+                    ]),
+                    "restyle": .object([
+                        "type": "object",
+                        "description": """
+                            Render EXISTING arrows as if restyled — the document unchanged: \
+                            `arrowIds` plus any of restyle_arrows' fields (preset, heads, widths, \
+                            dash, color, opacity, keepsWidth …), applied by the same code \
+                            restyle_arrows uses. Iterate: render → adjust → render → restyle_arrows. \
+                            The metadata's `restyledArrows` reports each one's `canvasBounds` and \
+                            resolved `style`. Combine with include: "arrows" for an isolated swatch.
                             """,
                     ]),
                     "strokeIds": .object([
@@ -2068,7 +2473,9 @@ public actor MCPAdapter {
                 `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus \
                 `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of \
                 endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, \
-                boxEdgeMiddle, boxCenter, textBaseline.
+                boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth \
+                point between its ends), segmentMiddle (the middle of one of an arrow's segments). \
+                An arrow's ends and middle report as endpoint and midpoint.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2222,7 +2629,10 @@ public actor MCPAdapter {
                 no scale is LEFT ALONE and counted in the reply, not an error, and when \
                 that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply \
                 says "no change" and quotes no seq). drawnWidth is not touched — to \
-                change the drawn thickness itself, use restyle_strokes. \(writeToolCaveats)
+                change the drawn thickness itself, use restyle_strokes. ARROW ids work too: an arrow \
+                whose `keepsWidth` is false was thickened or thinned by a scale, and this sets its \
+                drawnWidth back to list_arrows' `unscaledWidth` (heads and dashes, in widths, \
+                follow); an arrow never scaled is reported unchanged. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2232,8 +2642,8 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": """
                             Composite stroke ids, as returned by list_strokes or \
-                            draw_strokes. Ids that carry no scale are accepted and \
-                            reported back as unchanged.
+                            draw_strokes, and/or arrow ids from list_arrows. Ids that \
+                            carry no scale are accepted and reported back as unchanged.
                             """,
                         "items": .object(["type": "string"]),
                     ]),
@@ -2424,8 +2834,9 @@ public actor MCPAdapter {
                 flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none \
                 is set the op fails (noReferencePoint); placing it yourself is not supported yet. Pass \
                 `expect` = a prior get_selection's `signature` to be rejected if the user changed the \
-                selection since (selectionChanged). REQUIRES a connected device with an active \
-                selection.
+                selection since (selectionChanged). Selected ARROWS scale their width with them only \
+                when their `keepsWidth` is false (list_arrows); otherwise points move and width, heads \
+                and dashes stay. REQUIRES a connected device with an active selection.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2591,8 +3002,8 @@ public actor MCPAdapter {
                 Select specific elements by id on a connected device's live rect-select, replacing \
                 any existing selection. Pass `strokeIds` (stroke ids, from \
                 `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
-                `get_selection` or the document summary) — at least one id across the three arrays \
-                is required (enforced device-side). By default the selection rectangle is resized \
+                `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — \
+                at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized \
                 to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee \
                 exactly where they dragged it. REQUIRES a connected `controlSelection` device.
                 """,
@@ -2613,6 +3024,11 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array",
                         "description": "Placed-image ids to select.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to select, from list_arrows or get_selection.",
                         "items": .object(["type": "string"]),
                     ]),
                     "keepRect": .object([
@@ -2673,7 +3089,8 @@ public actor MCPAdapter {
                 selected element (and, with includePoints, each stroke's transformed points), \
                 the overall selection bounds/referencePoint, and — per grid — the same line \
                 families render_sketch reports, so you can align the proposed transform before \
-                committing it. `include`: "withContext" (default) renders the grid and the \
+                committing it. Arrows preview as they will commit: a scale keeps an arrow's width \
+                unless its `keepsWidth` is false. `include`: "withContext" (default) renders the grid and the \
                 rest of the document's content behind the moved selection; "selectionOnly" \
                 renders just the transformed selection, transparent background, no grid pixels \
                 (grid metadata is still reported). `rect` bounds the render like \
@@ -2737,7 +3154,8 @@ public actor MCPAdapter {
                 provisional copy in place — like the toolbar's duplicate, it commits on a later \
                 edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as \
                 transform_selection's, composed left-to-right around the single reference \
-                point): clone + transform as one "stamp" undo step. Returns the new elements' \
+                point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width \
+                unless its `keepsWidth` is false). Returns the new elements' \
                 keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if \
                 the user changed the selection since (selectionChanged). REQUIRES a connected \
                 `controlSelection` device with an active selection.
@@ -2831,6 +3249,11 @@ public actor MCPAdapter {
                         "description": "Placed-image ids to clone, from list_images.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to clone, from list_arrows.",
+                        "items": .object(["type": "string"]),
+                    ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
             ])
@@ -2872,6 +3295,11 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array",
                         "description": "Placed-image ids to reorder, from list_images.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "arrowIds": .object([
+                        "type": "array",
+                        "description": "Arrow ids to reorder, from list_arrows.",
                         "items": .object(["type": "string"]),
                     ]),
                     "mode": .object([
@@ -3234,6 +3662,7 @@ public actor MCPAdapter {
         case "add_image": return await callAddImage(arguments)
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
+        case "remove_arrow": return await callRemoveArrow(arguments)
         case "delete_doc": return await callDeleteDoc(arguments)
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
@@ -3244,6 +3673,18 @@ public actor MCPAdapter {
         case "delete_strokes": return await callDeleteStrokes(arguments)
         case "list_strokes": return await callListStrokes(arguments)
         case "list_texts": return await callListTexts(arguments)
+        case "list_arrows": return await callListArrows(arguments, op: "listArrows")
+        case "list_arrow_presets": return await callListArrows(arguments, op: "listArrowPresets")
+        case "save_arrow_preset": return await callArrowPresetOp(arguments, op: "saveArrowPreset")
+        case "rename_arrow_preset": return await callArrowPresetOp(arguments, op: "renameArrowPreset")
+        case "delete_arrow_preset": return await callArrowPresetOp(arguments, op: "deleteArrowPreset")
+        case "move_arrow_preset": return await callArrowPresetOp(arguments, op: "moveArrowPreset")
+        case "restore_arrow_presets": return await callArrowPresetOp(arguments, op: "restoreArrowPresets")
+        case "get_new_arrow_style": return await callArrowPresetOp(arguments, op: "getNewArrowStyle")
+        case "set_new_arrow_style": return await callArrowPresetOp(arguments, op: "setNewArrowStyle")
+        case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
+        case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
+        case "reshape_arrow": return await callArrowWrite(arguments, op: "reshapeArrow")
         case "list_images": return await callListImages(arguments)
         case "list_grids": return await callListGrids(arguments)
         case "add_grid": return await callAddGrid(arguments)
@@ -3697,6 +4138,32 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "removed \(textId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `remove_arrow` — server-side, like remove_text: no device, works on a closed document.
+    private func callRemoveArrow(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let arrowId = try Self.nonEmptyStringArg(arguments, "arrowId")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.removeArrow(from: bytes, arrowId: arrowId)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "removed arrow \(arrowId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4160,6 +4627,195 @@ public actor MCPAdapter {
     /// this read (agent-list-elements spec, Task 2). Never writes: the
     /// device's listing bytes are decoded as UTF-8 and passed straight
     /// through as the tool result's text content.
+    // MARK: - arrows (the parity list, 2026-10-14)
+
+    /// `list_arrows` — read-only, relayed to a device with the `arrows` capability (an older app
+    /// has none and is never asked).
+    /// `list_arrow_presets` the same way (`op: "listArrowPresets"`): the presets are app-wide on the
+    /// device, the `docId` only routes the request, as for `list_fonts`.
+    private func callListArrows(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string(op)])) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec, capability: "arrows")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The arrow preset writes and the new-arrow style (`arrowPresetWrites`): every argument but
+    /// `docId` relayed verbatim (the device validates), the device's JSON reply passed through.
+    /// Nothing is written to any document.
+    private func callArrowPresetOp(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string(op)]
+            for key in Self.arrowPresetOpKeys {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: "arrowPresetWrites")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return CallTool.Result(content: [
+                .text(text: String(data: out.bytes, encoding: .utf8) ?? "", annotations: nil, _meta: nil)
+            ])
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Every key the preset ops relay — the preset addressing and the style fields.
+    static let arrowPresetOpKeys = ["id", "name", "newName", "replace", "arrowId", "fromNewArrowStyle",
+                                    "toIndex", "before", "after", "preset"] + arrowStyleKeys
+
+    /// The style fields an agent can name, flat as on add_arrow — `ArrowAuthoring.StyleArgs` on the device.
+    static let arrowStyleKeys = ["startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "headLength",
+                                 "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                                 "dashPattern", "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset",
+                                 "color", "colorAppearance", "opacity", "layer", "keepsWidth", "cornerJoin", "cornerMiterLimit"]
+
+    static func mergeProperties(_ a: [String: Value], _ b: [String: Value]) -> [String: Value] {
+        a.merging(b) { first, _ in first }
+    }
+
+    /// The schema of every style field (`arrowStyleKeys`), shared by the preset tools.
+    static var arrowStyleProperties: [String: Value] {
+        let heads = Value.array(["roundEnd", "flatEnd", "openChevron", "openChevronRoundTip", "openChevronRoundWings", "openChevronRound", "filledTriangle", "filledTriangleRoundTip", "filledTriangleRoundWings", "filledTriangleRound"].map(Value.string))
+        let anchors = Value.array(["endsAtPoint", "centeredOnPoint"].map(Value.string))
+        return [
+            "startHead": .object(["type": "string", "enum": heads, "description": "The shape at the start."]),
+            "endHead": .object(["type": "string", "enum": heads, "description": "The shape at the end — the head."]),
+            "startAnchor": .object(["type": "string", "enum": anchors, "description": "Where the start's ink sits on its point."]),
+            "endAnchor": .object(["type": "string", "enum": anchors, "description": "Where the end's ink sits on its point."]),
+            "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
+            "headLength": .object(["type": "number", "description": "Head length in arrow widths (2–10)."]),
+            "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60)."]),
+            "endHeadLength": .object(["type": "number", "description": "The end head's own length in widths (2–10); unlinks the heads."]),
+            "endHeadAngle": .object(["type": "number", "description": "The end head's own tip half-angle in degrees (15–60); unlinks the heads."]),
+            "headsLinked": .object(["type": "boolean", "description": "Link (both heads take the start head's values) or unlink the heads."]),
+            "dashPattern": .object(["type": "array", "items": .object(["type": "number"]), "description": "Dash, gap … in widths; [] is solid."]),
+            "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
+            "dashCorners": .object(["type": "boolean", "description": "The fit modes' Corners switch (see add_arrow)."]),
+            "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)), "description": "Where an exact pattern starts."]),
+            "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)), "description": "What a fitted shaft's ends finish on."]),
+            "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "The pattern's offset in widths (−50…50)."]),
+            "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
+            "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)), "description": "\"dark\" when `color` was chosen for a dark page."]),
+            "opacity": .object(["type": "number", "description": "0…1."]),
+            "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)), "description": "Where an arrow in this style goes: front or back."]),
+            "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling (default true)."]),
+            "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)), "description": "How corners turn: round (default), miter (sharp) or bevel."]),
+            "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20, "description": "A sharp corner's limit in half widths (1–20)."]),
+        ]
+    }
+
+    /// An arrow's nodes, as add_arrow and reshape_arrow take them and list_arrows reports them.
+    static var arrowNodesProperty: Value {
+        .object([
+            "type": "array",
+            "description": "At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) (\"arc\" and \"manual\", older kinds, are read as smooth). Instead of canvasPoints.",
+            "items": .object([
+                "type": "object",
+                "properties": .object([
+                    "canvasX": .object(["type": "number"]),
+                    "canvasY": .object(["type": "number"]),
+                    "type": .object(["type": "string", "enum": .array(["corner", "smooth", "arc", "manual"].map(Value.string)),
+                                     "description": "corner or smooth; arc and manual (older kinds) are read as smooth."]),
+                    "join": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
+                                     "description": "An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node."]),
+                    "miterLimit": .object(["type": "number", "minimum": 1, "maximum": 20, "description": "A miter corner's limit in half widths (1–20)."]),
+                    "roundness": .object(["type": "number", "minimum": 0, "maximum": 2,
+                                          "description": "A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner."]),
+                ]),
+                "required": .array(["canvasX", "canvasY"].map(Value.string)),
+                "additionalProperties": .bool(false),
+            ]),
+        ])
+    }
+
+    /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
+    /// as for `transform_elements`), the result written back under the byte CAS.
+    private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string(op)]
+            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
+                ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
+                   "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                   "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+                : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
+                   "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                   "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+            for key in keys {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "arrows")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+            ) { seq in
+                var summary = op == "addArrow" ? "added arrow to \(docId) at seq \(seq)"
+                    : op == "reshapeArrow" ? "reshaped arrow in \(docId) at seq \(seq)"
+                    : "restyled arrows in \(docId) at seq \(seq)"
+                if let meta = out.meta,
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
+                   let id = decoded["arrowId"] {
+                    summary += "\narrowId: \(id)"
+                }
+                return summary
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
     private func callListTexts(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -4553,26 +5209,30 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             let mode = try Self.stringArg(arguments, "mode")
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
-            let count = strokeIds.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            var reorderEnvelope: [String: Value] = [
+                "op": .string("reorderElements"),
+                "strokeIds": .array(strokeIds.map(Value.string)),
+                "textIds": .array(textIds.map(Value.string)),
+                "imageIds": .array(imageIds.map(Value.string)),
+                "mode": .string(mode),
+            ]
+            if !arrowIds.isEmpty { reorderEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("reorderElements"),
-                    "strokeIds": .array(strokeIds.map(Value.string)),
-                    "textIds": .array(textIds.map(Value.string)),
-                    "imageIds": .array(imageIds.map(Value.string)),
-                    "mode": .string(mode),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(reorderEnvelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "reorderElements")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
+                                                       capability: arrowIds.isEmpty ? "reorderElements" : "reorderElements+arrows")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -4732,6 +5392,9 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
 
+            // A preview takes EXACTLY what the commit takes: an ephemeral arrow add_arrow's fields,
+            // a restyle restyle_arrows' — so nothing previews that add_arrow / restyle_arrows refuse.
+            if let refusal = Self.arrowPreviewKeyRefusal(arguments) { return Self.errorResult(refusal) }
             var specFields: [String: Value] = ["op": .string("render")]
             for key in Self.renderSpecParameterNames {
                 if let value = arguments?[key] {
@@ -4748,7 +5411,12 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+                // A render that names arrows goes only to a device that can build them: an older
+                // app would ignore the keys and answer a render WITHOUT them (`authorStrokes+arrows`).
+                let wantsArrows = arguments?["arrows"] != nil || arguments?["restyle"] != nil
+                    || arguments?["arrowIds"] != nil || arguments?["include"] == .string("arrows")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: wantsArrows ? "authorStrokes+arrows" : "authorStrokes")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -4824,9 +5492,35 @@ public actor MCPAdapter {
     /// The Global-Constraints parameter names `render_sketch` relays
     /// verbatim into the op-spec envelope alongside `"op": "render"` — every
     /// one of them optional; see `callRenderSketch`.
+    /// The first key of an ephemeral `arrows` item or of `restyle` that add_arrow / restyle_arrows
+    /// would not take, as an `invalidArgument` reason; nil when every key is one of theirs.
+    static func arrowPreviewKeyRefusal(_ arguments: [String: Value]?) -> String? {
+        func declared(_ tool: String) -> Set<String> {
+            guard let t = toolDefinitions.first(where: { $0.name == tool }) else { return [] }
+            return declaredArguments(of: t).subtracting(["docId"])
+        }
+        if case .array(let items)? = arguments?["arrows"] {
+            let allowed = declared("add_arrow")
+            for (index, item) in items.enumerated() {
+                guard case .object(let fields) = item else { return "invalidArgument: arrows[\(index)] must be an object" }
+                if let bad = fields.keys.sorted().first(where: { !allowed.contains($0) }) {
+                    return "invalidArgument: arrows[\(index)].\(bad) — an ephemeral arrow takes add_arrow's fields: \(allowed.sorted().joined(separator: ", "))"
+                }
+            }
+        }
+        if let restyle = arguments?["restyle"] {
+            guard case .object(let fields) = restyle else { return "invalidArgument: restyle must be an object" }
+            let allowed = declared("restyle_arrows").subtracting(["ids"]).union(["arrowIds"])
+            if let bad = fields.keys.sorted().first(where: { !allowed.contains($0) }) {
+                return "invalidArgument: restyle.\(bad) — restyle takes arrowIds and restyle_arrows' fields: \(allowed.sorted().joined(separator: ", "))"
+            }
+        }
+        return nil
+    }
+
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
-        "scale", "appearance", "colorAppearance",
+        "scale", "appearance", "colorAppearance", "arrowIds", "arrows", "restyle",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -5027,6 +5721,19 @@ public actor MCPAdapter {
     /// An ABSENT or undecodable `meta` is treated as "everything was restored" and
     /// written: the bytes are the device's own product, the write is CAS-guarded, and
     /// silently dropping a real edit is far worse than a redundant one.
+    /// What `restore_stroke_widths` was given, by name: an arrow id is a UUID, a stroke id the
+    /// composite key — "2 strokes and 1 arrow", "1 arrow" (whole-branch review #5).
+    static func restoreTargetsNoun(_ ids: [String]) -> String {
+        let arrows = ids.filter { UUID(uuidString: $0) != nil }.count
+        let strokes = ids.count - arrows
+        func n(_ c: Int, _ word: String) -> String { "\(c) \(word)\(c == 1 ? "" : "s")" }
+        switch (strokes, arrows) {
+        case (_, 0): return strokes == 1 ? "stroke" : "strokes"
+        case (0, _): return arrows == 1 ? "arrow" : "arrows"
+        default: return "elements (\(n(strokes, "stroke")) and \(n(arrows, "arrow")))"
+        }
+    }
+
     private func callRestoreStrokeWidths(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -5064,9 +5771,9 @@ public actor MCPAdapter {
             let unchangedCount = meta?.unchangedIds.count ?? 0
 
             guard restoredCount > 0 else {
-                let plural = ids.count == 1 ? "" : "s"
                 return CallTool.Result(content: [.text(
-                    text: "no change: all \(ids.count) stroke\(plural) already carry the ink width "
+                    text: "no change: \(ids.count == 1 ? "the" : "all \(ids.count)") \(Self.restoreTargetsNoun(ids)) "
+                        + "already \(ids.count == 1 ? "has" : "have") the width "
                         + "they were drawn with (none had a scale to factor out) — nothing was written",
                     annotations: nil, _meta: nil)])
             }
@@ -5076,7 +5783,7 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                var summary = "restored \(restoredCount) of \(ids.count) stroke(s) at seq \(seq)"
+                var summary = "restored \(restoredCount) of \(ids.count) \(Self.restoreTargetsNoun(ids)) at seq \(seq)"
                 if unchangedCount > 0 {
                     summary += "; \(unchangedCount) had no scale to factor out"
                 }
@@ -5490,6 +6197,7 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds")
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds")
             let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
@@ -5509,6 +6217,9 @@ public actor MCPAdapter {
             if let imageIds {
                 envelope["imageIds"] = .array(imageIds.map(Value.string))
             }
+            if let arrowIds, !arrowIds.isEmpty {
+                envelope["arrowIds"] = .array(arrowIds.map(Value.string))
+            }
 
             let spec: Data
             do {
@@ -5520,7 +6231,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: "controlSelection")
+                    docId: docId, docBytes: docBytes, spec: spec,
+                    capability: (arrowIds?.isEmpty ?? true) ? "controlSelection" : "controlSelection+arrows")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5864,29 +6576,33 @@ public actor MCPAdapter {
             let strokeIds = try Self.optionalStringArrayArg(arguments, "strokeIds") ?? []
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
+            let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
             guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
-            let count = strokeIds.count + textIds.count + imageIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            var copyEnvelope: [String: Value] = [
+                "op": .string("copyElements"),
+                "strokeIds": .array(strokeIds.map(Value.string)),
+                "textIds": .array(textIds.map(Value.string)),
+                "imageIds": .array(imageIds.map(Value.string)),
+            ]
+            if !arrowIds.isEmpty { copyEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             let spec: Data
             do {
                 // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
                 // chunked (see `OpSpecBundle`).
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("copyElements"),
-                    "strokeIds": .array(strokeIds.map(Value.string)),
-                    "textIds": .array(textIds.map(Value.string)),
-                    "imageIds": .array(imageIds.map(Value.string)),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(copyEnvelope))
             } catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: target, docBytes: targetBytes, spec: spec, capability: "copyElements",
+                    docId: target, docBytes: targetBytes, spec: spec,
+                    capability: arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
                     specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
@@ -5922,6 +6638,9 @@ public actor MCPAdapter {
                     }
                     if let ids = decoded["createdImageIds"], !ids.isEmpty {
                         summary += "\ncreatedImageIds: \(ids.joined(separator: ", "))"
+                    }
+                    if let ids = decoded["createdArrowIds"], !ids.isEmpty {
+                        summary += "\ncreatedArrowIds: \(ids.joined(separator: ", "))"
                     }
                 }
                 return summary
@@ -6169,6 +6888,7 @@ public actor MCPAdapter {
         case .imageNotFound: return "imageNotFound"
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
+        case .arrowNotFound: return "arrowNotFound"
         }
     }
 
@@ -6193,9 +6913,15 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
-            for key in ["strokeIds", "textIds", "imageIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
+            for key in ["strokeIds", "textIds", "imageIds", "arrowIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
+            // Names arrows only with a NON-EMPTY list: `arrowIds: []` must not exclude an older
+            // app (review M4, 2026-10-14).
+            let namesArrows: Bool = {
+                if case .array(let ids)? = envelope["arrowIds"] { return !ids.isEmpty }
+                return false
+            }()
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
@@ -6203,7 +6929,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: "transformElements")
+                                                       capability: namesArrows ? "transformElements+arrows" : "transformElements")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

@@ -799,7 +799,13 @@ private actor FakeStrokeOpDevice {
     // `listToolsContainsAllFiftyTwoTools`.
     /// restore_stroke_widths (the agent door onto the app's "Restore original stroke
     /// widths" menu item) added one, renaming this from `listToolsContainsAllFiftyThreeTools`.
-    @Test func listToolsContainsAllFiftyFourTools() async throws {
+    /// list_arrows / add_arrow / restyle_arrows (arrows, 2026-10-14) added three, renaming this
+    /// from `listToolsContainsAllFiftyFourTools`. list_arrow_presets (round F) added one, renaming
+    /// this from `listToolsContainsAllFiftySevenTools`. remove_arrow (review I2) added one,
+    /// renaming this from `listToolsContainsAllFiftyEightTools`.
+    /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
+    /// `listToolsContainsAllFiftyNineTools`.
+    @Test func listToolsContainsAllSixtySixTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -822,6 +828,9 @@ private actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_paper", "copy_elements", "reorder_elements",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
+            "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
+            "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
+            "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2118,6 +2127,243 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: arrows (2026-10-14)
+
+    /// list_arrows goes only to a device that says `arrows` — an older app would answer
+    /// `invalidSpec(unknown op)` at best.
+    @Test func listArrowsRelaysToAnArrowsCapableDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("[]".utf8)),
+                                               capabilities: ["authorText", "transformElements"])
+        defer { Task { await old.close() } }
+        let (content, isError) = try await client.callTool(name: "list_arrows", arguments: ["docId": "d"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+
+        let listing = Data(#"[{"id":"A1"}]"#.utf8)
+        let new = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listing), capabilities: ["arrows"])
+        defer { Task { await new.close() } }
+        let (content2, isError2) = try await client.callTool(name: "list_arrows", arguments: ["docId": "d"])
+        #expect(isError2 != true)
+        #expect(toolResultText(content2) == #"[{"id":"A1"}]"#)
+        let received = try #require(await new.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "listArrows")
+        await server.stop()
+    }
+
+    /// remove_arrow is server-side — no device needed, so it works on a closed document — and an
+    /// id that names no arrow is refused by name.
+    @Test func removeArrowRefusesAnUnknownIdWithoutADevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let (content, isError) = try await client.callTool(name: "remove_arrow",
+                                                           arguments: ["docId": "d", "arrowId": "nope"])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("arrowNotFound"))
+        await server.stop()
+    }
+
+    /// list_arrow_presets relays `listArrowPresets` to an arrows-capable device and passes its
+    /// listing through; add_arrow / restyle_arrows forward `preset` to the device.
+    @Test func arrowPresetsRelayToTheDevice() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let listing = Data(#"[{"name":"Line"}]"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(listing), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(name: "list_arrow_presets", arguments: ["docId": "d"])
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"[{"name":"Line"}]"#)
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "listArrowPresets")
+        await server.stop()
+    }
+
+    /// render_sketch relays `arrows`, `restyle` and `arrowIds` — and a render naming arrows goes only
+    /// to a device that can build them (`authorStrokes+arrows`), never to an older app that would
+    /// answer without them.
+    @Test func renderSketchWithArrowsNeedsTheArrowsCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data([0x89])), capabilities: ["authorStrokes"])
+        defer { Task { await old.close() } }
+        let args: [String: Value] = ["docId": "d", "include": "arrows", "arrowIds": .array(["A1"]),
+                                     "arrows": .array([.object(["canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "preset": "Arrow"])]),
+                                     "restyle": .object(["arrowIds": .array(["A1"]), "drawnWidth": 6])]
+        let (refused, refusedIsError) = try await client.callTool(name: "render_sketch", arguments: args)
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data([0x89])), capabilities: ["authorStrokes", "arrows"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "render_sketch", arguments: args)
+        let last = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+        #expect(spec["arrows"] != nil && spec["restyle"] != nil && spec["arrowIds"] != nil)
+        await server.stop()
+    }
+
+    /// A preview takes exactly what the commit takes: a key add_arrow / restyle_arrows would refuse
+    /// is refused in render_sketch's `arrows` / `restyle` too, before any device is asked.
+    @Test func arrowPreviewsTakeExactlyTheCommitsFields() {
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["arrows": .array([.object(["canvasPoints": .array([]), "opacity": 0.5])])]) == nil)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["arrows": .array([.object(["canvasPoints": .array([]), "wobble": 1])])])?
+            .hasPrefix("invalidArgument: arrows[0].wobble") == true)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["restyle": .object(["arrowIds": .array([]), "drawnWidth": 3])]) == nil)
+        #expect(MCPAdapter.arrowPreviewKeyRefusal(["restyle": .object(["ids": .array([])])])?
+            .hasPrefix("invalidArgument: restyle.ids") == true)
+    }
+
+    /// add_arrow and restyle_arrows forward `keepsWidth` to the device (Josef, 2026-10-15).
+    @Test func arrowWritesForwardKeepsWidth() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        _ = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false,
+            "dashAlignment": "corners", "dashOffset": 1.5])
+        _ = try await client.callTool(name: "restyle_arrows", arguments: [
+            "docId": "d", "ids": .array(["A1"]), "keepsWidth": true,
+            "dashAlignment": "exact", "dashAnchor": "end", "dashEndsOn": "gap"])
+        let requests = await device.receivedRequests
+        #expect(requests.count == 2)
+        let specs = try requests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
+        #expect(specs.first?["keepsWidth"] as? Bool == false)
+        #expect(specs.last?["keepsWidth"] as? Bool == true)
+        #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
+        #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
+        await server.stop()
+    }
+
+    /// Curves stage 1: add_arrow and reshape_arrow relay `nodes` (and reshape its `arrowId`) to
+    /// the device verbatim; a node with an unknown key is refused by the closed item schema's
+    /// documentation, and the device validates the rest.
+    @Test func arrowNodesAndReshapeAreRelayed() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+        let nodes: Value = .array([
+            .object(["canvasX": 0, "canvasY": 0]),
+            .object(["canvasX": 50, "canvasY": 30, "type": "smooth"]),
+            .object(["canvasX": 100, "canvasY": 0, "type": "smooth"]),
+        ])
+        let (_, addError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "nodes": nodes])
+        #expect(addError != true)
+        let (reshaped, reshapeError) = try await client.callTool(name: "reshape_arrow", arguments: [
+            "docId": "d", "arrowId": "A1", "canvasPoints": .array([.array([0, 0]), .array([40, 40]), .array([80, 0])])])
+        #expect(reshapeError != true)
+        #expect(toolResultText(reshaped).contains("reshaped arrow"))
+        let specs = try await device.receivedRequests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
+        #expect(specs.count == 2)
+        #expect(specs.first?["op"] as? String == "addArrow" && (specs.first?["nodes"] as? [Any])?.count == 3)
+        #expect(specs.last?["op"] as? String == "reshapeArrow" && specs.last?["arrowId"] as? String == "A1")
+        #expect((specs.last?["canvasPoints"] as? [Any])?.count == 3)
+        await server.stop()
+    }
+
+    /// restore_stroke_widths names what it was given (whole-branch review #5).
+    @Test func restoreWidthsNamesStrokesAndArrows() {
+        let arrow = UUID().uuidString
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"]) == "stroke")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"]) == "strokes")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow]) == "arrow")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString]) == "arrows")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow]) == "elements (1 stroke and 1 arrow)")
+    }
+
+    /// The preset writes relay their arguments to an `arrowPresetWrites` device and pass its reply
+    /// through; a device with `arrows` alone (an older app) is never asked.
+    @Test func arrowPresetWritesRelayToACapableDeviceOnly() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Data("{}".utf8)), capabilities: ["arrows"])
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(name: "rename_arrow_preset",
+            arguments: ["docId": "d", "name": "Line", "newName": "Rule"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let reply = Data(#"{"presets":[]}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows", "arrowPresetWrites"])
+        defer { Task { await device.close() } }
+        for (tool, args, op) in [
+            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "corners", "keepsWidth": false], "saveArrowPreset"),
+            ("rename_arrow_preset", ["id": "X", "newName": "Rule"], "renameArrowPreset"),
+            ("delete_arrow_preset", ["name": "Line"], "deleteArrowPreset"),
+            ("move_arrow_preset", ["name": "Line", "toIndex": 2], "moveArrowPreset"),
+            ("restore_arrow_presets", [:], "restoreArrowPresets"),
+            ("get_new_arrow_style", [:], "getNewArrowStyle"),
+            ("set_new_arrow_style", ["preset": "Line", "drawnWidth": 3], "setNewArrowStyle"),
+        ] as [(String, [String: Value], String)] {
+            var a = args
+            a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError != true, "\(tool): \(toolResultText(content))")
+            #expect(toolResultText(content) == #"{"presets":[]}"#)
+            let last = try #require(await device.receivedRequests.last)
+            let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+            #expect(spec["op"] as? String == op)
+            for key in args.keys { #expect(spec[key] != nil, "\(tool) relays \(key)") }
+        }
+        await server.stop()
+    }
+
+    /// transform_elements naming arrows needs `transformElements` AND `arrows`: an older app has
+    /// the first only and would move the other kinds and silently leave the arrows behind.
+    @Test func transformElementsWithArrowIdsSkipsADeviceWithoutArrows() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["transformElements"])
+        defer { Task { await old.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "transform_elements",
+            arguments: ["docId": "d", "arrowIds": .array(["A1"]), "canvasTranslate": .array([1, 2])])
+        #expect(isError == true)
+        #expect(toolResultText(content).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        await server.stop()
+    }
+
+    /// An EMPTY arrowIds names no arrow: the call still reaches an app without the capability.
+    @Test func transformElementsWithAnEmptyArrowIdsStillReachesAnOlderApp() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["transformElements"])
+        defer { Task { await old.close() } }
+        _ = try await client.callTool(
+            name: "transform_elements",
+            arguments: ["docId": "d", "strokeIds": .array(["S1"]), "arrowIds": .array([]),
+                        "canvasTranslate": .array([1, 2])])
+        #expect(await old.receivedRequests.count == 1)
+        await server.stop()
+    }
+
     /// Pins the capability gate: a device advertising ONLY "authorStrokes"
     /// (no "authorText") must NOT be selected for list_texts — mirrors
     /// styledAddTextWithOnlyStrokeCapableDeviceFailsNoDeviceAvailable.
@@ -3395,7 +3641,7 @@ private actor FakeStrokeOpDevice {
             "ids": .array([.string("seed123:1.0")]),
         ])
         #expect(isError != true)
-        #expect(toolResultText(content) == "restored 1 of 1 stroke(s) at seq 1")
+        #expect(toolResultText(content) == "restored 1 of 1 stroke at seq 1")
 
         let received = try #require(await device.receivedRequests.first)
         #expect(received.docId == "d")
@@ -3457,7 +3703,7 @@ private actor FakeStrokeOpDevice {
             "ids": .array([.string("a"), .string("b"), .string("c")]),
         ])
         let text = toolResultText(content)
-        #expect(text.hasPrefix("restored 1 of 3 stroke(s) at seq 1"))
+        #expect(text.hasPrefix("restored 1 of 3 strokes at seq 1"))
         #expect(text.contains("2 had no scale to factor out"), "got \(text)")
 
         await server.stop()
@@ -4068,7 +4314,8 @@ private actor FakeStrokeOpDevice {
     @Test func everyColourTakingToolAdvertisesColorAppearance() throws {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
-                                     "add_text", "edit_text", "render_sketch"]
+                                     "add_text", "edit_text", "render_sketch",
+                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
             .map(\.name))

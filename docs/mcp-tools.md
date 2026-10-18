@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-55 tools, served over streamable HTTP at `/mcp`.
+68 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -68,6 +68,26 @@ Plain text is written server-side; styled text and every listing need a connecte
 | [`list_images`](#list_images) | Lists a document's placed images, one per image, as {id, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. |
 | [`remove_image`](#remove_image) | Remove a placed image from a document by its id (as returned by add_image or reported by get_selection). unknownDoc if the document doesn't exist; imageNotFound if no placed image… |
 
+## Arrows
+
+Arrows have no transform: their `canvasPoints` are where they are, and moving one rewrites them. Move, copy, reorder, tag and select them with the element and selection tools' `arrowIds`. Need a device with the `arrows` capability.
+
+| Tool | Summary |
+|---|---|
+| [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
+| [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
+| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic… |
+| [`reshape_arrow`](#reshape_arrow) | Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. |
+| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`,… |
+| [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
+| [`save_arrow_preset`](#save_arrow_preset) | Saves an arrow style preset. |
+| [`rename_arrow_preset`](#rename_arrow_preset) | Renames an arrow style preset. |
+| [`delete_arrow_preset`](#delete_arrow_preset) | Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). |
+| [`move_arrow_preset`](#move_arrow_preset) | Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id or name). |
+| [`restore_arrow_presets`](#restore_arrow_presets) | Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a deleted one returns at the front); the user's own presets are kept — the app's… |
+| [`get_new_arrow_style`](#get_new_arrow_style) | Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted fields take. |
+| [`set_new_arrow_style`](#set_new_arrow_style) | Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) and/or the style fields given; what is not given stays (`color` is light-canonical,… |
+
 ## Grids
 
 `visible` (drawn) and `enabled` (snapped-to) are independent. `snap` is a MULTIPLIER of `spacing`, not a distance.
@@ -91,7 +111,7 @@ Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to
 | [`tag_elements`](#tag_elements) | Give elements durable TAGS, so you can find your own work again later — the strokes that make up a roof, the series of markers on a plot, the text that titles a chart. |
 | [`find_elements`](#find_elements) | Resolve TAGS to element ids, so you can act on them with any tool that takes ids. |
 | [`list_tags`](#list_tags) | Every tag in a document, with how many live things carry it, split by family. |
-| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts AND images together — on ANY document, open or not. |
+| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. |
 | [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` (background) flag on the named placed texts and/or images of a document. `ids` may mix text ids and image ids (as returned by… |
@@ -367,12 +387,12 @@ Moves, scales and/or rotates strokes in place. The strokes keep their identity (
 
 ### `restore_stroke_widths`
 
-Takes the SCALE back off the ink of strokes that were scaled, leaving them exactly where they are on the canvas. Scaling a stroke (here or by the user dragging a selection) scales its INK THICKNESS along with its geometry, because the scale lives on the stroke's transform and PencilKit scales stamp size with it — so a shape scaled up by 3 is drawn with lines 3x fatter. This restores the drawn thickness while every point stays put; it is the same operation as the app's "Restore original stroke widths" menu item. Nothing else changes: ids, points, z-order, colour and ink all survive, and the stroke's width-edit history is left alone. AFTERWARDS the strokes' localToCanvasTransform (get_strokes) has changed — its scale is now 1, or it is identity for a stroke that was scaled unevenly — so re-read rather than reusing a cached one; canvasPoints and canvasPathBounds are unaffected. A stroke that carries no scale is LEFT ALONE and counted in the reply, not an error, and when that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply says "no change" and quotes no seq). drawnWidth is not touched — to change the drawn thickness itself, use restyle_strokes. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Takes the SCALE back off the ink of strokes that were scaled, leaving them exactly where they are on the canvas. Scaling a stroke (here or by the user dragging a selection) scales its INK THICKNESS along with its geometry, because the scale lives on the stroke's transform and PencilKit scales stamp size with it — so a shape scaled up by 3 is drawn with lines 3x fatter. This restores the drawn thickness while every point stays put; it is the same operation as the app's "Restore original stroke widths" menu item. Nothing else changes: ids, points, z-order, colour and ink all survive, and the stroke's width-edit history is left alone. AFTERWARDS the strokes' localToCanvasTransform (get_strokes) has changed — its scale is now 1, or it is identity for a stroke that was scaled unevenly — so re-read rather than reusing a cached one; canvasPoints and canvasPathBounds are unaffected. A stroke that carries no scale is LEFT ALONE and counted in the reply, not an error, and when that is true of every id given, NOTHING IS WRITTEN AT ALL (the reply says "no change" and quotes no seq). drawnWidth is not touched — to change the drawn thickness itself, use restyle_strokes. ARROW ids work too: an arrow whose `keepsWidth` is false was thickened or thinned by a scale, and this sets its drawnWidth back to list_arrows' `unscaledWidth` (heads and dashes, in widths, follow); an arrow never scaled is reported unchanged. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes. Ids that carry no scale are accepted and reported back as unchanged. |
+| `ids` | array | yes | Composite stroke ids, as returned by list_strokes or draw_strokes, and/or arrow ids from list_arrows. Ids that carry no scale are accepted and reported back as unchanged. |
 
 ### `delete_strokes`
 
@@ -465,7 +485,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place).
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -502,7 +522,7 @@ Place an image into a document. `path` names an image FILE ON THE MACHINE THIS S
 
 Lists a document's placed images, one per image, as {id, bounds:[x,y,w,h] (canvas space), pinned, opacity} — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags}`. The box is `canvasBounds`, NOT `bounds`. An empty array means the document has no images.
+REPLY: an ARRAY of `{id, canvasBounds, pinned, opacity, tags, layer}`. The box is `canvasBounds`, NOT `bounds`. `layer` is `front` or `back` — where the image paints when unpinned; a pinned image paints under everything but the paper. An empty array means the document has no images.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -516,6 +536,258 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `imageId` | string | yes | The id of the placed image to remove. |
+
+---
+
+## Arrows — reference
+
+### `list_arrows`
+
+Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
+
+REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, join?, miterLimit?, roundness?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1; an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to list arrows from. |
+
+### `list_arrow_presets`
+
+Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only routes the request. Never writes.
+
+Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
+
+REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, color, opacity, layer, keepsWidth, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask. |
+
+### `add_arrow`
+
+Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each is a sharp corner. Or give `nodes`. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
+| `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
+| `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
+| `dashOffset` | number | no | Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern. |
+| `dashPattern` | array | no | The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads. |
+| `endHeadLength` | number | no | The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default). |
+| `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
+| `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
+| `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+| `opacity` | number | no | 0…1 — the color's alpha (overrides the alpha of `color`). |
+| `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+Each item of `nodes`:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `canvasX` | number | yes |  |
+| `canvasY` | number | yes |  |
+| `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
+| `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
+| `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
+| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+
+### `reshape_arrow`
+
+Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. Read the current nodes with list_arrows, change what you need, send them back. A pinned arrow is reshaped too, as transform_elements moves one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `arrowId` | string | yes | The arrow (list_arrows' `id`). |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+
+Each item of `nodes`:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `canvasX` | number | yes |  |
+| `canvasY` | number | yes |  |
+| `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
+| `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
+| `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
+| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+
+### `restyle_arrows`
+
+Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`, `endHeadAngle`, `headsLinked`, `dashPattern`, `dashAlignment`, `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves the current width as it is (restore_stroke_widths takes an earlier scale back). ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `ids` | array | yes | Arrow ids, from list_arrows. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
+| `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
+| `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
+| `dashOffset` | number | no | Shifts the pattern, in arrow widths (−50…50; default 0): a positive value starts the shaft that far into the pattern (SVG's dash offset); in the fit modes, within the fitted pattern. |
+| `dashPattern` | array | no | The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads. |
+| `endHeadLength` | number | no | The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default). |
+| `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
+| `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
+| `opacity` | number | no | 0…1. |
+| `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+### `remove_arrow`
+
+Removes an arrow from a document by id (from list_arrows). Done by the SERVER, so it needs no connected device and works on a document nobody has open. arrowNotFound when no arrow has that id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `arrowId` | string | yes | The id of the arrow to remove, from list_arrows. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+
+### `save_arrow_preset`
+
+Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `docId`), from the user's new-arrow style (`fromNewArrowStyle: true`, also the default source), with any style fields overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` and a new `name` are given). Every ArrowStyle field can be given; `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `arrowId` | string | no | Take the style of this arrow (list_arrows) in docId. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
+| `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
+| `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
+| `dashOffset` | number | no | The pattern's offset in widths (−50…50). |
+| `dashPattern` | array | no | Dash, gap … in widths; [] is solid. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The end head's own tip half-angle in degrees (15–60); unlinks the heads. |
+| `endHeadLength` | number | no | The end head's own length in widths (2–10); unlinks the heads. |
+| `fromNewArrowStyle` | boolean | no | Take the user's new-arrow style (the default source). |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
+| `headLength` | number | no | Head length in arrow widths (2–10). |
+| `headsLinked` | boolean | no | Link (both heads take the start head's values) or unlink the heads. |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `keepsWidth` | boolean | no | Keep width when scaling (default true). |
+| `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+| `opacity` | number | no | 0…1. |
+| `replace` | boolean | no | Overwrite the named preset's style instead of adding one. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits on its point. |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+
+### `rename_arrow_preset`
+
+Renames an arrow style preset. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `newName` | string | yes | The new name. |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+
+### `delete_arrow_preset`
+
+Deletes an arrow style preset (a built-in comes back with restore_arrow_presets). Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+
+### `move_arrow_preset`
+
+Moves an arrow style preset: to `toIndex` (0 = first), or `before` / `after` another preset (its id or name). Exactly one of the three. Name the preset by `id` (from list_arrow_presets — stable across renames and moves) or by `name` (any letter case); a name several presets share fails with ambiguousPreset and lists their ids. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `after` | string | no | Another preset (id or name): move just after it. |
+| `before` | string | no | Another preset (id or name): move just before it. |
+| `id` | string | no | A preset id from list_arrow_presets. |
+| `name` | string | no | A preset name (any letter case) — or, when saving, the new preset's name. |
+| `toIndex` | integer | no | The position to move to, 0-based. |
+
+### `restore_arrow_presets`
+
+Brings the built-in arrow presets back as they shipped (an edited one is reset where it stands, a deleted one returns at the front); the user's own presets are kept — the app's "Restore built-in presets". These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+
+### `get_new_arrow_style`
+
+Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted fields take. Never writes. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+
+### `set_new_arrow_style`
+
+Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) and/or the style fields given; what is not given stays (`color` is light-canonical, `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. These are the user's DEVICE settings (app-wide on the connected device, not part of any document): no document is written and there is no undo step, and the user sees the change at once in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | Any document (its id, or its name when no other document has that name); it only picks the device to ask (and holds `arrowId`). |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
+| `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
+| `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
+| `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
+| `dashOffset` | number | no | The pattern's offset in widths (−50…50). |
+| `dashPattern` | array | no | Dash, gap … in widths; [] is solid. |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
+| `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
+| `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The end head's own tip half-angle in degrees (15–60); unlinks the heads. |
+| `endHeadLength` | number | no | The end head's own length in widths (2–10); unlinks the heads. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
+| `headLength` | number | no | Head length in arrow widths (2–10). |
+| `headsLinked` | boolean | no | Link (both heads take the start head's values) or unlink the heads. |
+| `keepsWidth` | boolean | no | Keep width when scaling (default true). |
+| `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
+| `opacity` | number | no | 0…1. |
+| `preset` | string | no | A preset (id or name) whose whole style is the base; the style fields override it. |
+| `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits on its point. |
+| `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
 
 ---
 
@@ -607,7 +879,7 @@ maxCandidates (default 64) is a SAFETY VALVE, not a working parameter: truncatio
 
 OBJECTS: pass objects: true to also get the points of the drawing itself within objectRadius (canvas points, default 50) — stroke ends, midpoints, crossings of two strokes, where a stroke crosses a grid line, the corners, edge middles and center of images and texts, and text baselines. They come back in a separate objectCandidates list, ordered by distance, each naming the element(s) it belongs to by the same ids list_strokes, list_texts and list_images report — so you can connect a new line to a SPECIFIC stroke's end. Needs a device with the snapObjects capability (noDeviceAvailable otherwise).
 
-REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from. With objects: true each entry also carries `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, boxEdgeMiddle, boxCenter, textBaseline.
+REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from. With objects: true each entry also carries `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth point between its ends), segmentMiddle (the middle of one of an arrow's segments). An arrow's ends and middle report as endpoint and midpoint.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -668,15 +940,16 @@ REPLY: an OBJECT mapping each tag to `{"elements": N, "grids": M}` — live elem
 
 ### `transform_elements`
 
-Move, scale or rotate named strokes, texts AND images together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
+Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
 
 Ops are named, never a raw matrix, and mean exactly what they mean on transform_strokes: `scale` then `rotate`, both about `anchor`, then `translate`. `anchor` defaults to the centre of the whole set's bounding box across all three kinds. Identity survives — a stroke keeps its id and its width-edit history, texts and images keep theirs; this is a MOVE, not a copy.
 
-ATOMIC: every id must resolve or nothing moves, so a set can never end up sheared half-way. Use transform_strokes when you want grid snapping (`snapToGrid` / `snapTo`), which is stroke-lattice specific and stays there. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+An ARROW is baked: its points move; a `scale` changes its drawnWidth only when its `keepsWidth` is false (list_arrows reports both afterwards — `drawnWidth` and `unscaledWidth`); with keepsWidth true (the default) width, heads and dashes stay. ATOMIC: every id must resolve or nothing moves, so a set can never end up sheared half-way. Use transform_strokes when you want grid snapping (`snapToGrid` / `snapTo`), which is stroke-lattice specific and stays there. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width. |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
@@ -705,6 +978,7 @@ Sets the z-order (draw order) of named strokes/texts/images within ONE document 
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type. |
+| `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to reorder, from list_texts. |
@@ -729,6 +1003,7 @@ REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and `created
 |---|---|---|---|
 | `source` | string | yes | The document to copy FROM (left unchanged). |
 | `target` | string | yes | The document to copy INTO (gains the clones). |
+| `arrowIds` | array | no | Arrow ids to clone, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to clone, from list_images. |
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
@@ -747,11 +1022,12 @@ Select every stroke, placed text, and placed image in the document on a connecte
 
 ### `select_elements`
 
-Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary) — at least one id across the three arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
+Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name). |
+| `arrowIds` | array | no | Arrow ids to select, from list_arrows or get_selection. |
 | `imageIds` | array | no | Placed-image ids to select. |
 | `keepRect` | boolean | no | Keep the existing selection rectangle instead of resizing it to the chosen elements. Defaults to false. |
 | `strokeIds` | array | no | Stroke ids to select. |
@@ -795,7 +1071,7 @@ Place the reference point the user's live selection pivots/rotates/scales around
 
 ### `transform_selection`
 
-Transform the user's live selection exactly as a manual rect-select transform would (one undoable step). `ops` is a list of 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point): rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy} (canvas points, no reference point), flipHorizontal / flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none is set the op fails (noReferencePoint); placing it yourself is not supported yet. Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). REQUIRES a connected device with an active selection.
+Transform the user's live selection exactly as a manual rect-select transform would (one undoable step). `ops` is a list of 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point): rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy} (canvas points, no reference point), flipHorizontal / flipVertical. rotate/scale/flip pivot on the reference point the USER placed — if none is set the op fails (noReferencePoint); placing it yourself is not supported yet. Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). Selected ARROWS scale their width with them only when their `keepsWidth` is false (list_arrows); otherwise points move and width, heads and dashes stay. REQUIRES a connected device with an active selection.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -815,7 +1091,7 @@ Each item of `ops`:
 
 ### `preview_selection`
 
-Preview a proposed transform of the user's live selection WITHOUT committing anything — the agent's scratchpad for a selection edit, the same role render_sketch's ephemeral strokes play for stroke authoring: synthesize → render → refine → only then commit via transform_selection. `ops` is 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), the same shape as transform_selection: rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — pivoting on the reference point the USER placed (noReferencePoint if none is set). Returns a PNG plus metadata: canvas-space bounds for each transformed selected element (and, with includePoints, each stroke's transformed points), the overall selection bounds/referencePoint, and — per grid — the same line families render_sketch reports, so you can align the proposed transform before committing it. `include`: "withContext" (default) renders the grid and the rest of the document's content behind the moved selection; "selectionOnly" renders just the transformed selection, transparent background, no grid pixels (grid metadata is still reported). `rect` bounds the render like render_sketch's; omit for auto-fit. Nothing here is ever written to the document or the live selection. REQUIRES a connected `controlSelection` device with an active selection.
+Preview a proposed transform of the user's live selection WITHOUT committing anything — the agent's scratchpad for a selection edit, the same role render_sketch's ephemeral strokes play for stroke authoring: synthesize → render → refine → only then commit via transform_selection. `ops` is 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), the same shape as transform_selection: rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — pivoting on the reference point the USER placed (noReferencePoint if none is set). Returns a PNG plus metadata: canvas-space bounds for each transformed selected element (and, with includePoints, each stroke's transformed points), the overall selection bounds/referencePoint, and — per grid — the same line families render_sketch reports, so you can align the proposed transform before committing it. Arrows preview as they will commit: a scale keeps an arrow's width unless its `keepsWidth` is false. `include`: "withContext" (default) renders the grid and the rest of the document's content behind the moved selection; "selectionOnly" renders just the transformed selection, transparent background, no grid pixels (grid metadata is still reported). `rect` bounds the render like render_sketch's; omit for auto-fit. Nothing here is ever written to the document or the live selection. REQUIRES a connected `controlSelection` device with an active selection.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -828,7 +1104,7 @@ Preview a proposed transform of the user's live selection WITHOUT committing any
 
 ### `duplicate_selection`
 
-Duplicate the user's live selection on a connected device. With no `ops`: a provisional copy in place — like the toolbar's duplicate, it commits on a later edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as transform_selection's, composed left-to-right around the single reference point): clone + transform as one "stamp" undo step. Returns the new elements' keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). REQUIRES a connected `controlSelection` device with an active selection.
+Duplicate the user's live selection on a connected device. With no `ops`: a provisional copy in place — like the toolbar's duplicate, it commits on a later edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as transform_selection's, composed left-to-right around the single reference point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width unless its `keepsWidth` is false). Returns the new elements' keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). REQUIRES a connected `controlSelection` device with an active selection.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -882,13 +1158,16 @@ REPLY: a PNG image plus a metadata text block. With writeToFile: true there is N
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to render. |
 | `appearance` | string — `light`, `dark` | no | Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each. |
+| `arrowIds` | array | no | With include: "arrows", the arrow ids (list_arrows) to show. |
+| `arrows` | array | no | EPHEMERAL candidate arrows to render over the document — never written. Each takes EXACTLY add_arrow's fields (canvasPoints, preset, every style field, layer) and is built by the same code, so the preview is what add_arrow would place; omitted fields take the user's new-arrow style. Iterate: render → adjust → render → add_arrow. The reply's metadata `arrows` reports each one's `canvasBounds` and the `style` it resolved to (preset + overrides, clamps included). |
 | `axes` | boolean | no | Overlay light tick marks and coordinate labels along the edges. Defaults to false (a render meant for visual judgement stays clean). |
 | `background` | string — `transparent`, `paper`, `paper+grid` | no | "transparent", "paper" (the document's background colour for the current appearance), or "paper+grid" (default — the grid is what agents align to). |
 | `canvasRect` | array | no | [x, y, w, h] in canvas coordinates. Omit for auto-fit: the tight bounding box of everything rendered, expanded by padding. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
-| `include` | string — `document`, `strokes`, `none` | no | What document content to render, alongside any ephemeral strokes below. "document" (default): every stroke, placed image, and placed text. "strokes": only the strokes named by strokeIds — no images or texts. "none": nothing from the document. |
+| `include` | string — `document`, `strokes`, `arrows`, `none` | no | What document content to render, alongside any ephemeral strokes and arrows below. "document" (default): every stroke, placed image, text and arrow. "strokes": only the strokes named by strokeIds — no images or texts. "arrows": only the arrows named by arrowIds (and restyle.arrowIds) — a clean swatch. "none": nothing from the document. |
 | `maxPixels` | number | no | Pixel budget. Defaults to 1000000, hard ceiling 4000000. An over-large request is downscaled, not rejected, and the metadata reports the scale actually used. |
 | `padding` | number | no | Auto-fit margin in canvas points. Defaults to 10% of the fitted box's larger side, minimum 20. |
+| `restyle` | object | no | Render EXISTING arrows as if restyled — the document unchanged: `arrowIds` plus any of restyle_arrows' fields (preset, heads, widths, dash, color, opacity, keepsWidth …), applied by the same code restyle_arrows uses. Iterate: render → adjust → render → restyle_arrows. The metadata's `restyledArrows` reports each one's `canvasBounds` and resolved `style`. Combine with include: "arrows" for an isolated swatch. |
 | `scale` | number | no | Pixels per canvas point, at most 16. THIS is the knob for how big the image comes back — and by default the image is returned INLINE, so its size is a cost you pay on every call (with writeToFile: true it is not, so a big scale is cheap there). Omit it and the renderer picks a scale that fits `maxPixels`. |
 | `strokeIds` | array | no | With include: "strokes", the stroke ids (as returned by list_strokes) to show. |
 | `strokes` | array | no | EPHEMERAL candidate strokes to render — the exact stroke shape draw_strokes takes. Synthesized through the same code a commit would use, so the preview has the same geometry and style draw_strokes would commit, but nothing here is ever written to the document. |
