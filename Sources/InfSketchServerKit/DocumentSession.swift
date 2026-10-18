@@ -273,7 +273,7 @@ actor DocumentSession {
                 ServerLog.error("could not keep version \(hash8) of '\(docId)': \(error)")
             }
             // The queue's backlog is only visible from here: a wait that keeps growing means writes
-            // arrive faster than they can be kept (docs/BACKLOG.md).
+            // arrive faster than they can be kept.
             func ms(_ d: Duration) -> String {
                 String(format: "%.1f", Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15)
             }

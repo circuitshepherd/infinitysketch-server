@@ -689,7 +689,7 @@ public actor SessionManager {
     /// `writer` defaults to `agent` because this IS the agent path — the doc comment above says so,
     /// and every caller is an MCP tool. It carries no arrival instant, deliberately: opening a
     /// session can load a document from disk, and counting that as queue wait would report an
-    /// inflated one (`docs/BACKLOG.md`).
+    /// inflated one.
     public func submitOpeningSession(
         docId: String, createIfMissing: Bool, opId: String, payload: OpPayload,
         expectation: WriteExpectation = .none, writer: String = "agent"
