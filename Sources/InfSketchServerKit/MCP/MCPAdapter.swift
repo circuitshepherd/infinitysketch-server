@@ -1618,9 +1618,9 @@ public actor MCPAdapter {
                 shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's \
                 as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas \
                 space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` \
-                gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?}`: type `corner` (a \
+                gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?, roundness?}`: type `corner` (a \
                 sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from \
-                its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] \
+                its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] \
                 from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
                 light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
@@ -4745,7 +4745,7 @@ public actor MCPAdapter {
     static var arrowNodesProperty: Value {
         .object([
             "type": "array",
-            "description": "At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?, join?, miterLimit?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints.",
+            "description": "At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints.",
             "items": .object([
                 "type": "object",
                 "properties": .object([
@@ -4757,6 +4757,8 @@ public actor MCPAdapter {
                     "join": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
                                      "description": "An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth / manual node."]),
                     "miterLimit": .object(["type": "number", "minimum": 1, "maximum": 20, "description": "A miter corner's limit in half widths (1–20)."]),
+                    "roundness": .object(["type": "number", "minimum": 0, "maximum": 2,
+                                          "description": "A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner or manual node."]),
                 ]),
                 "required": .array(["canvasX", "canvasY"].map(Value.string)),
                 "additionalProperties": .bool(false),
