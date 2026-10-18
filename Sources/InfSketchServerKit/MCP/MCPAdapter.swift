@@ -1620,8 +1620,7 @@ public actor MCPAdapter {
                 space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` \
                 gives each node as `{canvasX, canvasY, type, join?, miterLimit?, roundness?}`: type `corner` (a \
                 sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from \
-                its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1) or `arc` (along the circle through it \
-                and its neighbours — an Edit arc writes these). `canvasBounds` covers the curve as drawn. \
+                its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1; an Edit arc writes these). `canvasBounds` covers the curve as drawn. \
                 `drawnWidth` is the line's width in canvas points — what it draws. `color` is \
                 light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
                 """,
@@ -1869,7 +1868,7 @@ public actor MCPAdapter {
             name: "reshape_arrow",
             description: """
                 Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' \
-                shape: corner / smooth / arc) — keeping its id, style, layer, tags \
+                shape: corner / smooth) — keeping its id, style, layer, tags \
                 and place in the stacking order. Read the current nodes with list_arrows, change what \
                 you need, send them back. A pinned arrow is reshaped too, as transform_elements moves \
                 one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. \
@@ -4745,19 +4744,19 @@ public actor MCPAdapter {
     static var arrowNodesProperty: Value {
         .object([
             "type": "array",
-            "description": "At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) or arc (the line runs along the circle through the node and its two neighbours — an end: and the next two — computed, so it stays a circle after any move; \"manual\" is read as arc). Instead of canvasPoints.",
+            "description": "At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) (\"arc\" and \"manual\", older kinds, are read as smooth). Instead of canvasPoints.",
             "items": .object([
                 "type": "object",
                 "properties": .object([
                     "canvasX": .object(["type": "number"]),
                     "canvasY": .object(["type": "number"]),
                     "type": .object(["type": "string", "enum": .array(["corner", "smooth", "arc", "manual"].map(Value.string)),
-                                     "description": "corner, smooth or arc; manual (the older stored-handle kind) is read as arc."]),
+                                     "description": "corner or smooth; arc and manual (older kinds) are read as smooth."]),
                     "join": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
-                                     "description": "An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth / arc node."]),
+                                     "description": "An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node."]),
                     "miterLimit": .object(["type": "number", "minimum": 1, "maximum": 20, "description": "A miter corner's limit in half widths (1–20)."]),
                     "roundness": .object(["type": "number", "minimum": 0, "maximum": 2,
-                                          "description": "A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner or arc node."]),
+                                          "description": "A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner."]),
                 ]),
                 "required": .array(["canvasX", "canvasY"].map(Value.string)),
                 "additionalProperties": .bool(false),

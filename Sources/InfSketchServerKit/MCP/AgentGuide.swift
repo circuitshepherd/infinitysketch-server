@@ -157,9 +157,8 @@ enum AgentGuide {
     **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a line \
     through its NODES, a shape at each end (`startHead`, `endHead`), a `drawnWidth` in canvas \
     points and a light-canonical `color`. Two `canvasPoints` make a straight arrow, more make \
-    sharp corners (an L or Z connector); `nodes` instead give each point a type — `corner`, \
-    `smooth` (the curve passes through it smoothly, an S-curve from a few points) or `arc` \
-    (along the circle through it and its neighbours, kept a circle when points move; Edit arc \
+    sharp corners (an L or Z connector); `nodes` instead give each point a type — `corner` \
+    or `smooth` (the curve passes through it smoothly, an S-curve from a few points; Edit arc \
     writes these). Place \
     one with `add_arrow`, read them with `list_arrows` (`nodes`, and `canvasBounds` of the curve \
     as drawn), change one's shape with `reshape_arrow` (same id, style and order — read the \
