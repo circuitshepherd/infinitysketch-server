@@ -113,8 +113,8 @@ Strokes, texts and images addressed by id, whatever their kind. Resolve a tag to
 | [`list_tags`](#list_tags) | Every tag in a document, with how many live things carry it, split by family. |
 | [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. |
 | [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
-| [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
-| [`set_pinned`](#set_pinned) | Sets the `pinned` (background) flag on the named placed texts and/or images of a document. `ids` may mix text ids and image ids (as returned by… |
+| [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
+| [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by… |
 | [`copy_elements`](#copy_elements) | Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
 
 ## Selection
@@ -905,7 +905,7 @@ Many-to-many: an element carries any number of tags and a tag covers any number 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Element ids (stroke id, text id or image id). Any number. |
+| `ids` | array | yes | Element ids (stroke, text, image or arrow id). Any number. |
 | `mode` | string — `add`, `remove`, `replace` | no | add (default) / remove / replace. replace with an empty tags clears. |
 | `tags` | array | no | The tags to add, remove, or replace with. |
 
@@ -913,9 +913,9 @@ Many-to-many: an element carries any number of tags and a tag covers any number 
 
 Resolve TAGS to element ids, so you can act on them with any tool that takes ids. Read-only and cheap: no document payload comes back, just `{tag: [ids]}` for the tags that resolve.
 
-Ids come back in DOCUMENT order — strokes in drawing order, then texts, then images — so a tagged series is returned in a stable, meaningful sequence.
+Ids come back in DOCUMENT order — strokes in drawing order, then texts, then images, then arrows — so a tagged series is returned in a stable, meaningful sequence.
 
-A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / fill_region / draw_dots. Use list_tags to see what a document already has.
+A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / fill_region / draw_dots (an arrow is tagged with tag_elements after add_arrow). Use list_tags to see what a document already has.
 
 REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object rather than present-and-empty, so check for the key before indexing it.
 
@@ -972,12 +972,12 @@ ATOMIC: every id must resolve or nothing is reset. When every named element is a
 
 ### `reorder_elements`
 
-Sets the z-order (draw order) of named strokes/texts/images within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom — each WITHIN its own element type's stacking, mirroring the app's Bring-to-Front/Send-to-Back tool. The cross-type order is FIXED (images below strokes below texts), so a stroke brought to front is still drawn below every text; use this only to reorder among same-type elements. For images, pinned (background) images always draw behind unpinned ones regardless of this order — change that band with set_pinned. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom — each WITHIN its own element type, mirroring the app's Bring-to-Front/Send-to-Back tool: a stroke moves among strokes, and a text, image or arrow only trades places with objects OF ITS KIND, so it can still draw below an object of another kind in the same layer. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; restyle_arrows changes an arrow's, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type. |
+| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type and layer. |
 | `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
@@ -985,12 +985,12 @@ Sets the z-order (draw order) of named strokes/texts/images within ONE document 
 
 ### `set_pinned`
 
-Sets the `pinned` (background) flag on the named placed texts and/or images of a document. `ids` may mix text ids and image ids (as returned by list_texts/list_images/add_text/add_image). A pinned element draws beneath unpinned content and is skipped by rect-select. Server-side, no device needed. Atomic: if any id isn't a text or image in the document it fails with elementNotFound and nothing changes. unknownDoc if the document doesn't exist. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by list_texts/list_images/list_arrows/add_text/add_image/add_arrow). A pinned element is protected from the user's touches (move, delete, transform). A pinned IMAGE also paints in the pinned-images layer, beneath everything but the paper, and returns to its own layer when unpinned; a pinned text or arrow stays where it paints. Server-side, no device needed. Atomic: if any id isn't a text, image or arrow in the document it fails with elementNotFound and nothing changes. unknownDoc if the document doesn't exist. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Ids of the placed texts/images to (un)pin — a non-empty list. |
+| `ids` | array | yes | Ids of the placed texts/images/arrows to (un)pin — a non-empty list. |
 | `pinned` | boolean | yes | true to pin, false to unpin. |
 
 ### `copy_elements`

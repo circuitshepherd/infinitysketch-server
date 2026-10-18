@@ -825,7 +825,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "Element ids (stroke id, text id or image id). Any number.",
+                        "description": "Element ids (stroke, text, image or arrow id). Any number.",
                     ]),
                     "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
@@ -847,12 +847,14 @@ public actor MCPAdapter {
                 `{tag: [ids]}` for the tags that resolve.
 
                 Ids come back in DOCUMENT order — strokes in drawing order, then texts, then \
-                images — so a tagged series is returned in a stable, meaningful sequence.
+                images, then arrows — so a tagged series is returned in a stable, meaningful \
+                sequence.
 
                 A tag whose elements no longer exist is simply ABSENT from the reply rather than \
                 a dangling id, so an empty answer means "those elements are gone", not "the \
                 lookup failed". Tags are set with tag_elements, or at creation time by \
-                draw_strokes / add_text / add_image / fill_region / draw_dots. Use list_tags to \
+                draw_strokes / add_text / add_image / fill_region / draw_dots (an arrow is tagged \
+                with tag_elements after add_arrow). Use list_tags to \
                 see what a document already has.
 
                 REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. \
@@ -1353,12 +1355,15 @@ public actor MCPAdapter {
         Tool(
             name: "set_pinned",
             description: """
-                Sets the `pinned` (background) flag on the named placed texts and/or images \
-                of a document. `ids` may mix text ids and image ids (as returned by \
-                list_texts/list_images/add_text/add_image). A pinned element draws beneath \
-                unpinned content and is skipped by rect-select. Server-side, no device needed. \
-                Atomic: if any id isn't a text or image in the document it fails with \
-                elementNotFound and nothing changes. unknownDoc if the document doesn't exist. \
+                Sets the `pinned` flag on the named placed texts, images and/or arrows of a \
+                document. `ids` may mix text, image and arrow ids (as returned by \
+                list_texts/list_images/list_arrows/add_text/add_image/add_arrow). A pinned \
+                element is protected from the user's touches (move, delete, transform). A pinned \
+                IMAGE also paints in the pinned-images layer, beneath everything but the paper, \
+                and returns to its own layer when unpinned; a pinned text or arrow stays where \
+                it paints. Server-side, no device needed. Atomic: if any id isn't a text, image \
+                or arrow in the document it fails with elementNotFound and nothing changes. \
+                unknownDoc if the document doesn't exist. \
                 \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -1367,7 +1372,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
-                        "description": "Ids of the placed texts/images to (un)pin — a non-empty list.",
+                        "description": "Ids of the placed texts/images/arrows to (un)pin — a non-empty list.",
                         "items": .object(["type": "string"]),
                     ]),
                     "pinned": .object(["type": "boolean", "description": "true to pin, false to unpin."]),
@@ -3261,17 +3266,20 @@ public actor MCPAdapter {
         Tool(
             name: "reorder_elements",
             description: """
-                Sets the z-order (draw order) of named strokes/texts/images within ONE \
+                Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE \
                 document — bring-to-front or send-to-back, authored by a connected \
-                InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds` \
+                InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` \
                 is required. `mode` selects the direction: "front" moves the named \
                 elements to the top of the draw order, "back" to the bottom — each \
-                WITHIN its own element type's stacking, mirroring the app's \
-                Bring-to-Front/Send-to-Back tool. The cross-type order is FIXED (images \
-                below strokes below texts), so a stroke brought to front is still drawn \
-                below every text; use this only to reorder among same-type elements. For \
-                images, pinned (background) images always draw behind unpinned ones \
-                regardless of this order — change that band with set_pinned. \
+                WITHIN its own element type, mirroring the app's Bring-to-Front/Send-to-Back \
+                tool: a stroke moves among strokes, and a text, image or arrow only trades \
+                places with objects OF ITS KIND, so it can still draw below an object of \
+                another kind in the same layer. The document paints in LAYERS, bottom to \
+                top: pinned images, back objects (texts/images/arrows whose `layer` is \
+                "back"), the grid, strokes, front objects — this tool never moves anything \
+                between layers. list_texts/list_images/list_arrows report each object's \
+                `layer`; restyle_arrows changes an arrow's, and set_pinned moves an image \
+                into or out of the pinned-images layer. \
                 REQUIRES a connected device with the reorderElements capability — fails \
                 with noDeviceAvailable if none is connected, deviceTimeout if it doesn't \
                 respond in time, unknownDoc if the document doesn't exist, and \
@@ -3305,7 +3313,7 @@ public actor MCPAdapter {
                     "mode": .object([
                         "type": "string",
                         "enum": .array(["front", "back"].map(Value.string)),
-                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — within each element type.",
+                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — within each element type and layer.",
                     ]),
                 ]),
                 "required": .array(["docId", "mode"].map(Value.string)),
