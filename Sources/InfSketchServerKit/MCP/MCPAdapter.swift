@@ -2464,7 +2464,9 @@ public actor MCPAdapter {
                 `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus \
                 `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of \
                 endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, \
-                boxEdgeMiddle, boxCenter, textBaseline.
+                boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth \
+                point between its ends), segmentMiddle (the middle of one of an arrow's segments). \
+                An arrow's ends and middle report as endpoint and midpoint.
                 """,
             inputSchema: .object([
                 "type": "object",
