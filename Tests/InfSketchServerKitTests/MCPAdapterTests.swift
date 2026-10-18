@@ -7531,6 +7531,31 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// Every content tool, not only fetch_doc, says `contentUnavailable` for a document a device
+    /// advertises but cannot hand over. They used to say "unknownDoc: no document named "Ghost".
+    /// Documents: "Ghost" …", which contradicts itself.
+    @Test func contentToolsReportContentUnavailableForAnUnreachableHolder() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        await server.manager.applyAdvertisements(
+            [DocAdvertisement(docId: "Ghost", modifiedAt: Date(timeIntervalSince1970: 0),
+                               sizeBytes: Fixtures.docBytes.count, thumbnail: nil)],
+            connectionId: UUID(), deviceId: "devA")
+        await server.manager.setContentProvider { _, _ in
+            throw DeviceCommandBroker.DeviceCommandError.noDeviceAvailable
+        }
+
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        for tool in ["list_strokes", "list_grids", "list_texts", "list_images", "list_arrows"] {
+            let (content, isError) = try await client.callTool(name: tool, arguments: ["docId": "Ghost"])
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(content).hasPrefix("contentUnavailable"), "\(tool): \(toolResultText(content))")
+        }
+
+        await server.stop()
+    }
+
     /// A docId with no live advertisement and no resident bytes at all: fetch_doc reports
     /// unknownDoc, the same reason every other tool uses for a nonexistent document.
     @Test func fetchDocOnGenuinelyUnknownDocReportsUnknownDoc() async throws {

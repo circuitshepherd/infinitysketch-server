@@ -3589,6 +3589,16 @@ public actor MCPAdapter {
         else { return result }
 
         if text == "unknownDoc" {
+            // A content tool says `unknownDoc` when `currentBytesOrFetch` comes back empty, which
+            // also happens for a document a device ADVERTISES but cannot hand over right now. Said
+            // as "no document named X. Documents: X", the reply contradicted itself; say what
+            // `fetch_doc` says for the same state.
+            if let docId = arguments?["docId"]?.stringValue,
+               await manager.liveEntry(docId: docId) != nil {
+                return Self.errorResult(
+                    "contentUnavailable: \"\(docId)\" exists, but no device holding it answered; "
+                    + "try again when it is online (fetch_doc reports the same)")
+            }
             let named = (arguments?["docId"]?.stringValue).map { " named \"\($0)\"" } ?? ""
             let listed = ((try? await manager.listDocuments()) ?? [])
                 .sorted { ($0.name, $0.id) < ($1.name, $1.id) }
