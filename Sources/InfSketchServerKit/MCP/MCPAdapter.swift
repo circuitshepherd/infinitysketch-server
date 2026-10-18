@@ -1606,7 +1606,8 @@ public actor MCPAdapter {
                 device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
                 REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
-                endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, \
+                endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, \
+                headsLinked, dashPattern, \
                 dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
                 `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
                 join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
@@ -1614,7 +1615,8 @@ public actor MCPAdapter {
                 `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and \
                 keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the \
                 width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) \
-                shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas \
+                shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's \
+                as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas \
                 space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` \
                 gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?}`: type `corner` (a \
                 sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from \
@@ -1644,7 +1646,8 @@ public actor MCPAdapter {
                 move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
 
                 REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
-                headLength, headAngle, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, color, \
+                headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, \
+                dashAnchor, dashEndsOn, dashOffset, color, \
                 opacity, layer, keepsWidth, duplicateName}` — the same \
                 fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
                 repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
@@ -1831,8 +1834,11 @@ public actor MCPAdapter {
                     "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
                                           "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
-                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends."]),
-                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default)."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked."]),
+                    "endHeadLength": .object(["type": "number", "description": "The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength."]),
+                    "endHeadAngle": .object(["type": "number", "description": "The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads."]),
+                    "headsLinked": .object(["type": "boolean", "description": "true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own."]),
                     "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
                                             "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
@@ -1888,7 +1894,8 @@ public actor MCPAdapter {
             name: "restyle_arrows",
             description: """
                 Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, \
-                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `dashAlignment`, \
+                `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`, `endHeadAngle`, \
+                `headsLinked`, `dashPattern`, `dashAlignment`, \
                 `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
                 too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
@@ -1912,8 +1919,11 @@ public actor MCPAdapter {
                     "endAnchor": .object(["type": "string", "enum": .array(["endsAtPoint", "centeredOnPoint"].map(Value.string)),
                                           "description": "Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap)."]),
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
-                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends."]),
-                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends."]),
+                    "headLength": .object(["type": "number", "description": "Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default)."]),
+                    "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked."]),
+                    "endHeadLength": .object(["type": "number", "description": "The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength."]),
+                    "endHeadAngle": .object(["type": "number", "description": "The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads."]),
+                    "headsLinked": .object(["type": "boolean", "description": "true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own."]),
                     "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
                                             "description": "The shaft's line type: dash, gap, dash, gap … in arrow widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid (default); [3, 2] dashed, [0, 2] dotted, [4, 2, 0, 2] dash-dot. Heads stay solid; the gaps adjust so both ends finish on a dash."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
@@ -4692,7 +4702,8 @@ public actor MCPAdapter {
 
     /// The style fields an agent can name, flat as on add_arrow — `ArrowAuthoring.StyleArgs` on the device.
     static let arrowStyleKeys = ["startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "headLength",
-                                 "headAngle", "dashPattern", "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset",
+                                 "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                                 "dashPattern", "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset",
                                  "color", "colorAppearance", "opacity", "layer", "keepsWidth", "cornerJoin", "cornerMiterLimit"]
 
     static func mergeProperties(_ a: [String: Value], _ b: [String: Value]) -> [String: Value] {
@@ -4711,6 +4722,9 @@ public actor MCPAdapter {
             "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40)."]),
             "headLength": .object(["type": "number", "description": "Head length in arrow widths (2–10)."]),
             "headAngle": .object(["type": "number", "description": "Half the angle at each head's tip, in degrees (15–60)."]),
+            "endHeadLength": .object(["type": "number", "description": "The end head's own length in widths (2–10); unlinks the heads."]),
+            "endHeadAngle": .object(["type": "number", "description": "The end head's own tip half-angle in degrees (15–60); unlinks the heads."]),
+            "headsLinked": .object(["type": "boolean", "description": "Link (both heads take the start head's values) or unlink the heads."]),
             "dashPattern": .object(["type": "array", "items": .object(["type": "number"]), "description": "Dash, gap … in widths; [] is solid."]),
             "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
             "dashCorners": .object(["type": "boolean", "description": "The fit modes' Corners switch (see add_arrow)."]),
@@ -4761,10 +4775,12 @@ public actor MCPAdapter {
             var envelope: [String: Value] = ["op": .string(op)]
             let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
+                   "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                   "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
-                   "headLength", "headAngle", "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
+                   "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
+                   "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
                    "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }

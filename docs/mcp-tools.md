@@ -78,7 +78,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic… |
 | [`reshape_arrow`](#reshape_arrow) | Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth / manual with handles) — keeping its id, style, layer, tags and place… |
-| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`,… |
+| [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`,… |
 | [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
 | [`save_arrow_preset`](#save_arrow_preset) | Saves an arrow style preset. |
 | [`rename_arrow_preset`](#rename_arrow_preset) | Renames an arrow style preset. |
@@ -545,7 +545,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape both heads; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, handleIn?, handleOut?, join?, miterLimit?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours) or `manual` (with `handleIn`/`handleOut`, cubic handle offsets [dx, dy] from the node — an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -557,7 +557,7 @@ Lists the user's arrow style presets — app-wide on the connected device, in th
 
 Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
 
-REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, color, opacity, layer, keepsWidth, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
+REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, color, opacity, layer, keepsWidth, duplicateName}` — the same fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may repeat: `duplicateName` is true for every preset sharing its name (any letter case), and `preset` then takes the FIRST of them.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -584,8 +584,11 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
-| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
-| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
+| `endHeadAngle` | number | no | The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads. |
+| `endHeadLength` | number | no | The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default). |
+| `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
 | `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
 | `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
 | `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, handleIn?, handleOut?, join?, miterLimit?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours) or manual (handleIn / handleOut: cubic handle offsets [dx, dy] from the node in canvas points; a missing one is zero). Instead of canvasPoints. |
@@ -631,7 +634,7 @@ Each item of `nodes`:
 
 ### `restyle_arrows`
 
-Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `dashPattern`, `dashAlignment`, `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves the current width as it is (restore_stroke_widths takes an earlier scale back). ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`, `endHeadAngle`, `headsLinked`, `dashPattern`, `dashAlignment`, `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves the current width as it is (restore_stroke_widths takes an earlier scale back). ATOMIC: every id must resolve or nothing changes. Their points never change (move them with transform_elements' `arrowIds`). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -650,8 +653,11 @@ Changes the style of named arrows — a `preset`, and/or any of `startHead`, `en
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
-| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32). One setting for both ends. |
-| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4). One setting for both ends. |
+| `endHeadAngle` | number | no | The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads. |
+| `endHeadLength` | number | no | The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength. |
+| `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked. |
+| `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default). |
+| `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
 | `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
 | `opacity` | number | no | 0…1. |
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it. |
@@ -688,9 +694,12 @@ Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `doc
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The end head's own tip half-angle in degrees (15–60); unlinks the heads. |
+| `endHeadLength` | number | no | The end head's own length in widths (2–10); unlinks the heads. |
 | `fromNewArrowStyle` | boolean | no | Take the user's new-arrow style (the default source). |
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
 | `headLength` | number | no | Head length in arrow widths (2–10). |
+| `headsLinked` | boolean | no | Link (both heads take the start head's values) or unlink the heads. |
 | `id` | string | no | A preset id from list_arrow_presets. |
 | `keepsWidth` | boolean | no | Keep width when scaling (default true). |
 | `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
@@ -770,8 +779,11 @@ Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `pre
 | `drawnWidth` | number | no | Line width in canvas points (0.5–40). |
 | `endAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the end's ink sits on its point. |
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
+| `endHeadAngle` | number | no | The end head's own tip half-angle in degrees (15–60); unlinks the heads. |
+| `endHeadLength` | number | no | The end head's own length in widths (2–10); unlinks the heads. |
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60). |
 | `headLength` | number | no | Head length in arrow widths (2–10). |
+| `headsLinked` | boolean | no | Link (both heads take the start head's values) or unlink the heads. |
 | `keepsWidth` | boolean | no | Keep width when scaling (default true). |
 | `layer` | string — `front`, `back` | no | Where an arrow in this style goes: front or back. |
 | `opacity` | number | no | 0…1. |
