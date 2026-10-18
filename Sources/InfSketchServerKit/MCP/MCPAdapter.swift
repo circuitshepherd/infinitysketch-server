@@ -853,8 +853,7 @@ public actor MCPAdapter {
                 A tag whose elements no longer exist is simply ABSENT from the reply rather than \
                 a dangling id, so an empty answer means "those elements are gone", not "the \
                 lookup failed". Tags are set with tag_elements, or at creation time by \
-                draw_strokes / add_text / add_image / fill_region / draw_dots (an arrow is tagged \
-                with tag_elements after add_arrow). Use list_tags to \
+                draw_strokes / add_text / add_image / add_arrow / fill_region / draw_dots. Use list_tags to \
                 see what a document already has.
 
                 REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. \
@@ -1864,6 +1863,10 @@ public actor MCPAdapter {
                                            "description": "How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`."]),
                     "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20,
                                                  "description": "A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp."]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for the new arrow (see tag_elements); find it again later with find_elements.",
+                    ]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
@@ -4795,7 +4798,7 @@ public actor MCPAdapter {
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
-                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
@@ -4808,7 +4811,11 @@ public actor MCPAdapter {
             catch { return Self.errorResult("invalidArguments") }
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "arrows")
+                // An app without `arrowTags` decodes `tags` by IGNORING it and answers success, so a
+                // call that names tags goes only to a device that writes them.
+                let tagged: Bool = { if case .array(let t)? = envelope["tags"] { return !t.isEmpty }; return false }()
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
+                                                       capability: tagged ? "arrows+arrowTags" : "arrows")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5518,7 +5525,8 @@ public actor MCPAdapter {
             return declaredArguments(of: t).subtracting(["docId"])
         }
         if case .array(let items)? = arguments?["arrows"] {
-            let allowed = declared("add_arrow")
+            // A preview is never stored, so it has nothing to tag.
+            let allowed = declared("add_arrow").subtracting(["tags"])
             for (index, item) in items.enumerated() {
                 guard case .object(let fields) = item else { return "invalidArgument: arrows[\(index)] must be an object" }
                 if let bad = fields.keys.sorted().first(where: { !allowed.contains($0) }) {

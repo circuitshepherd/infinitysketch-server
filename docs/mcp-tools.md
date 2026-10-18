@@ -596,6 +596,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+| `tags` | array | no | Durable tags for the new arrow (see tag_elements); find it again later with find_elements. |
 
 Each item of `nodes`:
 
@@ -915,7 +916,7 @@ Resolve TAGS to element ids, so you can act on them with any tool that takes ids
 
 Ids come back in DOCUMENT order — strokes in drawing order, then texts, then images, then arrows — so a tagged series is returned in a stable, meaningful sequence.
 
-A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / fill_region / draw_dots (an arrow is tagged with tag_elements after add_arrow). Use list_tags to see what a document already has.
+A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / add_arrow / fill_region / draw_dots. Use list_tags to see what a document already has.
 
 REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object rather than present-and-empty, so check for the key before indexing it.
 

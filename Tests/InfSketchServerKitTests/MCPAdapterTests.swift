@@ -2279,6 +2279,36 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// add_arrow's `tags` reach only an `arrowTags` device: an older app would ignore the key and
+    /// answer success with an untagged arrow. A call without tags still reaches it.
+    @Test func addArrowTagsGoOnlyToADeviceThatWritesThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows"])
+        defer { Task { await old.close() } }
+        let line: Value = .array([.array([0, 0]), .array([50, 0])])
+        let (refused, refusedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": line, "tags": .array(["axis"])])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, plainIsError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "arrowTags"])
+        defer { Task { await device.close() } }
+        let (_, taggedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": line, "tags": .array(["axis"])])
+        #expect(taggedIsError != true)
+        let last = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+        #expect(spec["tags"] as? [String] == ["axis"])
+        await server.stop()
+    }
+
     /// restore_stroke_widths names what it was given (whole-branch review #5).
     @Test func restoreWidthsNamesStrokesAndArrows() {
         let arrow = UUID().uuidString
