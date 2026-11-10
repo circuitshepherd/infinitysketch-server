@@ -15,7 +15,7 @@ it carries the rules that span tools. This page is the per-tool detail.
 
 ## Documents
 
-A `docId` is a filename stem. Writes are compare-and-swap guarded by bytes; a stale write is rejected with `docChangedDuringOp` rather than clobbering.
+A `docId` is the document's id — stable across renames; `list_docs` reports it beside the name. Every document argument also takes the NAME, when no other document shares it. Writes are compare-and-swap guarded by bytes; a stale write is rejected with `docChangedDuringOp` rather than clobbering.
 
 | Tool | Summary |
 |---|---|

@@ -40,6 +40,30 @@ import Testing
         (try object(data)["placedObjects"] as! [[String: Any]]).map { $0["id"] as! String }
     }
 
+    /// A document written by a NEWER app than this server knows is refused by every direct edit
+    /// — the app's own rule. v1.4.0 had none: handed a format-5 document it looked in the keys
+    /// format 4 used, found nothing, and told the agent the text did not exist. Reads stay
+    /// lenient, and the format this server was released with is edited as before.
+    @Test func aNewerFormatIsRefusedByEveryEdit() throws {
+        let newer = Data(String(decoding: Self.fixture, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 5", with: "\"formatVersion\": \(DocJSON.knownFormatVersion + 1)").utf8)
+        let refusal = DocJSON.DocJSONError.documentFormatNewer(file: DocJSON.knownFormatVersion + 1)
+        #expect(throws: refusal) { _ = try DocJSON.addText(to: newer, id: UUID(), text: "t", x: 0, y: 0, pinned: false) }
+        #expect(throws: refusal) { _ = try DocJSON.editText(in: newer, textId: Self.t1, newText: "t", x: nil, y: nil) }
+        #expect(throws: refusal) { _ = try DocJSON.removeText(from: newer, textId: Self.t1) }
+        #expect(throws: refusal) { _ = try DocJSON.removeImage(from: newer, imageId: Self.i1) }
+        #expect(throws: refusal) { _ = try DocJSON.removeArrow(from: newer, arrowId: Self.t1) }
+        #expect(throws: refusal) { _ = try DocJSON.setPinned(from: newer, ids: [Self.t1], pinned: true) }
+        #expect(throws: refusal) { _ = try DocJSON.setPaper(from: newer, light: "#FFFFFF", dark: nil, transparent: nil) }
+        #expect(try DocJSON.summary(from: newer).texts.count == 2, "a read stays lenient")
+
+        let current = Data(String(decoding: Self.fixture, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 5", with: "\"formatVersion\": \(DocJSON.knownFormatVersion)").utf8)
+        #expect(try Self.ids(try DocJSON.removeText(from: current, textId: Self.t1)) == [Self.i1, Self.t2])
+        // The app's file format at this server's release — raise both together.
+        #expect(DocJSON.knownFormatVersion == 6)
+    }
+
     @Test func theSummaryReadsTextsFromTheList() throws {
         let s = try DocJSON.summary(from: Self.fixture)
         #expect(s.texts.map(\.id) == [Self.t1, Self.t2])

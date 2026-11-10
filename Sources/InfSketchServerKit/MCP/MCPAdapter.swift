@@ -5382,10 +5382,29 @@ public actor MCPAdapter {
             } catch {
                 return Self.errorResult("deviceFailed: \(error)")
             }
+            // The device says which ids actually changed layer. None: nothing is written (a
+            // pointless write bumps `seq` for every subscriber and spends the agent's one
+            // `undo_last_edit` on an edit that changed nothing). An absent or undecodable meta
+            // means WRITE IT — the bytes are the device's own and the write is CAS-guarded.
+            struct SetLayerMeta: Decodable {
+                let movedIds: [String]
+                let unchangedIds: [String]
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(SetLayerMeta.self, from: $0) }
+            if let meta, meta.movedIds.isEmpty {
+                return CallTool.Result(content: [.text(
+                    text: "no change: \(ids.count == 1 ? "the element is" : "all \(ids.count) elements are") "
+                        + "already in the \(layer) layer — nothing was written",
+                    annotations: nil, _meta: nil)])
+            }
+            let movedCount = meta?.movedIds.count ?? ids.count
+            let unchangedCount = meta?.unchangedIds.count ?? 0
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
-                "moved \(ids.count) element(s) to the \(layer) layer in \(docId) at seq \(seq)"
+                var summary = "moved \(movedCount) element(s) to the \(layer) layer in \(docId) at seq \(seq)"
+                if unchangedCount > 0 { summary += "; \(unchangedCount) already there" }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -7050,6 +7069,10 @@ public actor MCPAdapter {
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
         case .arrowNotFound: return "arrowNotFound"
+        case .documentFormatNewer(let file):
+            // The app's own token for the same state, so an agent handles both alike.
+            return "\(DeviceCommandBroker.formatRefusalPrefix): file \(file), this server edits up to \(DocJSON.knownFormatVersion) — "
+                + "update infsketch-server"
         }
     }
 

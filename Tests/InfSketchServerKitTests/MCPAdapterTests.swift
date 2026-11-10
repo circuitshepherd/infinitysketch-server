@@ -3687,6 +3687,39 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `set_layer` on elements already in that layer writes nothing and says so; with some of
+    /// them moved it counts what moved, never the ids it was handed.
+    @Test func setLayerWithNothingToMoveWritesNothing() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let caps: Set<String> = ["reorderElements", "objectLayerWrites"]
+        let idle = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"movedIds":[],"unchangedIds":["a","b"]}"#.utf8)), capabilities: caps)
+        let (content, isError) = try await client.callTool(name: "set_layer", arguments: [
+            "docId": "d", "ids": .array([.string("a"), .string("b")]), "layer": "front"])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("no change") && text.contains("already in the front layer"), "got \(text)")
+        #expect(!text.contains("seq"), "nothing was written, so there is no seq to quote: \(text)")
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        #expect(Data(base64Encoded: try #require(rawContents[0].blob)) == Fixtures.docBytes)
+        await idle.close()
+
+        let moving = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"movedIds":["a"],"unchangedIds":["b"]}"#.utf8)), capabilities: caps)
+        defer { Task { await moving.close() } }
+        let (movedContent, movedError) = try await client.callTool(name: "set_layer", arguments: [
+            "docId": "d", "ids": .array([.string("a"), .string("b")]), "layer": "front"])
+        #expect(movedError != true)
+        let moved = toolResultText(movedContent)
+        #expect(moved.contains("moved 1 element(s)") && moved.contains("1 already there"), "got \(moved)")
+        await server.stop()
+    }
+
     /// A stroke carrying no scale is left alone — and when NONE of them carried one, the
     /// device's bytes are discarded rather than written. A pointless write bumps `seq` for
     /// every subscriber and spends the agent's one `undo_last_edit` on an edit that changed

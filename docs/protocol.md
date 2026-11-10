@@ -55,8 +55,17 @@ decodes the other's messages silently and acts on the wrong identity.
 
 `capabilities` declares what the client can do for the server — device-relayed ops (`render`,
 `createDoc`, `authorStrokes`, `authorText`, `authorImage`, `authorGrids`, `mergeDocs`,
-`copyElements`, `reorderElements`, `transformElements`, `controlSelection`, `provideContent`) and
-transport features (`blobOmission`).
+`copyElements`, `reorderElements`, `transformElements`, `controlSelection`, `provideContent`,
+`tagElements`, `snapObjects`), what a newer app adds to them (`arrows`, `arrowPresetWrites`,
+`arrowTags`, `textWrap`, `objectLayerWrites`) and transport features (`blobOmission`).
+
+**A capability is how a newer tool or argument reaches the agent surface without a wire-version
+bump.** The server asks for one capability, or for several joined with `+`
+(`transformElements+arrows`, `authorText+textWrap`), and sends the request only to a device that
+advertises EVERY part. An older app decodes an op spec with an extra key by ignoring it — it would
+leave the arrows out of a selection and answer success — so a call that names something newer
+joins that capability, and a call without it still reaches an older app. With devices connected
+and none offering a part, the tool answers `noDeviceAvailable` naming the missing part.
 
 ## Document identity and names
 

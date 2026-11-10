@@ -49,7 +49,21 @@ public enum DocJSON {
         case elementNotFound
         case invalidColor
         case arrowNotFound
+        /// The document was written by an app whose file format is newer than the one these
+        /// edits know (`knownFormatVersion`).
+        case documentFormatNewer(file: Int)
     }
+
+    /// The newest `.infsketch` format version the edits in this file understand — the app's
+    /// `SketchDocData.currentFormatVersion` at this server's release (6: one mixed `placedObjects`
+    /// list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
+    /// refuses it: a format change can move where elements live, and an edit made on the old
+    /// shape answers not-found for elements that exist, or writes a key the newer app no longer
+    /// reads. That is what v1.4.0 does to a format-5 document — it looks in `placedTextsData`,
+    /// finds nothing, and tells the agent the text is not there. The document itself stays an
+    /// opaque payload for sync; only these direct edits read its shape. **Raise this together
+    /// with the app's format version, in the same paired release.**
+    public static let knownFormatVersion = 6
 
     // MARK: - Read
 
@@ -92,7 +106,7 @@ public enum DocJSON {
         // so a non-finite coordinate can only come from a direct API misuse.
         precondition(x.isFinite && y.isFinite,
                      "DocJSON.addText: coordinates must be finite — JSON cannot encode NaN/Infinity")
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         let darkColorScheme = (doc["darkColorScheme"] as? Bool) ?? false
         var elements = rawTextElements(of: doc)
         var entry = makeEntry(
@@ -143,7 +157,7 @@ public enum DocJSON {
         // See addText: non-finite coordinates are a programmer error by contract.
         precondition((x?.isFinite ?? true) && (y?.isFinite ?? true),
                      "DocJSON.editText: coordinates must be finite — JSON cannot encode NaN/Infinity")
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         var elements = rawTextElements(of: doc)
         guard let index = entryIndex(withId: textId, in: elements),
               var entry = elements[index] as? [String: Any]
@@ -168,7 +182,7 @@ public enum DocJSON {
     /// unrecognized ones) untouched in place. Throws `.textNotFound` if no
     /// entry matches.
     public static func removeText(from bytes: Data, textId: String) throws -> Data {
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         var elements = rawTextElements(of: doc)
         guard let index = entryIndex(withId: textId, in: elements) else {
             throw DocJSONError.textNotFound
@@ -184,7 +198,7 @@ public enum DocJSON {
     /// 2026-10-15). Throws `.arrowNotFound` when no arrow has that id (a document without an
     /// object list has no arrows).
     public static func removeArrow(from bytes: Data, arrowId: String) throws -> Data {
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         guard usesObjectList(doc) else { throw DocJSONError.arrowNotFound }
         var arrows = elements(.arrow, of: doc)
         guard let index = entryIndex(withId: arrowId, in: arrows) else {
@@ -203,7 +217,7 @@ public enum DocJSON {
     /// in either array) is left untouched in place. Throws `.imageNotFound`
     /// if no placed image matches `imageId`.
     public static func removeImage(from bytes: Data, imageId: String) throws -> Data {
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         var placed = elements(.image, of: doc)
         guard let index = entryIndex(withId: imageId, in: placed) else {
             throw DocJSONError.imageNotFound
@@ -230,7 +244,7 @@ public enum DocJSON {
     /// place (the `[Any]`-per-element robustness rule). Strokes have no `pinned`
     /// field and are not involved.
     public static func setPinned(from bytes: Data, ids: [String], pinned: Bool) throws -> Data {
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         let texts = elements(.text, of: doc)
         let images = elements(.image, of: doc)
         let arrows = usesObjectList(doc) ? elements(.arrow, of: doc) : []
@@ -282,7 +296,7 @@ public enum DocJSON {
             guard let c = colorModelDict(fromHex: hex) else { throw DocJSONError.invalidColor }
             return c
         }
-        var doc = try parseDocument(bytes)
+        var doc = try parseDocumentForEdit(bytes)
         if let lightDict { doc["backgroundColor"] = lightDict }
         if let darkDict { doc["backgroundColorDark"] = darkDict }
         if let transparent { doc["transparentBackground"] = transparent }
@@ -318,6 +332,17 @@ public enum DocJSON {
             throw DocJSONError.invalidDocumentJSON
         }
         return dict
+    }
+
+    /// `parseDocument` for a WRITE: a document newer than `knownFormatVersion` is refused (a file
+    /// without the key is format 1). Reads stay lenient — a summary of what this build can see
+    /// harms nothing.
+    private static func parseDocumentForEdit(_ bytes: Data) throws -> [String: Any] {
+        let doc = try parseDocument(bytes)
+        if let version = (doc["formatVersion"] as? NSNumber)?.intValue, version > knownFormatVersion {
+            throw DocJSONError.documentFormatNewer(file: version)
+        }
+        return doc
     }
 
     private static func serialize(_ doc: [String: Any]) throws -> Data {

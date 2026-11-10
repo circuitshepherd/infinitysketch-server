@@ -23,7 +23,8 @@ Swift 6.3.3). Windows users do not need a toolchain at all — there is a
   server. On a Mac, which cannot scan its own screen, the web overview offers the same as a click:
   **Open InfinitySketch**.
 - **AI agents over MCP.** `http://<host>:<port>/mcp` exposes the document store to agents: listing,
-  rendering (PNG), stroke/text/image/grid authoring and revision, selection control, tagging,
+  rendering (PNG), stroke/text/image/arrow/grid authoring and revision, object layers, selection
+  control, tagging,
   merging, undo. Operations that need PencilKit (drawing, rendering) are relayed to a connected
   device; everything else the server does itself. Agent edits land live on open canvases.
 
