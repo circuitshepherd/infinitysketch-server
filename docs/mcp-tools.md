@@ -582,7 +582,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
 | `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -598,7 +598,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
 | `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
 | `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints. |
 | `opacity` | number | no | 0…1 — the color's alpha (overrides the alpha of `color`). |
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
@@ -614,7 +614,7 @@ Each item of `nodes`:
 | `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
 | `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
-| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+| `type` | string — `corner`, `smooth` | no | corner (default) or smooth. |
 
 ### `reshape_arrow`
 
@@ -625,7 +625,7 @@ Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_
 | `arrowId` | string | yes | The arrow (list_arrows' `id`). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`. |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints. |
 
 Each item of `nodes`:
 
@@ -636,7 +636,7 @@ Each item of `nodes`:
 | `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
 | `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
-| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+| `type` | string — `corner`, `smooth` | no | corner (default) or smooth. |
 
 ### `restyle_arrows`
 
@@ -650,7 +650,7 @@ Changes the style of named arrows — a `preset`, and/or any of `startHead`, `en
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
 | `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -691,7 +691,7 @@ Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `doc
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
 | `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
@@ -776,7 +776,7 @@ Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `pre
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
 | `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |

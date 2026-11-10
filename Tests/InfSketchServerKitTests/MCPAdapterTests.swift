@@ -2236,7 +2236,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
         _ = try await client.callTool(name: "add_arrow", arguments: [
             "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false,
-            "dashAlignment": "corners", "dashOffset": 1.5])
+            "dashAlignment": "fitPattern", "dashCorners": false, "dashOffset": 1.5])
         _ = try await client.callTool(name: "restyle_arrows", arguments: [
             "docId": "d", "ids": .array(["A1"]), "keepsWidth": true,
             "dashAlignment": "exact", "dashAnchor": "end", "dashEndsOn": "gap"])
@@ -2245,7 +2245,8 @@ private actor FakeStrokeOpDevice {
         let specs = try requests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
         #expect(specs.first?["keepsWidth"] as? Bool == false)
         #expect(specs.last?["keepsWidth"] as? Bool == true)
-        #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
+        #expect(specs.first?["dashAlignment"] as? String == "fitPattern" && specs.first?["dashCorners"] as? Bool == false
+                && specs.first?["dashOffset"] as? Double == 1.5)
         #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
         await server.stop()
     }
@@ -2337,7 +2338,7 @@ private actor FakeStrokeOpDevice {
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows", "arrowPresetWrites"])
         defer { Task { await device.close() } }
         for (tool, args, op) in [
-            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "corners", "keepsWidth": false], "saveArrowPreset"),
+            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "fitPattern", "keepsWidth": false], "saveArrowPreset"),
             ("rename_arrow_preset", ["id": "X", "newName": "Rule"], "renameArrowPreset"),
             ("delete_arrow_preset", ["name": "Line"], "deleteArrowPreset"),
             ("move_arrow_preset", ["name": "Line", "toIndex": 2], "moveArrowPreset"),
