@@ -76,7 +76,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 |---|---|
 | [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
 | [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
-| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic… |
+| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points —… |
 | [`reshape_arrow`](#reshape_arrow) | Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. |
 | [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`,… |
 | [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
@@ -116,7 +116,7 @@ Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve 
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
 | [`set_layer`](#set_layer) | Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by… |
-| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
+| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
 
 ## Selection
 
@@ -572,7 +572,7 @@ REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor
 
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -957,7 +957,7 @@ An ARROW is baked: its points move; a `scale` changes its drawnWidth only when i
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width. |
+| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points, so its heads never skew. A scale changes its WIDTH only when the arrow's `keepsWidth` is false (list_arrows reports it; true by default, so a scaled arrow keeps its width). |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
@@ -980,12 +980,12 @@ ATOMIC: every id must resolve or nothing is reset. When every named element is a
 
 ### `reorder_elements`
 
-Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom — each WITHIN its own element type, mirroring the app's Bring-to-Front/Send-to-Back tool: a stroke moves among strokes, and a text, image or arrow only trades places with objects OF ITS KIND, so it can still draw below an object of another kind in the same layer. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; restyle_arrows changes an arrow's, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom. A stroke moves among the strokes. A text, image or arrow moves to the top (or bottom) of the LAYER it paints in, above (or below) every object of that layer WHATEVER ITS KIND — texts, images and arrows share one order. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; set_layer changes it, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type and layer. |
+| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — strokes among the strokes, each text, image or arrow within the layer it paints in. |
 | `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
@@ -1013,9 +1013,9 @@ Sets the `pinned` flag on the named placed texts, images and/or arrows of a docu
 
 ### `copy_elements`
 
-Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies. At least one of `strokeIds`/ `textIds`/`imageIds` is required. REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images and arrows keeping the order they had among each other. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds` is required. REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
-REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and `createdImageIds` — deliberately not `strokeIds`/`textIds`/`imageIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
+REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds` and `createdArrowIds` — deliberately not `strokeIds`/`textIds`/ `imageIds`/`arrowIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -1065,11 +1065,11 @@ Read the user's CURRENT live rect-select selection on a connected device. REQUIR
 
 THE REPLY'S KEYS, because guessing them wastes a round trip and fails SILENTLY (absent JSON keys read as nothing, not as an error):
 
-- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image", id, canvasBounds, pinned}`, so one list covers   all three kinds.
+- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image"|"arrow", id, canvasBounds, pinned}`, so one   list covers all four kinds.
 - `canvasBounds` — the union of the selected elements. NOT "bounds".
 - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the   user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
 - `canvasReferencePoint` — the pivot the user placed, absent if they have not.
-- `active` — something is selected. `sessionActive` — select mode is ON. These   DIFFER: a user in select mode who has not swiped yet, or whose swipe was   perfectly straight (a zero-height marquee selects nothing), gives   `sessionActive: true` with `active: false`.
+- `active` — something is selected. `sessionActive` — select mode is ON. These   DIFFER: a user in select mode who has not swiped yet, or whose marquee   touched nothing, gives `sessionActive: true` with `active: false`.
 - `uncommittedCopy` — a duplicate or paste that will be DELETED if you clear the   selection rather than committing it.
 - `signature` — opaque; pass back as transform_selection's `expect`.
 

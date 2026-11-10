@@ -41,6 +41,13 @@ public actor DeviceCommandBroker {
         /// document open. Distinct from `noDeviceAvailable`: a device is there, the document is
         /// not open on it, and sending the op to it anyway could only answer "nothing selected".
         case documentNotOpen
+        /// Devices ARE connected and none of them offers what the request needs — in practice an
+        /// app older than this server (a capability is how a newer tool or argument reaches the
+        /// surface with no wire-version bump). Distinct from `noDeviceAvailable` because the cure
+        /// differs: connecting a device will not help, updating one will. `needs` is every part
+        /// of the joined capability, `missing` the parts no connected device offers (empty when
+        /// each part is offered somewhere but no single device offers them all).
+        case capabilityMissing(needs: [String], missing: [String], devices: Int)
         case deviceFailed(String)
     }
 
@@ -259,6 +266,16 @@ public actor DeviceCommandBroker {
     /// Ops that act on LIVE state on the device (a user's selection) and so must never be sent
     /// twice: a device that was merely slow may still apply the first.
     private static let neverRetriedCapabilities: Set<String> = ["controlSelection"]
+
+    /// The reason an app gives for a document written by a newer app than itself
+    /// (`documentFormatNewerThanApp: file N, app supports M`). The app decides it before running
+    /// the op, so nothing was changed and another device may be asked.
+    static let formatRefusalPrefix = "documentFormatNewerThanApp"
+
+    private static func refusedTheFormat(_ error: DeviceCommandError) -> Bool {
+        if case .deviceFailed(let why) = error { return why.hasPrefix(formatRefusalPrefix) }
+        return false
+    }
 
     /// A capability may JOIN several with `+` (`controlSelection+arrows`, 2026-10-14): the request
     /// goes only to a device that has every part — how an op naming a newer element kind avoids an
@@ -577,6 +594,15 @@ public actor DeviceCommandBroker {
             if pickConnection(capability: capability, deviceId: deviceId) != nil {
                 throw DeviceCommandError.documentNotOpen
             }
+            // Devices are connected, none can do THIS: name the part that is missing. (A request
+            // addressed to one named device keeps `noDeviceAvailable` — its caller tries the next
+            // holder on exactly that.)
+            if deviceId == nil, !connections.isEmpty {
+                let needs = Self.parts(of: capability)
+                let offered = connections.reduce(into: Set<String>()) { $0.formUnion($1.capabilities) }
+                throw DeviceCommandError.capabilityMissing(
+                    needs: needs.sorted(), missing: needs.subtracting(offered).sorted(), devices: connections.count)
+            }
             throw DeviceCommandError.noDeviceAvailable
         }
         if routing == .requireOpen, let nothingSelected {
@@ -610,11 +636,16 @@ public actor DeviceCommandBroker {
                 on: first, docId: docId, timeout: timeout, sentBytes: sentBytes,
                 takesDocumentLock: takesDocumentLock, send: send)
         } catch let error as DeviceCommandError
-            where (error == .deviceTimeout || error == .deviceDisconnected)
+            where (error == .deviceTimeout || error == .deviceDisconnected || Self.refusedTheFormat(error))
                 && deviceId == nil && Self.neverRetriedCapabilities.isDisjoint(with: Self.parts(of: capability)) {
             // One more try on ANOTHER capable device, for ops that only turn bytes into bytes: a
             // device that answers late (or went away) costs nothing but a discarded reply. A
             // request addressed to one named device (a holder fetch) has no other device to ask.
+            //
+            // The same for a device whose app is too OLD FOR THE DOCUMENT (`refusedTheFormat`):
+            // while one device is updated and another is not, the older one may be the one that
+            // spoke last, and it refuses a newer document before the op touches anything — with
+            // the updated device connected and able the whole time.
             guard let next = pick(excluding: [first.id]) else {
                 throw error
             }

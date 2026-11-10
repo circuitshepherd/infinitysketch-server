@@ -238,7 +238,10 @@ public actor SessionManager {
     /// backoff while the document stays watched and unopened. The page keeps what it has
     /// meanwhile — a stale picture is a defined state, a silently permanent one is not.
     private func noteRelayFailure(docId: String, px: Int, error: any Error) {
-        if case DeviceCommandBroker.DeviceCommandError.noDeviceAvailable = error {
+        var noDeviceCanRender = false
+        if case DeviceCommandBroker.DeviceCommandError.noDeviceAvailable = error { noDeviceCanRender = true }
+        if case DeviceCommandBroker.DeviceCommandError.capabilityMissing = error { noDeviceCanRender = true }
+        if noDeviceCanRender {
             // A device that connects re-triggers the relay itself (`deviceAppeared`).
             ServerLog.verbose("[relay] no device can render '\(docId)' at \(px) px; waiting for one")
             return
