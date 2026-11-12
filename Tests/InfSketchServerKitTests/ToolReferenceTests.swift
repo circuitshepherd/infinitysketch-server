@@ -44,7 +44,9 @@ enum ToolReference {
 
     static let groups: [Group] = [
         Group(title: "Documents",
-              blurb: "A `docId` is a filename stem. Writes are compare-and-swap guarded by bytes; "
+              blurb: "A `docId` is the document's id — stable across renames; `list_docs` reports it beside "
+                   + "the name. Every document argument also takes the NAME, when no other document shares it. "
+                   + "Writes are compare-and-swap guarded by bytes; "
                    + "a stale write is rejected with `docChangedDuringOp` rather than clobbering.",
               tools: ["list_docs", "list_open_docs", "create_doc", "fetch_doc", "replace_doc",
                       "delete_doc", "merge_docs", "set_paper", "undo_last_edit"]),

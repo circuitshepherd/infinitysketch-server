@@ -972,7 +972,7 @@ public actor MCPAdapter {
                     ]),
                     "arrowIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width.",
+                        "description": "Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points, so its heads never skew. A scale changes its WIDTH only when the arrow's `keepsWidth` is false (list_arrows reports it; true by default, so a scaled arrow keeps its width).",
                     ]),
                     "canvasTranslate": .object([
                         "type": "array", "items": .object(["type": "number"]),
@@ -1877,8 +1877,8 @@ public actor MCPAdapter {
             name: "add_arrow",
             description: """
                 Places an arrow — the same object the app's Arrow tool draws: a line through \
-                `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth \
-                points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front \
+                `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth \
+                points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front \
                 objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE \
                 (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
                 or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
@@ -1920,8 +1920,8 @@ public actor MCPAdapter {
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
-                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
-                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line."]),
                     "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
                     "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
                                            "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
@@ -2007,8 +2007,8 @@ public actor MCPAdapter {
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
-                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)),
-                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
+                                              "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line."]),
                     "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),
                     "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
                                            "description": "Where an `exact` pattern starts: start (default), end, or center (both ends cut alike)."]),
@@ -2878,16 +2878,15 @@ public actor MCPAdapter {
                 (absent JSON keys read as nothing, not as an error):
 
                 - `elements` — what is selected. NOT "strokes": each entry is \
-                  `{kind: "stroke"|"text"|"image", id, canvasBounds, pinned}`, so one list covers \
-                  all three kinds.
+                  `{kind: "stroke"|"text"|"image"|"arrow", id, canvasBounds, pinned}`, so one \
+                  list covers all four kinds.
                 - `canvasBounds` — the union of the selected elements. NOT "bounds".
                 - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the \
                   user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
                 - `canvasReferencePoint` — the pivot the user placed, absent if they have not.
                 - `active` — something is selected. `sessionActive` — select mode is ON. These \
-                  DIFFER: a user in select mode who has not swiped yet, or whose swipe was \
-                  perfectly straight (a zero-height marquee selects nothing), gives \
-                  `sessionActive: true` with `active: false`.
+                  DIFFER: a user in select mode who has not swiped yet, or whose marquee \
+                  touched nothing, gives `sessionActive: true` with `active: false`.
                 - `uncommittedCopy` — a duplicate or paste that will be DELETED if you clear the \
                   selection rather than committing it.
                 - `signature` — opaque; pass back as transform_selection's `expect`.
@@ -3291,20 +3290,22 @@ public actor MCPAdapter {
         Tool(
             name: "copy_elements",
             description: """
-                Copies named strokes/texts/images from document `source` INTO document \
+                Copies named strokes/texts/images/arrows from document `source` INTO document \
                 `target`, as FRESH clones (fresh ids) — unlike \
                 merge_docs, elements are never deduped by identity, so copying the same \
                 source element twice yields two distinct clones. `source` is left \
-                untouched; `target` gains the copies. At least one of `strokeIds`/ \
-                `textIds`/`imageIds` is required. \
+                untouched; `target` gains the copies, texts, images and arrows keeping the \
+                order they had among each other. At least one of `strokeIds`/ \
+                `textIds`/`imageIds`/`arrowIds` is required. \
                 REQUIRES a connected device with the copyElements capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: elementNotFound if an id \
                 isn't found in `source`. \(writeToolCaveats)
 
-                REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and \
-                `createdImageIds` — deliberately not `strokeIds`/`textIds`/`imageIds`, which are \
-                this tool's ARGUMENTS and name the elements in the SOURCE.
+                REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, \
+                `createdImageIds` and `createdArrowIds` — deliberately not `strokeIds`/`textIds`/ \
+                `imageIds`/`arrowIds`, which are this tool's ARGUMENTS and name the elements in \
+                the SOURCE.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -3342,16 +3343,15 @@ public actor MCPAdapter {
                 document — bring-to-front or send-to-back, authored by a connected \
                 InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` \
                 is required. `mode` selects the direction: "front" moves the named \
-                elements to the top of the draw order, "back" to the bottom — each \
-                WITHIN its own element type, mirroring the app's Bring-to-Front/Send-to-Back \
-                tool: a stroke moves among strokes, and a text, image or arrow only trades \
-                places with objects OF ITS KIND, so it can still draw below an object of \
-                another kind in the same layer. The document paints in LAYERS, bottom to \
-                top: pinned images, back objects (texts/images/arrows whose `layer` is \
-                "back"), the grid, strokes, front objects — this tool never moves anything \
-                between layers. list_texts/list_images/list_arrows report each object's \
-                `layer`; restyle_arrows changes an arrow's, and set_pinned moves an image \
-                into or out of the pinned-images layer. \
+                elements to the top of the draw order, "back" to the bottom. A stroke moves \
+                among the strokes. A text, image or arrow moves to the top (or bottom) of the \
+                LAYER it paints in, above (or below) every object of that layer WHATEVER ITS \
+                KIND — texts, images and arrows share one order. The document paints in \
+                LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose \
+                `layer` is "back"), the grid, strokes, front objects — this tool never moves \
+                anything between layers. list_texts/list_images/list_arrows report each \
+                object's `layer`; set_layer changes it, and set_pinned moves an image into or \
+                out of the pinned-images layer. \
                 REQUIRES a connected device with the reorderElements capability — fails \
                 with noDeviceAvailable if none is connected, deviceTimeout if it doesn't \
                 respond in time, unknownDoc if the document doesn't exist, and \
@@ -3385,7 +3385,7 @@ public actor MCPAdapter {
                     "mode": .object([
                         "type": "string",
                         "enum": .array(["front", "back"].map(Value.string)),
-                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — within each element type and layer.",
+                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — strokes among the strokes, each text, image or arrow within the layer it paints in.",
                     ]),
                 ]),
                 "required": .array(["docId", "mode"].map(Value.string)),
@@ -4497,6 +4497,7 @@ public actor MCPAdapter {
                 case .deviceTimeout: return Self.errorResult("deviceTimeout")
                 case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
                 case .documentNotOpen: return Self.errorResult("noDeviceAvailable")   // creation routes to any device
+                case .capabilityMissing: return Self.strokeOpErrorResult(error)
                 case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
                 }
             } catch {
@@ -4823,7 +4824,7 @@ public actor MCPAdapter {
             "endHeadAngle": .object(["type": "number", "description": "The end head's own tip half-angle in degrees (15–60); unlinks the heads."]),
             "headsLinked": .object(["type": "boolean", "description": "Link (both heads take the start head's values) or unlink the heads."]),
             "dashPattern": .object(["type": "array", "items": .object(["type": "number"]), "description": "Dash, gap … in widths; [] is solid."]),
-            "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact", "corners"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
+            "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)), "description": "How the dash pattern is laid along the shaft (see add_arrow)."]),
             "dashCorners": .object(["type": "boolean", "description": "The fit modes' Corners switch (see add_arrow)."]),
             "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)), "description": "Where an exact pattern starts."]),
             "dashEndsOn": .object(["type": "string", "enum": .array(["dash", "gap", "halfDash"].map(Value.string)), "description": "What a fitted shaft's ends finish on."]),
@@ -4842,14 +4843,14 @@ public actor MCPAdapter {
     static var arrowNodesProperty: Value {
         .object([
             "type": "array",
-            "description": "At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) (\"arc\" and \"manual\", older kinds, are read as smooth). Instead of canvasPoints.",
+            "description": "At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints.",
             "items": .object([
                 "type": "object",
                 "properties": .object([
                     "canvasX": .object(["type": "number"]),
                     "canvasY": .object(["type": "number"]),
-                    "type": .object(["type": "string", "enum": .array(["corner", "smooth", "arc", "manual"].map(Value.string)),
-                                     "description": "corner or smooth; arc and manual (older kinds) are read as smooth."]),
+                    "type": .object(["type": "string", "enum": .array(["corner", "smooth"].map(Value.string)),
+                                     "description": "corner (default) or smooth."]),
                     "join": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
                                      "description": "An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node."]),
                     "miterLimit": .object(["type": "number", "minimum": 1, "maximum": 20, "description": "A miter corner's limit in half widths (1–20)."]),
@@ -5381,10 +5382,29 @@ public actor MCPAdapter {
             } catch {
                 return Self.errorResult("deviceFailed: \(error)")
             }
+            // The device says which ids actually changed layer. None: nothing is written (a
+            // pointless write bumps `seq` for every subscriber and spends the agent's one
+            // `undo_last_edit` on an edit that changed nothing). An absent or undecodable meta
+            // means WRITE IT — the bytes are the device's own and the write is CAS-guarded.
+            struct SetLayerMeta: Decodable {
+                let movedIds: [String]
+                let unchangedIds: [String]
+            }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode(SetLayerMeta.self, from: $0) }
+            if let meta, meta.movedIds.isEmpty {
+                return CallTool.Result(content: [.text(
+                    text: "no change: \(ids.count == 1 ? "the element is" : "all \(ids.count) elements are") "
+                        + "already in the \(layer) layer — nothing was written",
+                    annotations: nil, _meta: nil)])
+            }
+            let movedCount = meta?.movedIds.count ?? ids.count
+            let unchangedCount = meta?.unchangedIds.count ?? 0
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
-                "moved \(ids.count) element(s) to the \(layer) layer in \(docId) at seq \(seq)"
+                var summary = "moved \(movedCount) element(s) to the \(layer) layer in \(docId) at seq \(seq)"
+                if unchangedCount > 0 { summary += "; \(unchangedCount) already there" }
+                return summary
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -6817,8 +6837,24 @@ public actor MCPAdapter {
         case .deviceTimeout: return Self.errorResult("deviceTimeout")
         case .deviceDisconnected: return Self.errorResult("deviceDisconnected")
         case .documentNotOpen: return Self.errorResult(Self.documentNotOpenReason)
+        case .capabilityMissing(let needs, let missing, let devices):
+            return Self.errorResult(Self.capabilityMissingReason(needs: needs, missing: missing, devices: devices))
         case .deviceFailed(let why): return Self.errorResult("deviceFailed: \(why)")
         }
+    }
+
+    /// `noDeviceAvailable` when devices ARE connected: the token stays the prefix, and the rest
+    /// names what is missing and the cure. Before, it read "1 device(s) connected, none offering
+    /// the capability this tool needs (offered: …)" without naming the capability — with an older
+    /// app connected that looked like a contradiction, since the device plainly was there.
+    static func capabilityMissingReason(needs: [String], missing: [String], devices: Int) -> String {
+        let all = needs.map { "`\($0)`" }.joined(separator: " + ")
+        let lacking = missing.isEmpty
+            ? "no single one offers all of \(all)"
+            : "none offers \(missing.map { "`\($0)`" }.joined(separator: ", "))"
+        let needed = missing == needs || missing.isEmpty ? "" : " (this call needs \(all))"
+        return "noDeviceAvailable — \(devices) device(s) connected, \(lacking)\(needed). "
+            + "The InfinitySketch app there is older than this server: update it."
     }
 
     /// A live-state op with no capable device that has the document open. The token stays
@@ -7033,6 +7069,10 @@ public actor MCPAdapter {
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
         case .arrowNotFound: return "arrowNotFound"
+        case .documentFormatNewer(let file):
+            // The app's own token for the same state, so an agent handles both alike.
+            return "\(DeviceCommandBroker.formatRefusalPrefix): file \(file), this server edits up to \(DocJSON.knownFormatVersion) — "
+                + "update infsketch-server"
         }
     }
 

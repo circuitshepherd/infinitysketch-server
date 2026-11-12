@@ -23,7 +23,8 @@ Swift 6.3.3). Windows users do not need a toolchain at all — there is a
   server. On a Mac, which cannot scan its own screen, the web overview offers the same as a click:
   **Open InfinitySketch**.
 - **AI agents over MCP.** `http://<host>:<port>/mcp` exposes the document store to agents: listing,
-  rendering (PNG), stroke/text/image/grid authoring and revision, selection control, tagging,
+  rendering (PNG), stroke/text/image/arrow/grid authoring and revision, object layers, selection
+  control, tagging,
   merging, undo. Operations that need PencilKit (drawing, rendering) are relayed to a connected
   device; everything else the server does itself. Agent edits land live on open canvases.
 
@@ -104,6 +105,7 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 
 | InfinitySketch (App Store) | infsketch-server tag | wire protocol |
 |---|---|---|
+| 2.5 (iOS and Mac) | v1.5.0 | 14 |
 | 2.4 (iOS and Mac) | v1.4.0 | 14 |
 | 2.3 (iOS and Mac) | v1.3.0 | 11 |
 | 2.2 (iOS and Mac) | v1.2.2 | 11 |
@@ -113,7 +115,16 @@ mismatched pair refuses cleanly at the handshake instead of failing somewhere su
 | 2.1 | v1.0.1 | 11 |
 | 2.1 | v1.0.0 | 11 |
 
-**v1.4.0 speaks wire 14 and pairs only with InfinitySketch 2.4** (`helloAck` names the server
+**v1.5.0 speaks wire 14, as v1.4.0 does**, so either connects to InfinitySketch 2.4 and 2.5 — but
+**pair v1.5.0 with 2.5**: it adds the agent tools for arrows (`add_arrow`, `reshape_arrow`,
+`restyle_arrows`, presets), object layers (`set_layer`, `layer` on texts, images and arrows, a
+`reorder_elements` that moves an object within its layer) and text wrap, which need 2.5 (with an
+older app a tool answers `noDeviceAvailable` naming the missing capability), and 2.5 writes file
+format 6, which v1.4.0's direct edits misread — on a document saved by 2.5, v1.4.0's `edit_text`,
+`remove_text`, `remove_image` and `set_pinned` answer not-found for elements that exist. v1.5.0's
+direct edits refuse a document newer than the format they know instead.
+
+**v1.4.0 speaks wire 14 and pairs with InfinitySketch 2.4** (`helloAck` names the server
 instance, per-document refusals replace connection-wide errors, a large op-spec rides the chunked
 payload; documents are addressed by `documentId`; a pre-identity documents folder is migrated at
 first start; the server keeps each document's versions and a subscribe names the base it merges

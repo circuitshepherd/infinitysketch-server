@@ -152,6 +152,17 @@ enum AgentGuide {
     photo is thousands of points across; the reply names the bounds it actually occupied and the \
     source's pixel size, so size it from that rather than from a render.
 
+    ## Layers
+
+    **Texts, images and arrows are placed OBJECTS, in two layers.** A document paints, bottom to \
+    top: pinned images, BACK objects, the grid, the strokes, FRONT objects. A text or an arrow is \
+    `front` unless you say otherwise, an image `back`: `layer` on `add_text` / `add_image` / \
+    `add_arrow` sets it, `set_layer` moves existing ones, and `list_texts` / `list_images` / \
+    `list_arrows` report it. Within a layer the three kinds share ONE order — `reorder_elements` \
+    puts an object above (or below) everything in its layer, whatever its kind. So a caption that \
+    must sit behind the user's ink goes in `back`, and a callout over it stays `front`. Setting a \
+    layer needs an app with the `objectLayerWrites` capability; an older app is never asked.
+
     ## Arrows
 
     **An arrow is its own element, not a stroke** — what the app's Arrow tool draws: a line \
@@ -174,8 +185,7 @@ enum AgentGuide {
     button does the same). **A dashed line's pattern is laid by `dashAlignment`**: `fitGaps` \
     (default — dashes exact, gaps adjusted, ends as `dashEndsOn`), `fitPattern` or `exact` (from \
     `dashAnchor`), shifted by `dashOffset` (widths); with the fit modes `dashCorners` (default true) \
-    fits each run between corners on its own, a dash centered on every corner (the old value \
-    `corners` still reads as fitGaps with dashCorners true). **Corners turn round by default**: each interior corner point has its own `join` \
+    fits each run between corners on its own, a dash centered on every corner. **Corners turn round by default**: each interior corner point has its own `join` \
     (`round`, `miter` — sharp, cut to a bevel past its `miterLimit` in half widths — or `bevel`) in \
     `nodes`, and `cornerJoin` / `cornerMiterLimit` on add / restyle set every corner at once. \
     **The user's presets and new-arrow style are writable**: `save_arrow_preset`, \

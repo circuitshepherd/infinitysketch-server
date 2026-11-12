@@ -928,7 +928,8 @@ private struct ServerMessageReader {
         // This connection only ever advertised authorStrokes: a createDoc
         // request must find no capable device (the broker's own per-request
         // capability filter, not something Connection re-implements).
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.capabilityMissing(
+            needs: ["createDoc"], missing: ["createDoc"], devices: 1)) {
             _ = try await broker.requestCreation(docId: "d")
         }
     }

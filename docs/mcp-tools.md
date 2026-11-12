@@ -15,7 +15,7 @@ it carries the rules that span tools. This page is the per-tool detail.
 
 ## Documents
 
-A `docId` is a filename stem. Writes are compare-and-swap guarded by bytes; a stale write is rejected with `docChangedDuringOp` rather than clobbering.
+A `docId` is the document's id — stable across renames; `list_docs` reports it beside the name. Every document argument also takes the NAME, when no other document shares it. Writes are compare-and-swap guarded by bytes; a stale write is rejected with `docChangedDuringOp` rather than clobbering.
 
 | Tool | Summary |
 |---|---|
@@ -76,7 +76,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 |---|---|
 | [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
 | [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
-| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic… |
+| [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points —… |
 | [`reshape_arrow`](#reshape_arrow) | Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. |
 | [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`,… |
 | [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
@@ -116,7 +116,7 @@ Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve 
 | [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
 | [`set_layer`](#set_layer) | Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by… |
-| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
+| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
 
 ## Selection
 
@@ -572,7 +572,7 @@ REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor
 
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corners, smooth points and cubic handles — list_arrows' shape) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -582,7 +582,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
 | `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -598,7 +598,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
 | `keepsWidth` | boolean | no | Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`). |
 | `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front). |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints. |
 | `opacity` | number | no | 0…1 — the color's alpha (overrides the alpha of `color`). |
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
@@ -614,7 +614,7 @@ Each item of `nodes`:
 | `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
 | `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
-| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+| `type` | string — `corner`, `smooth` | no | corner (default) or smooth. |
 
 ### `reshape_arrow`
 
@@ -625,7 +625,7 @@ Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_
 | `arrowId` | string | yes | The arrow (list_arrows' `id`). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`. |
-| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default) ("arc" and "manual", older kinds, are read as smooth). Instead of canvasPoints. |
+| `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints. |
 
 Each item of `nodes`:
 
@@ -636,7 +636,7 @@ Each item of `nodes`:
 | `join` | string — `round`, `miter`, `bevel` | no | An interior corner's join (default: the arrow's cornerJoin). Not for an end or a smooth node. |
 | `miterLimit` | number | no | A miter corner's limit in half widths (1–20). |
 | `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
-| `type` | string — `corner`, `smooth`, `arc`, `manual` | no | corner or smooth; arc and manual (older kinds) are read as smooth. |
+| `type` | string — `corner`, `smooth` | no | corner (default) or smooth. |
 
 ### `restyle_arrows`
 
@@ -650,7 +650,7 @@ Changes the style of named arrows — a `preset`, and/or any of `startHead`, `en
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
 | `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. The retired value corners is accepted as fitGaps with dashCorners true. Ignored for a solid line. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line. |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts: start (default), end, or center (both ends cut alike). |
 | `dashCorners` | boolean | no | Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact. |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What both ends of a fitGaps / fitPattern shaft finish on: dash (default), gap, halfDash. |
@@ -691,7 +691,7 @@ Saves an arrow style preset. NEW by default — from an arrow (`arrowId` in `doc
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
 | `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
@@ -776,7 +776,7 @@ Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `pre
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How corners turn: round (default), miter (sharp) or bevel. |
 | `cornerMiterLimit` | number | no | A sharp corner's limit in half widths (1–20). |
-| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact`, `corners` | no | How the dash pattern is laid along the shaft (see add_arrow). |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How the dash pattern is laid along the shaft (see add_arrow). |
 | `dashAnchor` | string — `start`, `end`, `center` | no | Where an exact pattern starts. |
 | `dashCorners` | boolean | no | The fit modes' Corners switch (see add_arrow). |
 | `dashEndsOn` | string — `dash`, `gap`, `halfDash` | no | What a fitted shaft's ends finish on. |
@@ -957,7 +957,7 @@ An ARROW is baked: its points move; a `scale` changes its drawnWidth only when i
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points: its heads never skew and a uniform scale scales its width. |
+| `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points, so its heads never skew. A scale changes its WIDTH only when the arrow's `keepsWidth` is false (list_arrows reports it; true by default, so a scaled arrow keeps its width). |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
@@ -980,12 +980,12 @@ ATOMIC: every id must resolve or nothing is reset. When every named element is a
 
 ### `reorder_elements`
 
-Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom — each WITHIN its own element type, mirroring the app's Bring-to-Front/Send-to-Back tool: a stroke moves among strokes, and a text, image or arrow only trades places with objects OF ITS KIND, so it can still draw below an object of another kind in the same layer. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; restyle_arrows changes an arrow's, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom. A stroke moves among the strokes. A text, image or arrow moves to the top (or bottom) of the LAYER it paints in, above (or below) every object of that layer WHATEVER ITS KIND — texts, images and arrows share one order. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; set_layer changes it, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — within each element type and layer. |
+| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — strokes among the strokes, each text, image or arrow within the layer it paints in. |
 | `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
@@ -1013,9 +1013,9 @@ Sets the `pinned` flag on the named placed texts, images and/or arrows of a docu
 
 ### `copy_elements`
 
-Copies named strokes/texts/images from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies. At least one of `strokeIds`/ `textIds`/`imageIds` is required. REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images and arrows keeping the order they had among each other. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds` is required. REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
-REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds` and `createdImageIds` — deliberately not `strokeIds`/`textIds`/`imageIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
+REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds` and `createdArrowIds` — deliberately not `strokeIds`/`textIds`/ `imageIds`/`arrowIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -1065,11 +1065,11 @@ Read the user's CURRENT live rect-select selection on a connected device. REQUIR
 
 THE REPLY'S KEYS, because guessing them wastes a round trip and fails SILENTLY (absent JSON keys read as nothing, not as an error):
 
-- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image", id, canvasBounds, pinned}`, so one list covers   all three kinds.
+- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image"|"arrow", id, canvasBounds, pinned}`, so one   list covers all four kinds.
 - `canvasBounds` — the union of the selected elements. NOT "bounds".
 - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the   user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
 - `canvasReferencePoint` — the pivot the user placed, absent if they have not.
-- `active` — something is selected. `sessionActive` — select mode is ON. These   DIFFER: a user in select mode who has not swiped yet, or whose swipe was   perfectly straight (a zero-height marquee selects nothing), gives   `sessionActive: true` with `active: false`.
+- `active` — something is selected. `sessionActive` — select mode is ON. These   DIFFER: a user in select mode who has not swiped yet, or whose marquee   touched nothing, gives `sessionActive: true` with `active: false`.
 - `uncommittedCopy` — a duplicate or paste that will be DELETED if you clear the   selection rather than committing it.
 - `signature` — opaque; pass back as transform_selection's `expect`.
 

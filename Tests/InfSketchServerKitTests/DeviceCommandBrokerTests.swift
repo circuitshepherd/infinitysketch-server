@@ -240,13 +240,97 @@ private actor SentBox {
         #expect(DeviceCommandBroker.Routing.for(capability: "transformElements+arrows") == .preferOpen)
     }
 
-    @Test func noDeviceWithEveryPartIsNoDeviceAvailable() async {
+    /// A connected device without every part: the error names the part that is MISSING, so the
+    /// agent learns the device's app is too old rather than that no device is there.
+    @Test func noDeviceWithEveryPartNamesTheMissingPart() async {
         let broker = DeviceCommandBroker()
         await broker.register(connectionId: UUID(), capabilities: ["transformElements"]) { _ in }
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.capabilityMissing(
+            needs: ["arrows", "transformElements"], missing: ["arrows"], devices: 1)) {
             _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
                                                  capability: "transformElements+arrows")
         }
+        // Each part offered somewhere, by no single device: nothing is "missing", and it says so.
+        await broker.register(connectionId: UUID(), capabilities: ["arrows"]) { _ in }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.capabilityMissing(
+            needs: ["arrows", "transformElements"], missing: [], devices: 2)) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(),
+                                                 capability: "transformElements+arrows")
+        }
+    }
+
+    /// What the agent reads: the token first, then the part that is missing and the cure.
+    @Test func theMissingCapabilityIsNamedToTheAgent() {
+        let one = MCPAdapter.capabilityMissingReason(needs: ["authorText", "textWrap"], missing: ["textWrap"], devices: 1)
+        #expect(one.hasPrefix("noDeviceAvailable"))
+        #expect(one.contains("none offers `textWrap`") && one.contains("`authorText` + `textWrap`") && one.contains("update it"))
+        let whole = MCPAdapter.capabilityMissingReason(needs: ["arrows"], missing: ["arrows"], devices: 2)
+        #expect(whole.contains("2 device(s) connected, none offers `arrows`.") && !whole.contains("this call needs"))
+        let split = MCPAdapter.capabilityMissingReason(needs: ["arrows", "copyElements"], missing: [], devices: 2)
+        #expect(split.contains("no single one offers all of `arrows` + `copyElements`"))
+    }
+
+    /// With NOTHING connected it stays `noDeviceAvailable` — and so does a request addressed to
+    /// one named device, whose caller reads that as "try the next holder".
+    @Test func nothingConnectedIsStillNoDeviceAvailable() async {
+        let broker = DeviceCommandBroker()
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(), capability: "arrows")
+        }
+        await broker.register(connectionId: UUID(), deviceId: "devA", capabilities: ["authorStrokes"]) { _ in }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+            _ = try await broker.requestProvideContent(docId: "D", deviceId: "devB")
+        }
+    }
+
+    /// A device whose app is too old FOR THE DOCUMENT refuses before the op runs; the op is tried
+    /// once on another capable device. While one device is updated and one is not, the older one
+    /// may be the one that spoke last — it answered every op on a newer document with a refusal
+    /// while the updated device sat connected and able.
+    @Test func aFormatRefusalIsRetriedOnAnotherDevice() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(300))
+        let sentOld = SentBox()
+        let sentNew = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in
+            Task {
+                await sentNew.set(msg)
+                if case .strokeOpRequest(let rid, _, _, _, _, _) = msg {
+                    await broker.handleReply(requestId: rid, bytes: Data("ok".utf8), failureReason: nil)
+                }
+            }
+        }
+        // The older app, registered last: asked first.
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in
+            Task {
+                await sentOld.set(msg)
+                if case .strokeOpRequest(let rid, _, _, _, _, _) = msg {
+                    await broker.handleReply(requestId: rid, bytes: nil,
+                                             failureReason: "documentFormatNewerThanApp: file 6, app supports 4")
+                }
+            }
+        }
+        let result = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
+        #expect(result.bytes == Data("ok".utf8))
+        let askedOld = await sentOld.all().count, askedNew = await sentNew.all().count
+        #expect(askedOld == 1 && askedNew == 1)
+    }
+
+    /// Any OTHER refusal is the answer: the device ran its checks and said no.
+    @Test func anOrdinaryRefusalIsNotRetried() async throws {
+        let broker = DeviceCommandBroker(strokeOpTimeout: .milliseconds(300))
+        let sentOther = SentBox()
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sentOther.set(msg) } }
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in
+            Task {
+                if case .strokeOpRequest(let rid, _, _, _, _, _) = msg {
+                    await broker.handleReply(requestId: rid, bytes: nil, failureReason: "invalidSpec: canvasPoints")
+                }
+            }
+        }
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.deviceFailed("invalidSpec: canvasPoints")) {
+            _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
+        }
+        #expect(await sentOther.all().isEmpty)
     }
 
     // MARK: - Routing to the device with the document open (review finding 20)
@@ -548,7 +632,8 @@ private actor SentBox {
     @Test func createDocOnlyConnectionNotSelectedForStrokeOp() async {
         let broker = DeviceCommandBroker()
         await broker.register(connectionId: UUID(), capabilities: ["createDoc"]) { _ in }
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.capabilityMissing(
+            needs: ["authorStrokes"], missing: ["authorStrokes"], devices: 1)) {
             _ = try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data())
         }
     }
@@ -556,7 +641,8 @@ private actor SentBox {
     @Test func strokeOpOnlyConnectionNotSelectedForCreateDoc() async {
         let broker = DeviceCommandBroker()
         await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { _ in }
-        await #expect(throws: DeviceCommandBroker.DeviceCommandError.noDeviceAvailable) {
+        await #expect(throws: DeviceCommandBroker.DeviceCommandError.capabilityMissing(
+            needs: ["createDoc"], missing: ["createDoc"], devices: 1)) {
             _ = try await broker.requestCreation(docId: "D")
         }
     }

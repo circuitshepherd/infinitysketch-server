@@ -2236,7 +2236,7 @@ private actor FakeStrokeOpDevice {
         defer { Task { await device.close() } }
         _ = try await client.callTool(name: "add_arrow", arguments: [
             "docId": "d", "canvasPoints": .array([.array([0, 0]), .array([50, 0])]), "keepsWidth": false,
-            "dashAlignment": "corners", "dashOffset": 1.5])
+            "dashAlignment": "fitPattern", "dashCorners": false, "dashOffset": 1.5])
         _ = try await client.callTool(name: "restyle_arrows", arguments: [
             "docId": "d", "ids": .array(["A1"]), "keepsWidth": true,
             "dashAlignment": "exact", "dashAnchor": "end", "dashEndsOn": "gap"])
@@ -2245,7 +2245,8 @@ private actor FakeStrokeOpDevice {
         let specs = try requests.map { try #require(JSONSerialization.jsonObject(with: $0.spec) as? [String: Any]) }
         #expect(specs.first?["keepsWidth"] as? Bool == false)
         #expect(specs.last?["keepsWidth"] as? Bool == true)
-        #expect(specs.first?["dashAlignment"] as? String == "corners" && specs.first?["dashOffset"] as? Double == 1.5)
+        #expect(specs.first?["dashAlignment"] as? String == "fitPattern" && specs.first?["dashCorners"] as? Bool == false
+                && specs.first?["dashOffset"] as? Double == 1.5)
         #expect(specs.last?["dashAnchor"] as? String == "end" && specs.last?["dashEndsOn"] as? String == "gap")
         await server.stop()
     }
@@ -2337,7 +2338,7 @@ private actor FakeStrokeOpDevice {
         let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows", "arrowPresetWrites"])
         defer { Task { await device.close() } }
         for (tool, args, op) in [
-            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "corners", "keepsWidth": false], "saveArrowPreset"),
+            ("save_arrow_preset", ["name": Value.string("Mine"), "dashAlignment": "fitPattern", "keepsWidth": false], "saveArrowPreset"),
             ("rename_arrow_preset", ["id": "X", "newName": "Rule"], "renameArrowPreset"),
             ("delete_arrow_preset", ["name": "Line"], "deleteArrowPreset"),
             ("move_arrow_preset", ["name": "Line", "toIndex": 2], "moveArrowPreset"),
@@ -3684,6 +3685,39 @@ private actor FakeStrokeOpDevice {
         let rawBlob = try #require(rawContents[0].blob)
         #expect(Data(base64Encoded: rawBlob) == restoredBytes)
 
+        await server.stop()
+    }
+
+    /// `set_layer` on elements already in that layer writes nothing and says so; with some of
+    /// them moved it counts what moved, never the ids it was handed.
+    @Test func setLayerWithNothingToMoveWritesNothing() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let caps: Set<String> = ["reorderElements", "objectLayerWrites"]
+        let idle = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"movedIds":[],"unchangedIds":["a","b"]}"#.utf8)), capabilities: caps)
+        let (content, isError) = try await client.callTool(name: "set_layer", arguments: [
+            "docId": "d", "ids": .array([.string("a"), .string("b")]), "layer": "front"])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("no change") && text.contains("already in the front layer"), "got \(text)")
+        #expect(!text.contains("seq"), "nothing was written, so there is no seq to quote: \(text)")
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        #expect(Data(base64Encoded: try #require(rawContents[0].blob)) == Fixtures.docBytes)
+        await idle.close()
+
+        let moving = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(
+            bytes: Data(#"{"aaa001_thumbnailData":"","strokes":["rebuilt"]}"#.utf8),
+            meta: Data(#"{"movedIds":["a"],"unchangedIds":["b"]}"#.utf8)), capabilities: caps)
+        defer { Task { await moving.close() } }
+        let (movedContent, movedError) = try await client.callTool(name: "set_layer", arguments: [
+            "docId": "d", "ids": .array([.string("a"), .string("b")]), "layer": "front"])
+        #expect(movedError != true)
+        let moved = toolResultText(movedContent)
+        #expect(moved.contains("moved 1 element(s)") && moved.contains("1 already there"), "got \(moved)")
         await server.stop()
     }
 
