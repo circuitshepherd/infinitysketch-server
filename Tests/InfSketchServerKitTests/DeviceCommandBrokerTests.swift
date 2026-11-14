@@ -1141,3 +1141,40 @@ private actor SentBox {
         #expect(restored == doc3)
     }
 }
+
+/// A device that reconnects after its server slept leaves its old connection behind: the FIN
+/// never arrived. The second hello is the sign, and the broker has the OLDER connection asked
+/// whether it is still there.
+@Suite struct SameDeviceReconnectTests {
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func bump() { lock.lock(); value += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    @Test func aSecondConnectionOfTheSameDeviceHasTheOlderOneAsked() async {
+        let broker = DeviceCommandBroker()
+        let older = Counter(), newer = Counter(), other = Counter()
+        await broker.register(connectionId: UUID(), deviceId: "ipad", capabilities: ["render"],
+                              send: { _ in }, confirmAlive: { older.bump() })
+        await broker.register(connectionId: UUID(), deviceId: "mac", capabilities: ["render"],
+                              send: { _ in }, confirmAlive: { other.bump() })
+        #expect(older.count == 0, "another device connecting says nothing about this one")
+        await broker.register(connectionId: UUID(), deviceId: "ipad", capabilities: ["render"],
+                              send: { _ in }, confirmAlive: { newer.bump() })
+        #expect(older.count == 1)
+        #expect(newer.count == 0, "the connection that just said hello is not the doubtful one")
+        #expect(other.count == 0)
+    }
+
+    @Test func connectionsWithoutADeviceIdAreNeverAsked() async {
+        let broker = DeviceCommandBroker()
+        let first = Counter()
+        await broker.register(connectionId: UUID(), deviceId: nil, capabilities: ["render"],
+                              send: { _ in }, confirmAlive: { first.bump() })
+        await broker.register(connectionId: UUID(), deviceId: nil, capabilities: ["render"],
+                              send: { _ in }, confirmAlive: {})
+        #expect(first.count == 0)
+    }
+}

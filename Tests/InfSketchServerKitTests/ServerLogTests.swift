@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import FlyingFox
+import InfSketchWire
 @testable import InfSketchServerKit
 
 /// The one gate for operational log lines. Serialized: the gate is process-global state, and other
@@ -31,6 +33,83 @@ import Testing
         ServerLog.isVerbose = true
         ServerLog.verbose("serverlog-test-kept")
         #expect(captured.lines.contains("serverlog-test-kept"))
+    }
+
+    /// The lines somebody reads to learn WHEN something happened begin with the clock time.
+    @Test func aTimedLineBeginsWithTheClockTime() {
+        let originalFlag = ServerLog.isVerbose
+        let originalSink = ServerLog.verboseSink
+        defer { ServerLog.isVerbose = originalFlag; ServerLog.verboseSink = originalSink }
+        let captured = Capture()
+        ServerLog.verboseSink = { captured.append($0) }
+
+        ServerLog.isVerbose = false
+        ServerLog.timed("serverlog-timed-dropped")
+        #expect(!captured.lines.contains { $0.hasSuffix("serverlog-timed-dropped") })
+
+        ServerLog.isVerbose = true
+        ServerLog.timed("serverlog-timed-kept")
+        let line = captured.lines.first { $0.hasSuffix("serverlog-timed-kept") }
+        #expect(line?.wholeMatch(of: /\d\d:\d\d:\d\d serverlog-timed-kept/) != nil, "got \(line ?? "nothing")")
+    }
+
+    /// A connection's life is in the log: when it opened, who said hello on it, when and WHY it
+    /// closed. Without these a report like "the devices did not reconnect after the host's
+    /// standby" cannot be read off a log at all.
+    @Test func aConnectionsLifeIsLogged() async throws {
+        let originalFlag = ServerLog.isVerbose
+        let originalSink = ServerLog.verboseSink
+        defer { ServerLog.isVerbose = originalFlag; ServerLog.verboseSink = originalSink }
+        let captured = Capture()
+        ServerLog.verboseSink = { captured.append($0) }
+        ServerLog.isVerbose = true
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conn-log-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let manager = SessionManager(store: DirectoryDocumentStore(directory: dir), config: SessionConfig())
+        let (inStream, input) = AsyncStream<WSMessage>.makeStream()
+        let output = try await WSAdapter(manager: manager, config: SessionConfig(), broker: DeviceCommandBroker())
+            .makeMessages(for: inStream)
+        Task { for await _ in output {} }
+
+        // This connection's lines: the device id is its own.
+        let device = "logtest-\(UUID().uuidString)"
+        func lines() -> [String] { captured.lines.filter { $0.contains("[conn]") } }
+        input.yield(.text(try ClientMessage.hello(
+            protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: device).jsonText()))
+        await waitFor { lines().contains { $0.contains("hello") && $0.contains(device.prefix(16)) } }
+        let hello = lines().first { $0.contains("hello") && $0.contains(device.prefix(16)) }
+        let id = try #require(hello?.split(separator: " ").dropFirst(2).first, "a hello line names its connection")
+
+        input.finish()
+        await waitFor { lines().contains { $0.contains(" \(id) closed") } }
+        #expect(lines().contains { $0.contains(" \(id) opened") })
+        #expect(lines().contains { $0.contains(" \(id) closed") && $0.contains("the peer closed it") })
+    }
+
+    /// A connection the server gives up on says why.
+    @Test func aDroppedConnectionSaysWhy() async throws {
+        let originalFlag = ServerLog.isVerbose
+        let originalSink = ServerLog.verboseSink
+        defer { ServerLog.isVerbose = originalFlag; ServerLog.verboseSink = originalSink }
+        let captured = Capture()
+        ServerLog.verboseSink = { captured.append($0) }
+        ServerLog.isVerbose = true
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conn-log-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let manager = SessionManager(store: DirectoryDocumentStore(directory: dir), config: SessionConfig())
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .seconds(300),
+            keepaliveTickInterval: .milliseconds(10), helloDeadline: .milliseconds(100))
+        let (inStream, _) = AsyncStream<WSMessage>.makeStream()
+        let output = try await WSAdapter(manager: manager, config: config, broker: DeviceCommandBroker())
+            .makeMessages(for: inStream)
+        Task { for await _ in output {} }
+        await waitFor { captured.lines.contains { $0.contains("[conn]") && $0.contains("no hello") } }
+        #expect(captured.lines.contains { $0.contains("[conn]") && $0.contains("closed") && $0.contains("no hello") })
     }
 
     /// A document failing to reach disk must never be silent (Josef, 2026-08-14): `error` ignores

@@ -37,6 +37,12 @@ enum AgentGuide {
       cost you pay on every call.** 0.5 to check a layout, higher only to inspect detail.
     - **`undo_last_edit`** — take back your own last write, on any document. Only your writes are \
       recorded, never the user's, so it can never reverse their work.
+    - **Drawing needs a device that is running.** Strokes, renders and most writes are made by a \
+      connected app, and a phone or tablet stops when its screen locks. While you call tools the \
+      server keeps its own machine awake and asks the connected devices to keep their screens \
+      on, until ten minutes after your last call. After a longer pause a call can fail \
+      `noDeviceAvailable`: ask the person to unlock the device — it reconnects within seconds — \
+      and call again.
 
     ## Where to put things
 

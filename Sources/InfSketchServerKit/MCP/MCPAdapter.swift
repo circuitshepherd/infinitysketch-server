@@ -61,6 +61,8 @@ public actor MCPAdapter {
     /// render directory (the store-injecting init used by tests). A render is still perfectly
     /// serviceable without one — it just comes back inline, which is the default anyway.
     private let renderFileStore: RenderFileStore?
+    /// Told of every tool call (`AgentWork`); nil where a test builds the adapter alone.
+    private let agentWork: AgentWork?
     /// What each agent tool call changed, so `undo_last_edit` can take one back. Deliberately NOT
     /// on `DocumentSession` — see the type's own doc comment for why agent scope has to hold by
     /// construction here rather than by a flag inside `submit`.
@@ -104,13 +106,15 @@ public actor MCPAdapter {
         idleTimeout: Duration = .seconds(3600),
         cleanupInterval: Duration = .seconds(60),
         broker: DeviceCommandBroker,
-        renderFileStore: RenderFileStore? = nil
+        renderFileStore: RenderFileStore? = nil,
+        agentWork: AgentWork? = nil
     ) {
         self.manager = manager
         self.idleTimeout = idleTimeout
         self.cleanupInterval = cleanupInterval
         self.broker = broker
         self.renderFileStore = renderFileStore
+        self.agentWork = agentWork
     }
 
     /// Starts the notification pump and the idle-session cleanup loop on
@@ -3455,6 +3459,9 @@ public actor MCPAdapter {
     /// Every tool call, with one post-processing step: an error that names only a SYMPTOM gets
     /// the context that makes it actionable (`enrichedError`).
     private func handleCallTool(name: String, arguments: [String: Value]?) async throws -> CallTool.Result {
+        // Every call counts as agent work, a refused one included: the host stays awake and the
+        // devices keep their screens on for a while from it (`AgentWork`).
+        await agentWork?.noteToolCall()
         if let refusal = Self.enforceKnownArguments(name: name, arguments: arguments) { return refusal }
         let (resolved, unresolved, refusal) = await resolvingDocRefs(arguments)
         if let refusal { return refusal }

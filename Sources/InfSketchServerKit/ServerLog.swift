@@ -38,6 +38,20 @@ public enum ServerLog {
     }
 
     /// A genuine failure: always visible, stderr.
+    /// A verbose line that begins with the wall-clock time — for the lines somebody reads to
+    /// learn WHEN something happened (a connection opening or closing, a standby). Only these:
+    /// the other verbose lines are matched by scripts as they are.
+    public static func timed(_ line: String, now: Date = Date()) {
+        guard isVerbose else { return }
+        verboseSink("\(clockTime(now)) \(line)")
+    }
+
+    /// `HH:mm:ss` in the machine's own time zone.
+    static func clockTime(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: date)
+        return String(format: "%02d:%02d:%02d", parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
+    }
+
     public static func error(_ line: String) {
         errorSink(line)
     }

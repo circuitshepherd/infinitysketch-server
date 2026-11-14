@@ -16,6 +16,7 @@ public struct DocSummary: Codable, Equatable, Sendable {
 
 public final class InfSketchServer: Sendable {
     public let manager: SessionManager
+    let agentWork: AgentWork
     private let store: any DocumentStore
     /// Where `render_sketch(writeToFile: true)` puts its PNGs, or nil when this server has no
     /// render directory. Held here as well as on the adapter because the HTTP route serves the same
@@ -56,7 +57,8 @@ public final class InfSketchServer: Sendable {
     }
 
     public convenience init(
-        port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
+        port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig(),
+        hostAwake: any HostAwake = NoHostAwake()
     ) {
         // The document store FIRST, in its own statement: its init runs the identity migration,
         // which renames document files to their ids — and the version store's start-up cleanup
@@ -75,7 +77,8 @@ public final class InfSketchServer: Sendable {
             // never surface as a document.
             renderFileStore: RenderFileStore(
                 directory: docsDirectory.appendingPathComponent(
-                    RenderFileStore.directoryName, isDirectory: true)))
+                    RenderFileStore.directoryName, isDirectory: true)),
+            hostAwake: hostAwake)
     }
 
     /// Store-injecting designated init — `internal`, for tests only (the
@@ -91,7 +94,8 @@ public final class InfSketchServer: Sendable {
     init(
         port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
         versions: (any VersionStore)? = nil,
-        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil
+        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil,
+        hostAwake: any HostAwake = NoHostAwake()
     ) {
         self.store = store
         self.renderFileStore = renderFileStore
@@ -124,12 +128,18 @@ public final class InfSketchServer: Sendable {
             createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout,
             quietAfter: config.keepaliveIdleInterval)
         self.deviceCommandBroker = deviceCommandBroker
+        // "An agent is at work": every tool call feeds it, the host is kept awake for it and the
+        // status subscribers are told (`AgentWork`). `hostAwake` holds nothing unless `main.swift`
+        // passes the real one.
+        let agentWork = AgentWork(hostAwake: hostAwake) { [manager] in await manager.announceAgentWork() }
+        self.agentWork = agentWork
         self.mcpAdapter = MCPAdapter(
             manager: manager,
             idleTimeout: config.mcpSessionIdleTimeout,
             cleanupInterval: config.mcpSessionCleanupInterval,
             broker: deviceCommandBroker,
-            renderFileStore: renderFileStore)
+            renderFileStore: renderFileStore,
+            agentWork: agentWork)
     }
 
     /// Configures routes and serves until stopped.
@@ -146,6 +156,20 @@ public final class InfSketchServer: Sendable {
         let stopFlag = self.stopFlag
         let http = self.http
         let readiness = self.readiness
+        // Says in the log that the process did not run for a while (the host's standby) — what a
+        // report of devices not coming back has to be read against. Not one of the group's tasks:
+        // `run()` must return the moment the server stops, not at this loop's next tick.
+        let suspensionLog = Task {
+            let interval = Duration.seconds(5)
+            var watch = SuspensionWatch(interval: interval, now: .now)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if let gap = watch.tick(now: .now), !Task.isCancelled {
+                    ServerLog.timed("[server] running again after about \(gap.components.seconds) s without running (the host was in standby, or the process was stopped)")
+                }
+            }
+        }
+        defer { suspensionLog.cancel() }
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
@@ -413,7 +437,8 @@ public final class InfSketchServer: Sendable {
         await http.appendRoute(
             "GET /ws",
             to: OriginCheckedHTTPHandler(
-                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)),
+                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker,
+                                            agentWork: agentWork)),
                 allowedHostNames: Set(config.allowedHostNames)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like

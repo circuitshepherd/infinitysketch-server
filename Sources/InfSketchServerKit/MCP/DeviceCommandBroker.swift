@@ -132,6 +132,9 @@ public actor DeviceCommandBroker {
         let deviceId: String?
         let capabilities: Set<String>
         let send: @Sendable (ServerMessage) -> Void
+        /// Has this connection asked whether its peer is still there (a ping with the ordinary
+        /// grace) — see `register`.
+        let confirmAlive: @Sendable () -> Void
         /// When the peer last sent anything (fed by `noteActivity`); registration counts.
         var lastActivity: ContinuousClock.Instant
     }
@@ -223,13 +226,25 @@ public actor DeviceCommandBroker {
     /// WSAdapter calls at hello with the connection's full hello capability
     /// set. Most-recently-registered, capability-matching connection is
     /// preferred for new requests of a given kind.
+    ///
+    /// **A device that says hello while an older connection of the SAME device is still
+    /// registered has that older connection ASKED whether it is there** (`confirmAlive`). After
+    /// a host standby the device reconnects, and the connection it had is dead with nothing to
+    /// say so: the device gave up on its side and its FIN never arrived. Asked, never closed on
+    /// sight — two installs restored from one backup share a device id, and closing would make
+    /// them disconnect each other for ever. A dead one fails the ping within its grace.
     public func register(
         connectionId: UUID, deviceId: String? = nil, capabilities: Set<String>,
-        send: @escaping @Sendable (ServerMessage) -> Void
+        send: @escaping @Sendable (ServerMessage) -> Void,
+        confirmAlive: @escaping @Sendable () -> Void = {}
     ) {
         connections.removeAll { $0.id == connectionId }
+        if let deviceId {
+            for older in connections where older.deviceId == deviceId { older.confirmAlive() }
+        }
         connections.append(Connection(id: connectionId, deviceId: deviceId,
                                       capabilities: capabilities, send: send,
+                                      confirmAlive: confirmAlive,
                                       lastActivity: ContinuousClock.now))
     }
 
