@@ -1178,3 +1178,102 @@ private actor SentBox {
         #expect(first.count == 0)
     }
 }
+
+/// A request that finds no device connected WAITS a little for one, instead of failing at once.
+///
+/// The devices come back within seconds of the host's standby ending, of the app returning to the
+/// front, of a server restart — and an agent's call that arrived in exactly those seconds was
+/// answered `noDeviceAvailable` for a device that was already on its way.
+@Suite struct DeviceWaitTests {
+    typealias BrokerError = DeviceCommandBroker.DeviceCommandError
+
+    @Test func aRequestWithNoDeviceIsServedByOneThatConnectsMeanwhile() async throws {
+        let broker = DeviceCommandBroker(deviceWait: .seconds(30))
+        let sent = SentBox()
+        let task = Task { try await broker.requestCreation(docId: "D") }
+        // The request is waiting — a state the broker reports, not a pause of the test's.
+        await waitFor { await broker.requestsWaitingForADevice == 1 }
+        #expect(await broker.requestsWaitingForADevice == 1)
+
+        await broker.register(connectionId: UUID(), capabilities: ["createDoc"]) { msg in Task { await sent.set(msg) } }
+        let request = try #require(await sent.awaitMessage(), "the device that connected is asked")
+        guard case .createDocRequest(let rid, "D") = request else { Issue.record("wrong msg"); return }
+        await broker.handleReply(requestId: rid, bytes: Data("T".utf8), failureReason: nil)
+        #expect(try await task.value == Data("T".utf8))
+        #expect(await broker.requestsWaitingForADevice == 0)
+    }
+
+    /// No device comes: the same error as before, after the wait and not sooner.
+    @Test func withNoDeviceTheRequestFailsOnlyAfterTheWait() async {
+        let wait = Duration.milliseconds(300)
+        let broker = DeviceCommandBroker(deviceWait: wait)
+        let before = ContinuousClock.now
+        await #expect(throws: BrokerError.noDeviceAvailable) {
+            _ = try await broker.requestCreation(docId: "D")
+        }
+        #expect(ContinuousClock.now - before >= wait)
+        #expect(await broker.requestsWaitingForADevice == 0)
+    }
+
+    /// A device that cannot do this job is connected: waiting changes nothing, the cure is to
+    /// update the app, and the error says so at once. (The wait is far longer than this test.)
+    @Test func aConnectedDeviceWithoutTheCapabilityIsNotWaitedOn() async {
+        let broker = DeviceCommandBroker(deviceWait: .seconds(120))
+        await broker.register(connectionId: UUID(), capabilities: ["render"]) { _ in }
+        let before = ContinuousClock.now
+        do {
+            _ = try await broker.requestCreation(docId: "D")
+            Issue.record("expected an error")
+        } catch let error as BrokerError {
+            guard case .capabilityMissing = error else { Issue.record("got \(error)"); return }
+        } catch { Issue.record("got \(error)") }
+        #expect(ContinuousClock.now - before < .seconds(60))
+    }
+
+    /// A content fetch names ONE device, and its caller tries the next holder on a refusal: a wait
+    /// here would stall every subscribe behind a holder that is away.
+    @Test func aRequestForOneNamedDeviceDoesNotWait() async {
+        let broker = DeviceCommandBroker(deviceWait: .seconds(120))
+        let before = ContinuousClock.now
+        await #expect(throws: BrokerError.noDeviceAvailable) {
+            _ = try await broker.requestProvideContent(docId: "D", deviceId: "holder")
+        }
+        #expect(ContinuousClock.now - before < .seconds(60))
+    }
+
+    /// A device that connects WITHOUT the capability ends the wait: the answer is then the one
+    /// that names the missing part.
+    @Test func aDeviceThatCannotServeItEndsTheWait() async {
+        let broker = DeviceCommandBroker(deviceWait: .seconds(120))
+        let task = Task { try await broker.requestCreation(docId: "D") }
+        await waitFor { await broker.requestsWaitingForADevice == 1 }
+        await broker.register(connectionId: UUID(), capabilities: ["render"]) { _ in }
+        do {
+            _ = try await task.value
+            Issue.record("expected an error")
+        } catch let error as BrokerError {
+            guard case .capabilityMissing = error else { Issue.record("got \(error)"); return }
+        } catch { Issue.record("got \(error)") }
+    }
+
+    /// The wording of an absence: seconds while it is short, minutes after that.
+    @Test func anAbsenceIsWordedInSecondsThenMinutes() {
+        #expect(DeviceCommandBroker.worded(.seconds(12)) == "12 s")
+        #expect(DeviceCommandBroker.worded(.milliseconds(400)) == "under a second")
+        #expect(DeviceCommandBroker.worded(.seconds(89)) == "89 s")
+        #expect(DeviceCommandBroker.worded(.seconds(200)) == "3 min")
+        #expect(DeviceCommandBroker.worded(.seconds(7300)) == "2 h")
+    }
+
+    /// What the error text is made from: when the last device left.
+    @Test func theBrokerKnowsWhenTheLastDeviceLeft() async {
+        let broker = DeviceCommandBroker()
+        #expect(await broker.lastDeviceLeftAgo == nil, "no device was ever connected")
+        let id = UUID()
+        await broker.register(connectionId: id, capabilities: ["render"]) { _ in }
+        #expect(await broker.lastDeviceLeftAgo == nil, "one is connected")
+        await broker.unregister(connectionId: id)
+        let ago = await broker.lastDeviceLeftAgo
+        #expect(ago != nil)
+    }
+}

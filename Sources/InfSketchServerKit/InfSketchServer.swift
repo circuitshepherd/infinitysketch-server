@@ -126,7 +126,7 @@ public final class InfSketchServer: Sendable {
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
             createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout,
-            quietAfter: config.keepaliveIdleInterval)
+            quietAfter: config.keepaliveIdleInterval, deviceWait: config.deviceWait)
         self.deviceCommandBroker = deviceCommandBroker
         // "An agent is at work": every tool call feeds it, the host is kept awake for it and the
         // status subscribers are told (`AgentWork`). `hostAwake` holds nothing unless `main.swift`

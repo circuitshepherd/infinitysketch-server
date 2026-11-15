@@ -3689,10 +3689,24 @@ public actor MCPAdapter {
             // Two different problems wear this one word: nothing connected at all, or something
             // connected that cannot do this particular job.
             let (count, capabilities) = await broker.connectionSummary()
-            let clause = count == 0
-                ? "no device is connected to this server (open the app with the mirror enabled)"
-                : "\(count) device(s) connected, none offering the capability this tool needs "
-                  + "(offered: \(capabilities.sorted().joined(separator: ", ")))"
+            guard count == 0 else {
+                return Self.errorResult("\(text) — \(count) device(s) connected, none offering the capability "
+                    + "this tool needs (offered: \(capabilities.sorted().joined(separator: ", ")))")
+            }
+            // Nothing connected. Say what the caller cannot know: that this call already waited,
+            // and how long the last device has been gone — "it left 20 s ago" and "it left two
+            // hours ago" are different situations with the same word.
+            let waited = await broker.configuredDeviceWait
+            var clause = "no device is connected to this server"
+            if let gone = await broker.lastDeviceLeftAgo {
+                clause += ": the last one disconnected \(DeviceCommandBroker.worded(gone)) ago"
+                    + (waited > .zero ? ", and none came back in the \(DeviceCommandBroker.worded(waited)) this call waited" : "")
+                    + ". A phone or tablet disconnects when its screen locks; unlock it with the app "
+                    + "in front (mirror enabled) and call again"
+            } else {
+                clause += (waited > .zero ? " (this call waited \(DeviceCommandBroker.worded(waited)) for one)" : "")
+                    + ". Open the app with the mirror enabled"
+            }
             return Self.errorResult("\(text) — \(clause)")
         }
 

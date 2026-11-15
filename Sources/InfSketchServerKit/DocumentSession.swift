@@ -101,6 +101,10 @@ public struct SessionConfig: Sendable {
     /// A device that really closed the document answers `noSelectionActive` itself, which is the
     /// same answer.
     public var unsubscribeRoutingGrace: Duration
+    /// How long an agent's request that finds no device connected waits for one
+    /// (`DeviceCommandBroker.deviceWait`). Zero — the default, and every test's — answers at
+    /// once; `main.swift` sets 15 s.
+    public var deviceWait: Duration
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -121,8 +125,10 @@ public struct SessionConfig: Sendable {
         maxTransferBytes: Int = TransferReassembler<ClientMessage>.defaultMaxTotalBytes,
         writeStallTimeout: Duration = .seconds(30),
         allowedHostNames: [String] = [],
-        unsubscribeRoutingGrace: Duration = .seconds(5)
+        unsubscribeRoutingGrace: Duration = .seconds(5),
+        deviceWait: Duration = .zero
     ) {
+        self.deviceWait = deviceWait
         self.unsubscribeRoutingGrace = unsubscribeRoutingGrace
         self.allowedHostNames = allowedHostNames
         self.writeStallTimeout = writeStallTimeout

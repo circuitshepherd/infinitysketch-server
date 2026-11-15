@@ -55,7 +55,8 @@ and why its connection closed, and when the machine came back from standby).
 connected device and relayed by this server, so a machine that goes to standby in the middle of a
 session ends it. From an agent's first tool call until ten minutes after its last one, the server
 holds off the machine's *idle* standby (macOS and Windows; not Linux) and asks the connected devices
-to keep their screens on. Closing the lid or choosing Sleep still works. `--no-keep-awake` turns the
+to keep their screens on. An agent's call that finds no device connected waits 15 seconds for one
+before it is refused. Closing the lid or choosing Sleep still works. `--no-keep-awake` turns the
 first half off; the devices have their own switch, *Stay Awake While Agents Work*, in the app's
 settings.
 

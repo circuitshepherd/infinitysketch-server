@@ -154,7 +154,9 @@ if let limit = AcceptResilience.raiseFileDescriptorLimit(), limit.new != limit.o
     ServerLog.verbose("[server] open-file limit raised from \(limit.old) to \(limit.new)")
 }
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory,
-                             config: SessionConfig(allowedHostNames: allowedHostNames),
+                             // 15 s: an agent's call that finds no device waits that long for one
+                             // (`DeviceCommandBroker.deviceWait`) — the app is back within 8 s.
+                             config: SessionConfig(allowedHostNames: allowedHostNames, deviceWait: .seconds(15)),
                              hostAwake: keepHostAwake ? SystemHostAwake() : NoHostAwake())
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 

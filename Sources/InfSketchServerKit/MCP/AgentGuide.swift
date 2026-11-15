@@ -40,9 +40,10 @@ enum AgentGuide {
     - **Drawing needs a device that is running.** Strokes, renders and most writes are made by a \
       connected app, and a phone or tablet stops when its screen locks. While you call tools the \
       server keeps its own machine awake and asks the connected devices to keep their screens \
-      on, until ten minutes after your last call. After a longer pause a call can fail \
-      `noDeviceAvailable`: ask the person to unlock the device — it reconnects within seconds — \
-      and call again.
+      on, until ten minutes after your last call. A call that finds no device waits 15 seconds \
+      for one before it fails `noDeviceAvailable`, and the error says how long ago the last \
+      device left: ask the person to unlock the device — it reconnects within seconds — and \
+      call again.
 
     ## Where to put things
 
