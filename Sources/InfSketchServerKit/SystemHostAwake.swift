@@ -68,8 +68,17 @@ public final class SystemHostAwake: HostAwake, @unchecked Sendable {
             }
             request = handle
         }
-        _ = PowerSetRequest(request, PowerRequestSystemRequired)
-        _ = PowerSetRequest(request, PowerRequestExecutionRequired)
+        // Both calls return a plain `Bool` in Swift's import (compiled and run on Windows 11,
+        // 2026-11-15: both true on an S3 desktop). Held when either took: system-required is
+        // the classic standby's, execution-required a Modern Standby machine's. Not set after a
+        // refusal, so the next work period asks again — and the log does not claim a hold.
+        let systemHeld = PowerSetRequest(request, PowerRequestSystemRequired)
+        let systemError: DWORD = systemHeld ? 0 : GetLastError()
+        let executionHeld = PowerSetRequest(request, PowerRequestExecutionRequired)
+        guard systemHeld || executionHeld else {
+            ServerLog.timed("[power] the power request was refused (error \(systemError)); this machine may go to standby while an agent works")
+            return
+        }
         isSet = true
         ServerLog.timed("[power] this machine's idle standby is held off")
         #endif
