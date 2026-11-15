@@ -132,6 +132,15 @@ struct ConnectionHealth {
         return .none
     }
 
+    /// Ask the peer to prove it is there NOW, with the ordinary grace — for a moment that makes
+    /// it doubtful without proving anything: another connection said hello as the same device.
+    /// A question already outstanding stands; it is not asked twice.
+    mutating func askNow(now: ContinuousClock.Instant) -> Action {
+        if let dropped { return .drop(reason: dropped) }
+        guard pingSentAt == nil else { return .none }
+        return sendPing(at: now, bytesAhead: bytesSinceProof)
+    }
+
     /// A gap between two ticks this much longer than the interval means the process did not run
     /// — the host slept, or it was stopped. The one-second floor keeps a millisecond test tick
     /// from mistaking an ordinary scheduling hiccup for one.
@@ -145,12 +154,25 @@ struct ConnectionHealth {
         // buffered pong is read — so a ping outstanding across a sleep dropped a peer that had
         // answered (measured: 1008 within 2 ms of a SIGSTOP of 15–90 s). The peer could not have
         // answered while we were not running, so every deadline restarts from now.
+        //
+        // And a peer with no question outstanding is ASKED now, rather than left for the idle
+        // interval: after a standby of more than a minute the device has given up on its side
+        // (its silence watchdog) and its FIN never arrived, so the connection is dead — and
+        // restarting the interval kept it, its subscriptions and its place among the devices an
+        // agent's request can be sent to, for another 40 s. One that is there answers.
         defer { lastTickAt = now }
         if let gap = suspensionGap, let lastTickAt, now - lastTickAt > gap {
             lastProofAt = now
-            if pingSentAt != nil { pingSentAt = now }
-            if helloArmedAt != nil { helloArmedAt = now }
-            return .none
+            if helloArmedAt != nil {
+                // Not asked: the app reads the first message after its hello as the reply to it.
+                helloArmedAt = now
+                return .none
+            }
+            if pingSentAt != nil {
+                pingSentAt = now
+                return .none
+            }
+            return sendPing(at: now, bytesAhead: bytesSinceProof)
         }
         if let helloDeadline, let helloArmedAt, now - helloArmedAt > helloDeadline {
             dropped = .noHello

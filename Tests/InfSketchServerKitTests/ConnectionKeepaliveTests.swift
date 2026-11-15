@@ -60,11 +60,12 @@ struct ConnectionKeepaliveTests {
         let collector: Collector
         private let pump: Task<Void, Never>
 
-        init(manager: SessionManager, config: SessionConfig) async throws {
+        init(manager: SessionManager, config: SessionConfig,
+             broker: DeviceCommandBroker = DeviceCommandBroker()) async throws {
             let (inStream, inCont) = AsyncStream<WSMessage>.makeStream()
             self.input = inCont
             let output = try await WSAdapter(
-                manager: manager, config: config, broker: DeviceCommandBroker()
+                manager: manager, config: config, broker: broker
             ).makeMessages(for: inStream)
             let collector = Collector()
             self.collector = collector
@@ -103,6 +104,57 @@ struct ConnectionKeepaliveTests {
             }
             return await condition(collector)
         }
+    }
+
+    /// The device reconnects after its server slept: the connection it had is dead, and nothing
+    /// arrives to say so. The second hello has the FIRST connection asked at once — the idle
+    /// keepalive is far away here — and, silent, it is closed; the new one is left alone.
+    @Test func aSecondHelloFromTheSameDeviceClosesTheDeadFirstConnection() async throws {
+        let manager = try Self.makeManager()
+        let broker = DeviceCommandBroker()
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: .milliseconds(300),
+            keepaliveTickInterval: .milliseconds(10))
+        let first = try await Harness(manager: manager, config: config, broker: broker)
+        defer { first.finish() }
+        try first.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: "ipad"))
+        #expect(await first.wait { _ in await broker.connectionSummary().count == 1 }, "the first is registered")
+        #expect(await first.collector.pingCount == 0)
+
+        let second = try await Harness(manager: manager, config: config, broker: broker)
+        defer { second.finish() }
+        try second.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: "ipad"))
+
+        #expect(await first.wait { await $0.pingCount == 1 }, "the older connection is asked")
+        #expect(await first.wait { await $0.closed }, "and, not answering, is closed")
+        #expect(await second.collector.pingCount == 0)
+        #expect(await second.collector.closed == false)
+    }
+
+    /// Two installs restored from one backup share a device id. Each is there, each answers, and
+    /// neither loses its connection to the other's hello.
+    @Test func aSecondHelloLeavesAFirstConnectionThatAnswers() async throws {
+        let manager = try Self.makeManager()
+        let broker = DeviceCommandBroker()
+        // The grace is the margin this test has to answer in (see `fastConfig`), so it is wide;
+        // the wait below is longer than it, or an unanswered ping would pass too.
+        let grace = Duration.milliseconds(1500)
+        let config = SessionConfig(
+            keepaliveIdleInterval: .seconds(300), keepalivePingGrace: grace,
+            keepaliveTickInterval: .milliseconds(10))
+        let first = try await Harness(manager: manager, config: config, broker: broker)
+        defer { first.finish() }
+        try first.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: "ipad"))
+        // Which connection is the OLDER one is decided by the order they register in, so the
+        // second says hello only once the first is registered.
+        #expect(await first.wait { _ in await broker.connectionSummary().count == 1 })
+        let second = try await Harness(manager: manager, config: config, broker: broker)
+        defer { second.finish() }
+        try second.send(.hello(protocolVersion: WireProtocol.version, capabilities: ["render"], deviceId: "ipad"))
+        #expect(await first.wait { await $0.pingCount == 1 })
+        try first.send(.pong)
+        let closed = await first.wait(upTo: grace + .milliseconds(500)) { await $0.closed }
+        #expect(!closed, "it answered, so it outlives the grace")
     }
 
     /// A socket that connects and never says hello is closed at the hello deadline, even though

@@ -132,6 +132,9 @@ public actor DeviceCommandBroker {
         let deviceId: String?
         let capabilities: Set<String>
         let send: @Sendable (ServerMessage) -> Void
+        /// Has this connection asked whether its peer is still there (a ping with the ordinary
+        /// grace) — see `register`.
+        let confirmAlive: @Sendable () -> Void
         /// When the peer last sent anything (fed by `noteActivity`); registration counts.
         var lastActivity: ContinuousClock.Instant
     }
@@ -214,23 +217,112 @@ public actor DeviceCommandBroker {
     private let quietAfter: Duration
 
     public init(createTimeout: Duration = .seconds(10), strokeOpTimeout: Duration = .seconds(20),
-                quietAfter: Duration = .seconds(30)) {
+                quietAfter: Duration = .seconds(30), deviceWait: Duration = .zero) {
         self.createTimeout = createTimeout
         self.strokeOpTimeout = strokeOpTimeout
         self.quietAfter = quietAfter
+        self.deviceWait = deviceWait
+    }
+
+    // MARK: - waiting for a device
+
+    /// How long a request that finds NO device connected waits for one before it is answered
+    /// `noDeviceAvailable`. Zero (the library's default, and every test's) answers at once;
+    /// `main.swift` sets it.
+    ///
+    /// **Why.** The devices are back within seconds of the host's standby ending, of the app
+    /// returning to the front, of a server restart — and an agent's call that arrived in exactly
+    /// those seconds was refused for a device that was already on its way. The app retries every
+    /// 3 s with a 5 s attempt (`ReconnectSchedule`), so the wait has to cover 8 s and the hello.
+    ///
+    /// **What waits and what does not.** Only "no device is connected at all". A device that is
+    /// connected and cannot do the job (`capabilityMissing`) is answered at once — the cure is an
+    /// app update, not time — and one that connects during the wait ENDS it, whatever it can do.
+    /// A request addressed to one named device (a content fetch) never waits: its caller tries
+    /// the next holder on the refusal, and a wait would stall every subscribe behind a holder
+    /// that is away. A live-selection op that finds a device but not the document open is
+    /// answered `documentNotOpen` as before.
+    ///
+    /// The wait is taken BEFORE the per-document lock and before the device is picked, so a
+    /// waiting request holds nothing. The bytes its caller read are older by the wait when the
+    /// device answers; the write is compare-and-swap guarded, so a document that changed
+    /// meanwhile refuses it (`docChangedDuringOp`) rather than being overwritten.
+    private let deviceWait: Duration
+    private var deviceWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    /// When the last connected device left; nil while one is connected, and before the first.
+    private var lastDeviceLeftAt: ContinuousClock.Instant?
+
+    /// Requests waiting for a device right now.
+    public var requestsWaitingForADevice: Int { deviceWaiters.count }
+
+    /// How long ago the last device left — for the `noDeviceAvailable` text. nil while a device
+    /// is connected, and when none ever was.
+    public var lastDeviceLeftAgo: Duration? {
+        lastDeviceLeftAt.map { ContinuousClock.now - $0 }
+    }
+
+    /// The wait a request that found no device was given, for the error text.
+    public var configuredDeviceWait: Duration { deviceWait }
+
+    /// A length of time as the error text says it: seconds while it is short, then minutes, hours.
+    public nonisolated static func worded(_ duration: Duration) -> String {
+        let seconds = duration.components.seconds
+        switch seconds {
+        case ..<1: return "under a second"
+        case ..<90: return "\(seconds) s"
+        case ..<5400: return "\(seconds / 60) min"
+        default: return "\(seconds / 3600) h"
+        }
+    }
+
+    /// Suspends until a device registers or `deadline` passes, whichever is first.
+    private func waitForARegistration(until deadline: ContinuousClock.Instant) async {
+        let id = UUID()
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            await self?.endDeviceWait(id)
+        }
+        await withCheckedContinuation { continuation in
+            deviceWaiters[id] = continuation
+        }
+        timeout.cancel()
+    }
+
+    private func endDeviceWait(_ id: UUID) {
+        deviceWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func wakeDeviceWaiters() {
+        let waiters = deviceWaiters
+        deviceWaiters.removeAll()
+        for waiter in waiters.values { waiter.resume() }
     }
 
     /// WSAdapter calls at hello with the connection's full hello capability
     /// set. Most-recently-registered, capability-matching connection is
     /// preferred for new requests of a given kind.
+    ///
+    /// **A device that says hello while an older connection of the SAME device is still
+    /// registered has that older connection ASKED whether it is there** (`confirmAlive`). After
+    /// a host standby the device reconnects, and the connection it had is dead with nothing to
+    /// say so: the device gave up on its side and its FIN never arrived. Asked, never closed on
+    /// sight — two installs restored from one backup share a device id, and closing would make
+    /// them disconnect each other for ever. A dead one fails the ping within its grace.
     public func register(
         connectionId: UUID, deviceId: String? = nil, capabilities: Set<String>,
-        send: @escaping @Sendable (ServerMessage) -> Void
+        send: @escaping @Sendable (ServerMessage) -> Void,
+        confirmAlive: @escaping @Sendable () -> Void = {}
     ) {
         connections.removeAll { $0.id == connectionId }
+        if let deviceId {
+            for older in connections where older.deviceId == deviceId { older.confirmAlive() }
+        }
         connections.append(Connection(id: connectionId, deviceId: deviceId,
                                       capabilities: capabilities, send: send,
+                                      confirmAlive: confirmAlive,
                                       lastActivity: ContinuousClock.now))
+        lastDeviceLeftAt = nil
+        wakeDeviceWaiters()
     }
 
     /// The peer on this connection sent something. `WSAdapter` reports it (throttled), so a
@@ -295,7 +387,9 @@ public actor DeviceCommandBroker {
     /// WSAdapter calls on connection close. Fails that connection's pending
     /// requests immediately with .deviceDisconnected.
     public func unregister(connectionId: UUID) {
+        let hadDevices = !connections.isEmpty
         connections.removeAll { $0.id == connectionId }
+        if hadDevices, connections.isEmpty { lastDeviceLeftAt = .now }
         lastSentDocs[connectionId] = nil
         let affected = pending.filter { $0.value.connectionId == connectionId }.map(\.key)
         for requestId in affected {
@@ -564,6 +658,14 @@ public actor DeviceCommandBroker {
         nothingSelected: ((Result<StrokeOpReply, Error>) -> Bool)? = nil,
         send: @escaping (isolated DeviceCommandBroker, Connection, UInt32) -> Void
     ) async throws -> StrokeOpReply {
+        // No device connected at all: wait a little for one (`deviceWait`).
+        if deviceId == nil, deviceWait > .zero, connections.isEmpty {
+            let deadline = ContinuousClock.now.advanced(by: deviceWait)
+            ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)': no device connected; waiting up to \(deviceWait) for one")
+            while connections.isEmpty, ContinuousClock.now < deadline {
+                await waitForARegistration(until: deadline)
+            }
+        }
         let routing = deviceId == nil ? Routing.for(capability: capability) : .any
         var open: Set<UUID>?
         if routing != .any, let subscriberLookup {

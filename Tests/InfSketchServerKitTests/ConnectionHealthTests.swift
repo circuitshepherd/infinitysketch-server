@@ -236,6 +236,79 @@ struct ConnectionHealthTests {
         #expect(health.tick(now: now) == .drop(reason: .unresponsive))
     }
 
+    /// After a host standby the peer on the other end has usually given up (the app's silence
+    /// watchdog is 60 s) and its FIN was never received. Restarting the idle interval kept such a
+    /// dead connection for 30 s + 10 s after the wake — with its subscriptions, and as a device
+    /// an agent's request could be sent to. The wake ASKS at once instead.
+    @Test func aQuietPeerIsAskedAtOnceAfterASuspension() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, tickInterval: .seconds(5))
+        var now = t0.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .none)
+        now = now.advanced(by: .seconds(300))
+        #expect(health.tick(now: now) == .ping, "the wake asks; it does not wait out the idle interval")
+        now = now.advanced(by: .seconds(10))
+        #expect(health.tick(now: now) == .none, "the grace is the ordinary one, counted from the wake")
+        now = now.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .drop(reason: .unresponsive))
+    }
+
+    /// The same question leaves a peer that is there untouched.
+    @Test func aPeerThatAnswersTheWakePingStays() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0, tickInterval: .seconds(5))
+        var now = t0.advanced(by: .seconds(5))
+        _ = health.tick(now: now)
+        now = now.advanced(by: .seconds(300))
+        #expect(health.tick(now: now) == .ping)
+        #expect(health.noteInbound(now: now.advanced(by: .seconds(1))) == .none)
+        for _ in 0..<5 { now = now.advanced(by: .seconds(5)); #expect(health.tick(now: now) == .none) }
+    }
+
+    /// A connection that has not said hello gets its hello deadline again and NO ping: the app
+    /// reads the first message after its hello as the handshake's reply.
+    @Test func aConnectionWithoutHelloIsNotAskedAtTheWake() {
+        let t0 = ContinuousClock.now
+        var health = ConnectionHealth(
+            byteBudget: budget, idleInterval: idle, pingGrace: grace,
+            assumedMinimumDrainRate: drainRate, now: t0,
+            helloDeadline: .seconds(10), tickInterval: .seconds(5))
+        var now = t0.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .none)
+        now = now.advanced(by: .seconds(300))
+        #expect(health.tick(now: now) == .none)
+        now = now.advanced(by: .seconds(5))
+        #expect(health.tick(now: now) == .none, "the hello deadline restarted at the wake")
+        now = now.advanced(by: .seconds(10))
+        #expect(health.tick(now: now) == .drop(reason: .noHello))
+    }
+
+    // MARK: - asking on demand
+
+    /// A second connection saying hello as the same device is the usual sign that the first is
+    /// dead. It is ASKED, not closed: two installs restored from one backup share a device id,
+    /// and closing on sight would make them disconnect each other for ever.
+    @Test func askingNowPingsAndAppliesTheOrdinaryGrace() {
+        let t0 = ContinuousClock.now
+        var health = makeHealth(now: t0)
+        #expect(health.askNow(now: t0) == .ping)
+        #expect(health.askNow(now: t0.advanced(by: .seconds(1))) == .none, "one question at a time")
+        #expect(health.tick(now: t0.advanced(by: .seconds(10))) == .none)
+        #expect(health.tick(now: t0.advanced(by: .seconds(11))) == .drop(reason: .unresponsive))
+    }
+
+    @Test func askingNowLeavesAPeerThatAnswersAlone() {
+        let t0 = ContinuousClock.now
+        var health = makeHealth(now: t0)
+        #expect(health.askNow(now: t0) == .ping)
+        #expect(health.noteInbound(now: t0.advanced(by: .seconds(2))) == .none)
+        #expect(health.tick(now: t0.advanced(by: .seconds(20))) == .none)
+    }
+
     /// Without a tick interval (the pure tests above jump tens of seconds between ticks) there is
     /// no suspension detection at all.
     @Test func withoutATickIntervalLongGapsAreOrdinary() {

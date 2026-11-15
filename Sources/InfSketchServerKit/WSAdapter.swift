@@ -8,15 +8,18 @@ public struct WSAdapter: WSMessageHandler, Sendable {
     private let manager: SessionManager
     private let config: SessionConfig
     private let broker: DeviceCommandBroker
+    private let agentWork: AgentWork?
 
     /// This machine's clock, Unix ms — what `helloAck` and every `ping` carry as `serverTimeMs`, so
     /// a device can compare a request's `notAfter` against the clock that WROTE it.
     static func nowMs(_ now: Date = Date()) -> Int { Int(now.timeIntervalSince1970 * 1000) }
 
-    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker) {
+    public init(manager: SessionManager, config: SessionConfig = SessionConfig(), broker: DeviceCommandBroker,
+                agentWork: AgentWork? = nil) {
         self.manager = manager
         self.config = config
         self.broker = broker
+        self.agentWork = agentWork
     }
 
     public func makeMessages(for client: AsyncStream<WSMessage>) async throws -> AsyncStream<WSMessage> {
@@ -32,7 +35,8 @@ public struct WSAdapter: WSMessageHandler, Sendable {
         // session open forever. (`DocumentSession`'s own bounded buffer still covers a
         // different case — a `pump` task that is suspended rather than a socket that is slow.)
         let (output, outputCont) = AsyncStream<WSMessage>.makeStream()
-        let connection = Connection(manager: manager, output: outputCont, config: config, broker: broker)
+        let connection = Connection(manager: manager, output: outputCont, config: config, broker: broker,
+                                    agentWork: agentWork)
         let keepalive = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: config.keepaliveTickInterval)
@@ -55,6 +59,7 @@ public struct WSAdapter: WSMessageHandler, Sendable {
 /// Per-connection state machine: hello gate, doc subscriptions, status subscription.
 actor Connection {
     private let manager: SessionManager
+    private let agentWork: AgentWork?
     private let output: AsyncStream<WSMessage>.Continuation
     private var sender: TransferSender<ServerMessage>
     private var reassembler: TransferReassembler<ClientMessage>
@@ -79,20 +84,25 @@ actor Connection {
     private var statusSubscription: (token: UUID, pump: Task<Void, Never>)?
     private let broker: DeviceCommandBroker
     private let connectionId = UUID()
+    private let openedAt = ContinuousClock.now
+    /// The connection's name in the log: enough of its id to tell connections apart.
+    private static func short(_ id: UUID) -> String { String(id.uuidString.prefix(8)) }
     private var registeredWithBroker = false
     private var lastActivityReport: ContinuousClock.Instant?
 
     init(
         manager: SessionManager, output: AsyncStream<WSMessage>.Continuation, config: SessionConfig,
-        broker: DeviceCommandBroker
+        broker: DeviceCommandBroker, agentWork: AgentWork? = nil
     ) {
         self.manager = manager
+        self.agentWork = agentWork
         self.output = output
         self.sender = TransferSender(inlineLimit: config.inlineLimit, chunkSize: config.chunkSize)
         var reassembler = TransferReassembler<ClientMessage>(maxTotalBytes: config.maxTransferBytes)
         reassembler.acceptsTransfers = false   // until hello
         self.reassembler = reassembler
         self.broker = broker
+        ServerLog.timed("[conn] \(Self.short(connectionId)) opened")
         self.health = ConnectionHealth(
             byteBudget: config.outboundByteBudget,
             idleInterval: config.keepaliveIdleInterval,
@@ -134,7 +144,7 @@ actor Connection {
             // be trusted. Connection-fatal per the chunked-transfer spec.
             ServerLog.error("transfer violation on connection: \(error)")
             emit(.error(reason: "transferViolation"))
-            await close()
+            await close(reason: "transfer violation")
             return
         } catch {
             emit(.error(reason: WireErrorReason.malformedMessage))
@@ -187,13 +197,16 @@ actor Connection {
                 // which side is behind — a mismatch that shows only a gray dot looks exactly like
                 // "offline" (review finding 14). Older servers sent the bare word; the app reads both.
                 emit(.error(reason: "unsupportedVersion:\(WireProtocol.version)"))
-                await close()
+                await close(reason: "it speaks wire \(version), this server \(WireProtocol.version)")
                 return
             }
             helloed = true
             health.noteHello()
             reassembler.acceptsTransfers = true
             self.deviceId = deviceId
+            ServerLog.timed("[conn] \(Self.short(connectionId)) hello: "
+                + (deviceId.map { "device \($0.prefix(16))" } ?? "no device id (a browser page)")
+                + ", \(capabilities.count) capabilities")
             // Register with the broker whenever the connection advertises
             // any capability the broker brokers requests for — the broker
             // itself filters per-request by capability (see
@@ -243,9 +256,10 @@ actor Connection {
                 "provideContent", "render", "snapObjects", "arrows",
             ]) {
                 registeredWithBroker = true
-                await broker.register(connectionId: connectionId, deviceId: deviceId, capabilities: caps) { [weak self] message in
-                    Task { await self?.emitFromBroker(message) }
-                }
+                await broker.register(
+                    connectionId: connectionId, deviceId: deviceId, capabilities: caps,
+                    send: { [weak self] message in Task { await self?.emitFromBroker(message) } },
+                    confirmAlive: { [weak self] in Task { await self?.confirmAlive() } })
                 // Registered first, then announced: the relay this wakes asks the broker for a device,
                 // and must find this one.
                 await manager.deviceAppeared(capabilities: caps)
@@ -369,6 +383,13 @@ actor Connection {
                 return
             }
             statusSubscription = (token, pump(events, docId: nil, token: token))
+            // It missed the announcement if an agent is at work right now — the usual case after
+            // the host's standby or the device's own lock, which is exactly when it must not go
+            // back to sleep.
+            if await agentWork?.isCurrent == true {
+                emit(.statusEvent(payload: StatusPayload(
+                    docId: "", kind: AgentWorkSignal.statusKind, seq: nil, subscriberCount: nil)))
+            }
 
         case .unsubscribeStatus:
             if let sub = statusSubscription {
@@ -387,7 +408,7 @@ actor Connection {
         case .transferEnd:
             // Unreachable: the reassembler consumes these or throws.
             emit(.error(reason: "transferViolation"))
-            await close()
+            await close(reason: "transfer violation")
 
         case .watchDoc(let docId, let framePx):
             guard watchSubscriptions[docId] == nil else {
@@ -505,9 +526,14 @@ actor Connection {
         }
     }
 
-    func close() async {
+    /// `reason` is for the log (`[conn] … closed after N s: …`). The default is the ordinary end:
+    /// the peer's stream finished, which is a close frame, a FIN or a failed socket alike —
+    /// nothing below us tells them apart.
+    func close(reason: String = "the peer closed it, or the network dropped it") async {
         guard !closed else { return }
         closed = true
+        let lived = (ContinuousClock.now - openedAt).components.seconds
+        ServerLog.timed("[conn] \(Self.short(connectionId)) closed after \(lived) s: \(reason)")
         keepaliveTask?.cancel()
         keepaliveTask = nil
         for (docId, sub) in docSubscriptions {
@@ -576,7 +602,7 @@ actor Connection {
             guard !Task.isCancelled else { return }
             await self.releaseWatchSubscription(docId: docId, token: token)
             self.emit(.error(reason: "watchDropped"))
-            await self.close()
+            await self.close(reason: "its watch fell behind")
         }
     }
 
@@ -648,13 +674,22 @@ actor Connection {
             break
         case .ping:
             emit(.ping(serverTimeMs: WSAdapter.nowMs()))
-        case .drop:
+        case .drop(let reason):
             // A close code first, so the client learns why rather than seeing a bare EOF;
             // close() then releases every subscription, watcher, broker registration and
             // live-index holder entry, which is what lets the grace teardown finally fire.
             output.yield(.close(.policyViolation))
-            Task { await self.close() }
+            let why = reason == .noHello ? "no hello within the deadline" : "no answer to a ping"
+            Task { await self.close(reason: why) }
         }
+    }
+
+    /// Another connection said hello as this connection's device (`DeviceCommandBroker.register`):
+    /// ask the peer now. One that is there answers; a dead one is dropped after the grace.
+    func confirmAlive() {
+        guard !closed else { return }
+        ServerLog.timed("[conn] \(Self.short(connectionId)) asked whether it is still there: its device said hello on another connection")
+        act(on: health.askNow(now: ContinuousClock.now))
     }
 
     /// Driven by the per-connection keepalive timer in `WSAdapter.makeMessages`.

@@ -21,14 +21,14 @@ import MCP
 @Suite(.serialized)
 struct ErrorContextTests {
 
-    private func startServer(docIds: [String]) async throws
+    private func startServer(docIds: [String], config: SessionConfig = SessionConfig()) async throws
         -> (InfSketchServer, UInt16, Task<Void, any Error>) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("err-ctx-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let store = DirectoryDocumentStore(directory: dir)
         for id in docIds { try store.save(docId: id, bytes: Fixtures.docBytes) }
-        let server = InfSketchServer(port: 0, docsDirectory: dir)
+        let server = InfSketchServer(port: 0, docsDirectory: dir, config: config)
         let task = Task { try await server.run() }
         try await server.waitUntilListening()
         let port = try #require(await server.listeningPort)
@@ -94,6 +94,25 @@ struct ErrorContextTests {
         #expect(t.contains("noDeviceAvailable"))     // the machine-readable reason survives
         #expect(t.contains("no device is connected"))
         #expect(t.contains("mirror"))                // …and how to fix it
+    }
+
+    /// A server that waits for a device says that it did, and for how long: an agent told only
+    /// "no device" cannot know whether calling again at once is worth anything.
+    @Test func noDeviceAvailableSaysHowLongItWaited() async throws {
+        let wait = Duration.milliseconds(400)
+        let (_, port, task) = try await startServer(docIds: ["d"], config: SessionConfig(deviceWait: wait))
+        defer { task.cancel() }
+        let c = try await client(port); defer { Task { await c.disconnect() } }
+
+        let before = ContinuousClock.now
+        let (content, isError) = try await c.callTool(name: "render_sketch", arguments: ["docId": "d"])
+        #expect(ContinuousClock.now - before >= wait, "the call waited before it was refused")
+
+        #expect(isError == true)
+        let t = text(content)
+        #expect(t.contains("noDeviceAvailable"))
+        #expect(t.contains("no device is connected"))
+        #expect(t.contains("waited"), "got: \(t)")
     }
 
     // NOT covered here, honestly: the `noSelectionActive` clause that names the live session —

@@ -274,6 +274,9 @@ public enum WebUI {
           if (versionRefused) statusEl.textContent = "server was updated — reload the page";
           return;
         }
+        // The agent-work announcement is for the devices (they keep their screens on); it names
+        // no document and nothing in the table changed.
+        if (m.type === "statusEvent" && m.payload && m.payload.kind === "\#(AgentWorkSignal.statusKind)") return;
         if (m.type === "statusEvent" || m.type === "docRenamed") scheduleRefresh();
       };
       ws.onclose = () => {

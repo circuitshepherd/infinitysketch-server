@@ -16,17 +16,23 @@ public struct DocSummary: Codable, Equatable, Sendable {
 
 public final class InfSketchServer: Sendable {
     public let manager: SessionManager
+    let agentWork: AgentWork
     private let store: any DocumentStore
     /// Where `render_sketch(writeToFile: true)` puts its PNGs, or nil when this server has no
     /// render directory. Held here as well as on the adapter because the HTTP route serves the same
     /// files the tool writes — that is what makes the feature reach a REMOTE agent, which cannot
     /// see the server's filesystem.
     private let renderFileStore: RenderFileStore?
-    private let http: HTTPServer
+    /// The HTTP server in use, and how to make another one. Replaced only by `run()`, before it
+    /// has listened, when an AUTOMATIC port turned out to be taken (`HTTPBox`).
+    private let httpBox: HTTPBox
+    private var http: HTTPServer { httpBox.current.server }
     private let config: SessionConfig
     /// The port this server was CONSTRUCTED with. `listeningPort` is the truth and is what the
     /// pages use; this is the fallback for the window before the socket is up.
     private let requestedPort: UInt16
+    /// An automatic port that turns out to be taken may be replaced by another (`run()`).
+    private let canReplaceAutomaticPort: Bool
     /// One broker per process, shared by the WS layer (registers
     /// capability-tagged connections, routes replies) and the MCP layer
     /// (calls `requestCreation` from the `create_doc` tool; will call
@@ -47,6 +53,33 @@ public final class InfSketchServer: Sendable {
         func set() { isSet = true }
     }
 
+    /// The HTTP server and the port it was made for. A FlyingFox server is made for one address,
+    /// so taking another port means making another server; the routes are added to whichever one
+    /// is current when `run()` starts it.
+    private final class HTTPBox: @unchecked Sendable {
+        typealias Entry = (server: HTTPServer, port: UInt16)
+        private let lock = NSLock()
+        private var entry: Entry
+        private let make: @Sendable (UInt16) -> HTTPServer
+        init(port: UInt16, make: @escaping @Sendable (UInt16) -> HTTPServer) {
+            self.make = make
+            entry = (make(port), port)
+        }
+        var current: Entry { lock.lock(); defer { lock.unlock() }; return entry }
+        func replace(port: UInt16) {
+            let server = make(port)
+            lock.lock(); entry = (server, port); lock.unlock()
+        }
+    }
+
+    /// The port an automatic-port server (`port: 0`) currently intends to listen on — picked, not
+    /// yet proven: `listeningPort` is the truth once it listens. nil for a fixed port.
+    var automaticPort: UInt16? {
+        guard requestedPort == 0 else { return nil }
+        let port = httpBox.current.port
+        return port == 0 ? nil : port
+    }
+
     /// Listening AND verified to own the loopback addresses — what `waitUntilListening` waits for.
     private actor Readiness {
         private(set) var verified = false
@@ -56,7 +89,8 @@ public final class InfSketchServer: Sendable {
     }
 
     public convenience init(
-        port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig()
+        port: UInt16, docsDirectory: URL, config: SessionConfig = SessionConfig(),
+        hostAwake: any HostAwake = NoHostAwake()
     ) {
         // The document store FIRST, in its own statement: its init runs the identity migration,
         // which renames document files to their ids — and the version store's start-up cleanup
@@ -75,7 +109,8 @@ public final class InfSketchServer: Sendable {
             // never surface as a document.
             renderFileStore: RenderFileStore(
                 directory: docsDirectory.appendingPathComponent(
-                    RenderFileStore.directoryName, isDirectory: true)))
+                    RenderFileStore.directoryName, isDirectory: true)),
+            hostAwake: hostAwake)
     }
 
     /// Store-injecting designated init — `internal`, for tests only (the
@@ -91,7 +126,8 @@ public final class InfSketchServer: Sendable {
     init(
         port: UInt16, store: any DocumentStore, config: SessionConfig = SessionConfig(),
         versions: (any VersionStore)? = nil,
-        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil
+        renderFileStore: RenderFileStore? = nil, socketPool: (any AsyncSocketPool)? = nil,
+        hostAwake: any HostAwake = NoHostAwake()
     ) {
         self.store = store
         self.renderFileStore = renderFileStore
@@ -107,29 +143,40 @@ public final class InfSketchServer: Sendable {
         // An automatic port is picked so it cannot be one another program holds on 127.0.0.1
         // (`LoopbackPort`); a fixed one is used as asked and verified once listening.
         let bindPort = port == 0 ? ((try? LoopbackPort.pickFree()) ?? 0) : port
-        #if canImport(WinSDK)
-        let address = sockaddr_in.inet(port: bindPort)
-        #else
-        let address = sockaddr_in6.inet6(port: bindPort)
-        #endif
-        let pool = WriteStallTimeoutPool(inner: socketPool ?? HTTPServer.defaultPool(),
-                                         timeout: config.writeStallTimeout)
-        self.http = HTTPServer(config: HTTPServer.Configuration(
-            address: address,
-            pool: pool,
-            logger: ServerLogHTTPLogging()))
+        let writeStallTimeout = config.writeStallTimeout
+        self.httpBox = HTTPBox(port: bindPort) { port in
+            #if canImport(WinSDK)
+            let address = sockaddr_in.inet(port: port)
+            #else
+            let address = sockaddr_in6.inet6(port: port)
+            #endif
+            let pool = WriteStallTimeoutPool(inner: socketPool ?? HTTPServer.defaultPool(),
+                                             timeout: writeStallTimeout)
+            return HTTPServer(config: HTTPServer.Configuration(
+                address: address,
+                pool: pool,
+                logger: ServerLogHTTPLogging()))
+        }
+        // A pool handed in (a test's) belongs to the one server it was made for.
+        self.canReplaceAutomaticPort = port == 0 && socketPool == nil
         self.config = config
         self.requestedPort = port
         let deviceCommandBroker = DeviceCommandBroker(
             createTimeout: config.createDocTimeout, strokeOpTimeout: config.strokeOpTimeout,
-            quietAfter: config.keepaliveIdleInterval)
+            quietAfter: config.keepaliveIdleInterval, deviceWait: config.deviceWait)
         self.deviceCommandBroker = deviceCommandBroker
+        // "An agent is at work": every tool call feeds it, the host is kept awake for it and the
+        // status subscribers are told (`AgentWork`). `hostAwake` holds nothing unless `main.swift`
+        // passes the real one.
+        let agentWork = AgentWork(hostAwake: hostAwake) { [manager] in await manager.announceAgentWork() }
+        self.agentWork = agentWork
         self.mcpAdapter = MCPAdapter(
             manager: manager,
             idleTimeout: config.mcpSessionIdleTimeout,
             cleanupInterval: config.mcpSessionCleanupInterval,
             broker: deviceCommandBroker,
-            renderFileStore: renderFileStore)
+            renderFileStore: renderFileStore,
+            agentWork: agentWork)
     }
 
     /// Configures routes and serves until stopped.
@@ -142,51 +189,113 @@ public final class InfSketchServer: Sendable {
     /// another program answers there, it stops and `run()` throws `LoopbackPortTaken` — reported as
     /// "port in use" — instead of serving while the Mac's own connections go elsewhere.
     public func run() async throws {
-        await configureRoutes()
         let stopFlag = self.stopFlag
-        let http = self.http
         let readiness = self.readiness
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    try await AcceptResilience.run(
-                        delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
-                        shouldStop: { await stopFlag.isSet }
-                    ) {
-                        try await http.run()
-                    }
+        // Says in the log that the process did not run for a while (the host's standby) — what a
+        // report of devices not coming back has to be read against. Not one of the group's tasks:
+        // `run()` must return the moment the server stops, not at this loop's next tick.
+        let suspensionLog = Task {
+            let interval = Duration.seconds(5)
+            var watch = SuspensionWatch(interval: interval, now: .now)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if let gap = watch.tick(now: .now), !Task.isCancelled {
+                    ServerLog.timed("[server] running again after about \(gap.components.seconds) s without running (the host was in standby, or the process was stopped)")
                 }
-                group.addTask { [self] in
-                    try await http.waitUntilListening(timeout: 30)
-                    let port = await self.listeningPort ?? self.requestedPort
-                    if let foreign = LoopbackPort.foreignOwner(port: port) {
-                        // Recorded BEFORE stopping, so it is what `run()` reports — stopping makes
-                        // the accept loop fail on its own (a closed descriptor), and that error
-                        // would otherwise hide the real cause.
-                        await readiness.fail(LoopbackPortTaken(port: port, address: foreign))
-                        await stopFlag.set()
-                        await http.stop(timeout: 0)
-                        return
-                    }
-                    await readiness.markVerified()
-                }
-                try await group.waitForAll()
             }
-        } catch {
-            if let recorded = await readiness.failure { throw recorded }
-            await readiness.fail(error)
-            throw error
         }
-        if let recorded = await readiness.failure { throw recorded }
+        defer { suspensionLog.cancel() }
+        var replacements = 0
+        while true {
+            let http = self.http
+            await configureRoutes(on: http)
+            do {
+                try await serve(http)
+                return
+            } catch {
+                // Whatever ended it, nothing of this server may stay open (a listener that was up
+                // when the loopback check refused it). A no-op when it never listened.
+                await http.stop(timeout: 0)
+                // An AUTOMATIC port was only picked when the server was made; another program may
+                // have taken it since (`LoopbackPort.pickFree` closes its probe). Nobody asked for
+                // that port, so the server takes another instead of failing as "port in use" —
+                // which a suite of servers started side by side did about one run in three in the
+                // Linux container (2026-11-15). A FIXED port is the caller's choice and fails.
+                if canReplaceAutomaticPort, replacements < Self.automaticPortReplacements,
+                   StartupFailure.isAddressInUse("\(error)"), !(await stopFlag.isSet), !Task.isCancelled,
+                   let next = try? LoopbackPort.pickFree() {
+                    replacements += 1
+                    httpBox.replace(port: next)
+                    continue
+                }
+                await readiness.fail(error)
+                throw error
+            }
+        }
+    }
+
+    /// How often an automatic port that turned out taken is replaced before the server gives up.
+    static let automaticPortReplacements = 8
+
+    /// Serves on `http` until it is stopped (returns) or fails (throws) — and ends AT ONCE either
+    /// way. The second task proves the server listens and owns its port; it is ended with the
+    /// accept loop rather than waited out. It used to be FlyingFox's own
+    /// `waitUntilListening(timeout: 30)` inside a `waitForAll()`, which is not ended by the other
+    /// task's failure: a port in use was reported 30 s after the bind had failed (measured with
+    /// the real binary, 2026-11-15 — the start screen and join code were drawn meanwhile), and a
+    /// server stopped before it listened kept `run()` for those 30 s too.
+    private func serve(_ http: HTTPServer) async throws {
+        enum Part { case accepting, ownership }
+        let stopFlag = self.stopFlag
+        let readiness = self.readiness
+        try await withThrowingTaskGroup(of: Part.self) { group in
+            group.addTask {
+                // Stopped before it began: do not start listening now.
+                guard !(await stopFlag.isSet) else { return .accepting }
+                try await AcceptResilience.run(
+                    delays: [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)],
+                    shouldStop: { await stopFlag.isSet }
+                ) {
+                    try await http.run()
+                }
+                return .accepting
+            }
+            group.addTask { [self] in
+                // Polled, so it ends when the group is cancelled (`Task.sleep` throws then).
+                let deadline = ContinuousClock.now + .seconds(30)
+                while await http.listeningAddress == nil {
+                    guard ContinuousClock.now < deadline else { throw SocketError.disconnected }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let port = await self.listeningPort ?? self.requestedPort
+                if let foreign = LoopbackPort.foreignOwner(port: port) {
+                    // Thrown from HERE, so it is what `run()` reports: ending the group closes the
+                    // listener, and the accept loop's own error for that is discarded with it.
+                    throw LoopbackPortTaken(port: port, address: foreign)
+                }
+                await readiness.markVerified()
+                return .ownership
+            }
+            while let part = try await group.next() {
+                // The accept loop returned: the server was stopped. Nothing is left to wait for;
+                // the ownership check, if still polling, ends with the group.
+                if part == .accepting { group.cancelAll(); break }
+            }
+        }
     }
 
     /// Throws if the server is not listening — and verified to own its loopback addresses — within
-    /// `timeout`, or as soon as `run()` has failed. The default matches FlyingFox's own.
+    /// `timeout`, or as soon as `run()` has failed.
+    ///
+    /// The default is a bound for a server that never comes up at all, NOT a statement about how
+    /// fast one does: a failure ends this wait at once (`run()` records it), so a long bound
+    /// costs nothing, and a short one is a guess about the machine — it was 5 s, and a server
+    /// starting beside 850 tests in a container can need longer than a guess allows.
     ///
     /// The caller that passes a SHORTER one is the startup path: it is deciding whether to open a
     /// browser, and the failure it is really waiting out — a port already in use — has already
     /// surfaced through `run()` by then.
-    public func waitUntilListening(timeout: TimeInterval = 5) async throws {
+    public func waitUntilListening(timeout: TimeInterval = 30) async throws {
         let deadline = ContinuousClock.now + .milliseconds(Int(timeout * 1000))
         while true {
             if await readiness.verified { return }
@@ -227,7 +336,7 @@ public final class InfSketchServer: Sendable {
         }
     }
 
-    private func configureRoutes() async {
+    private func configureRoutes(on http: HTTPServer) async {
         let store = self.store
         let manager = self.manager
 
@@ -413,7 +522,8 @@ public final class InfSketchServer: Sendable {
         await http.appendRoute(
             "GET /ws",
             to: OriginCheckedHTTPHandler(
-                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker)),
+                inner: .webSocket(WSAdapter(manager: manager, config: config, broker: deviceCommandBroker,
+                                            agentWork: agentWork)),
                 allowedHostNames: Set(config.allowedHostNames)))
 
         // MCP endpoint (mcp_endpoint branch): mounts unconditionally, like

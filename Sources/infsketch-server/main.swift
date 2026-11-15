@@ -13,6 +13,7 @@ var docsPath = "./docs"
 var openBrowser = true
 var telemetryPath: String?
 var verifyVersions = false
+var keepHostAwake = true
 
 /// True when this process created the console it is printing to — i.e. it was double-clicked from
 /// Explorer rather than started from a terminal that already existed.
@@ -98,6 +99,11 @@ while let argument = arguments.next() {
         // Check the version store (`.versions/`, `.blobs/`) and exit, without serving: every kept
         // version must rebuild to its hash. `scripts/fault-version-store` runs it after each kill.
         verifyVersions = true
+    case "--no-keep-awake":
+        // While an agent works (a tool call within the last ten minutes) the server holds off
+        // this machine's idle standby — an agent's session ends when its host goes to sleep
+        // under it. This turns that off; the devices are still told to keep their screens on.
+        keepHostAwake = false
     case "--verbose":
         // Diagnostics ([blob-omission], broker drops) are opt-in: on an interactive terminal they
         // land between two drawJoinCode redraws and tear the join block apart. Errors stay visible
@@ -106,7 +112,7 @@ while let argument = arguments.next() {
         ServerLog.isVerbose = true
     default:
         let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
-            + " [--telemetry FILE] [--allow-host NAME] [--verify-versions]"
+            + " [--telemetry FILE] [--allow-host NAME] [--no-keep-awake] [--verify-versions]"
         // `--help` is a request, not a failure: it exits 0 and never holds the window.
         if argument == "--help" { print(usage); exit(0) }
         die(usage)
@@ -148,7 +154,10 @@ if let limit = AcceptResilience.raiseFileDescriptorLimit(), limit.new != limit.o
     ServerLog.verbose("[server] open-file limit raised from \(limit.old) to \(limit.new)")
 }
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory,
-                             config: SessionConfig(allowedHostNames: allowedHostNames))
+                             // 15 s: an agent's call that finds no device waits that long for one
+                             // (`DeviceCommandBroker.deviceWait`) — the app is back within 8 s.
+                             config: SessionConfig(allowedHostNames: allowedHostNames, deviceWait: .seconds(15)),
+                             hostAwake: keepHostAwake ? SystemHostAwake() : NoHostAwake())
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 
 // MARK: - scan to join, and the agent address beside it
@@ -309,10 +318,15 @@ let serverTask = Task {
 // Nothing invites the user to act before the socket is up: a browser tab that lands on a refused
 // connection, or a join code for a server that never bound, are both worse than a few milliseconds
 // of waiting. A FAILED bind — a second server on the same port, routine here, one per worktree —
-// costs this whole timeout before the message appears, which is why it is 2 seconds rather than
-// FlyingFox's 5: `serverFailure` already holds the real reason by then, and it is what decides.
-let listening = (try? await server.waitUntilListening(timeout: 2)) != nil
-if let failure = serverFailure {
+// ends this wait at once (`run()` records the failure the moment it has it), and the wait hands
+// back that failure: the message appears before anything is drawn. It used to take 31 s, with
+// the start screen and the join code on screen meanwhile (measured 2026-11-15): `run()` had not
+// returned yet, so `serverFailure` was still empty here. Hence the wait's own error is read
+// first, and `serverFailure` — set when `run()` returns, a moment later — is the fallback.
+let waitFailure: (any Error)?
+do { try await server.waitUntilListening(timeout: 2); waitFailure = nil } catch { waitFailure = error }
+let listening = waitFailure == nil
+if let failure = serverFailure ?? waitFailure.flatMap({ StartupFailure.isAddressInUse("\($0)") ? $0 : nil }) {
     die(StartupFailure.describe("\(failure)", port: port))
 }
 

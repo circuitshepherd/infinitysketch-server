@@ -839,6 +839,12 @@ public actor SessionManager {
         statusSubscribers.removeValue(forKey: token)?.finish()
     }
 
+    /// Tells every status subscriber that an agent is at work (`AgentWorkSignal`): a device keeps
+    /// its screen on for a while from each one it hears. Names no document.
+    public func announceAgentWork() {
+        emitStatus(docId: "", kind: AgentWorkSignal.statusKind, seq: nil, count: nil)
+    }
+
     /// Browsers watching `docId` right now. Lets a test wait for a watch to be registered
     /// instead of sleeping a fixed time.
     func watcherCount(docId: String) -> Int { watcherCounts[docId] ?? 0 }

@@ -47,7 +47,18 @@ are stored there as plain `.infsketch` files, deletions go to a `.trash/` folder
 days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a browser at startup),
 `--allow-host NAME` (repeatable: a host name under which a browser page may open the live channel —
 IP addresses, `localhost`, `*.local` names and this machine's own name are allowed already; add the
-name of a reverse proxy or an `/etc/hosts` entry you browse to. A proxy must pass `Host` through).
+name of a reverse proxy or an `/etc/hosts` entry you browse to. A proxy must pass `Host` through),
+`--no-keep-awake` (see below), `--verbose` (diagnostic lines, including when each device connected
+and why its connection closed, and when the machine came back from standby).
+
+**While an agent works, the server keeps this machine awake.** An agent's drawing is made by a
+connected device and relayed by this server, so a machine that goes to standby in the middle of a
+session ends it. From an agent's first tool call until ten minutes after its last one, the server
+holds off the machine's *idle* standby (macOS and Windows; not Linux) and asks the connected devices
+to keep their screens on. An agent's call that finds no device connected waits 15 seconds for one
+before it is refused. Closing the lid or choosing Sleep still works. `--no-keep-awake` turns the
+first half off; the devices have their own switch, *Stay Awake While Agents Work*, in the app's
+settings.
 
 ### Windows
 
