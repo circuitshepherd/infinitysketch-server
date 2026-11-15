@@ -1715,17 +1715,18 @@ public actor MCPAdapter {
                 Lists the user's arrow style presets — app-wide on the connected device, in the order \
                 the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron, \
                 Dimension, each possibly renamed, edited or deleted). Pass a name as `preset` to \
-                add_arrow or restyle_arrows. Needs a device with the `arrows` capability; `docId` only \
-                routes the request. Never writes.
+                add_arrow or restyle_arrows. A PRESET HOLDS NO COLOR: it is the shape (ends, width, heads, \
+                line type, corners, layer), and what it is applied to keeps its color and opacity. Needs a \
+                device with the `arrows` capability; `docId` only routes the request. Never writes.
 
                 Manage them with save_arrow_preset, rename_arrow_preset, delete_arrow_preset, \
                 move_arrow_preset and restore_arrow_presets (capability `arrowPresetWrites`).
 
                 REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor, drawnWidth, \
                 headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, \
-                dashAnchor, dashEndsOn, dashOffset, color, \
-                opacity, layer, keepsWidth, duplicateName}` — the same \
-                fields and units list_arrows reports; `color` is light-canonical `#RRGGBBAA`. Names may \
+                dashAnchor, dashEndsOn, dashOffset, \
+                layer, keepsWidth, duplicateName}` — the same \
+                fields and units list_arrows reports, without `color` and `opacity`. Names may \
                 repeat: `duplicateName` is true for every preset sharing its name (any letter case), \
                 and `preset` then takes the FIRST of them.
                 """,
@@ -1744,8 +1745,8 @@ public actor MCPAdapter {
                 new-arrow style (`fromNewArrowStyle: true`, also the default source), with any style fields \
                 overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES \
                 the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` \
-                and a new `name` are given). Every ArrowStyle field can be given; `color` is light-canonical \
-                (`colorAppearance: "dark"` for a dark-authored hex). These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                and a new `name` are given). Every ArrowStyle field can be given, but a preset holds NO COLOR: \
+                `color` (light-canonical) and `opacity` are accepted but not saved, whatever the source. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
                 document): no document is written and there is no undo step, and the user sees the change at once \
                 in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
                 list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
@@ -1862,8 +1863,8 @@ public actor MCPAdapter {
             name: "set_new_arrow_style",
             description: """
                 Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) \
-                and/or the style fields given; what is not given stays (`color` is light-canonical, \
-                `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. \
+                and/or the style fields given; what is not given stays — the color too with a `preset`, \
+                which holds none (`color` is light-canonical, `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. \
                 These are the user's DEVICE settings (app-wide on the connected device, not part of any \
                 document): no document is written and there is no undo step, and the user sees the change at once \
                 in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
@@ -1920,7 +1921,7 @@ public actor MCPAdapter {
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
-                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first, the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its shape is applied first (a preset holds no color — the arrow has the new-arrow color unless `color` is given), the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
@@ -2010,7 +2011,7 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
-                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its whole style is applied first — each arrow keeps its own layer — and the other fields override it."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its shape is applied first — each arrow keeps its own layer and its own color and opacity (a preset holds none) — and the other fields override it."]),
                     "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
                                               "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line."]),
                     "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each run between corner points fitted on its own with the chosen fit, a dash centered on every corner; the arrow's two ends still follow dashEndsOn. No effect with exact."]),

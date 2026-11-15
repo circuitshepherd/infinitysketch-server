@@ -183,7 +183,8 @@ enum AgentGuide {
     nodes, edit, send back), restyle with `restyle_arrows`, delete with `remove_arrow` \
     (server-side, works on a closed document). **What you omit is the user's new-arrow style** \
     (what their Arrow tool draws now), and `preset` names one of the user's presets \
-    (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line. \
+    (`list_arrow_presets`) — a headless preset like "Line" makes the arrow a plain line; a preset \
+    holds no color, so the arrow keeps the color it has or would get. \
     **It has no transform**: moving, turning or \
     scaling one (`transform_elements`' `arrowIds`, or a live selection) rewrites its points, and \
     its heads never skew. **A scale keeps its width** while `keepsWidth` is true (the default, \
