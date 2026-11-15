@@ -318,10 +318,15 @@ let serverTask = Task {
 // Nothing invites the user to act before the socket is up: a browser tab that lands on a refused
 // connection, or a join code for a server that never bound, are both worse than a few milliseconds
 // of waiting. A FAILED bind — a second server on the same port, routine here, one per worktree —
-// costs this whole timeout before the message appears, which is why it is 2 seconds rather than
-// FlyingFox's 5: `serverFailure` already holds the real reason by then, and it is what decides.
-let listening = (try? await server.waitUntilListening(timeout: 2)) != nil
-if let failure = serverFailure {
+// ends this wait at once (`run()` records the failure the moment it has it), and the wait hands
+// back that failure: the message appears before anything is drawn. It used to take 31 s, with
+// the start screen and the join code on screen meanwhile (measured 2026-11-15): `run()` had not
+// returned yet, so `serverFailure` was still empty here. Hence the wait's own error is read
+// first, and `serverFailure` — set when `run()` returns, a moment later — is the fallback.
+let waitFailure: (any Error)?
+do { try await server.waitUntilListening(timeout: 2); waitFailure = nil } catch { waitFailure = error }
+let listening = waitFailure == nil
+if let failure = serverFailure ?? waitFailure.flatMap({ StartupFailure.isAddressInUse("\($0)") ? $0 : nil }) {
     die(StartupFailure.describe("\(failure)", port: port))
 }
 

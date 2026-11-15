@@ -37,11 +37,15 @@ public enum StartupFailure {
         return digits.isEmpty ? nil : Int(digits)
     }
 
+    /// Whether the error says the address is in use — a failed bind, or `LoopbackPortTaken`.
+    public static func isAddressInUse(_ errorDescription: String) -> Bool {
+        errnoValue(in: errorDescription).map(addressInUseErrnos.contains) ?? false
+    }
+
     /// A message to print when the server could not start. Falls back to the raw error, which is
     /// still better than nothing, for anything not recognised.
     public static func describe(_ errorDescription: String, port: UInt16) -> String {
-        guard let code = errnoValue(in: errorDescription),
-              addressInUseErrnos.contains(code)
+        guard isAddressInUse(errorDescription)
         else {
             return "infsketch-server stopped: \(errorDescription)"
         }
