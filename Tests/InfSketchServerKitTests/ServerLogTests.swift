@@ -2,6 +2,9 @@ import Foundation
 import Testing
 import FlyingFox
 import InfSketchWire
+#if canImport(WinSDK)
+import WinSDK
+#endif
 @testable import InfSketchServerKit
 
 /// The one gate for operational log lines. Serialized: the gate is process-global state, and other
@@ -51,6 +54,31 @@ import InfSketchWire
         ServerLog.timed("serverlog-timed-kept")
         let line = captured.lines.first { $0.hasSuffix("serverlog-timed-kept") }
         #expect(line?.wholeMatch(of: /\d\d:\d\d:\d\d serverlog-timed-kept/) != nil, "got \(line ?? "nothing")")
+    }
+
+    /// The clock in a timed line is the MACHINE's: the lines are compared with the clock of the
+    /// PC and of the devices. Asked of the system here, not of Foundation — on Windows
+    /// Foundation's time zone is GMT whatever the PC is set to (measured 2026-11-15), and the
+    /// lines were an hour off. Read before and after, so a second that ticks in between is fine.
+    @Test func theClockIsTheMachinesLocalTime() {
+        let before = Self.systemClock()
+        let shown = ServerLog.clockTime(Date())
+        let after = Self.systemClock()
+        #expect(shown == before || shown == after, "shown \(shown), the system says \(before)")
+    }
+
+    /// `HH:mm:ss` from the operating system's own local-time call.
+    static func systemClock() -> String {
+        #if canImport(WinSDK)
+        var now = SYSTEMTIME()
+        GetLocalTime(&now)
+        return String(format: "%02d:%02d:%02d", Int(now.wHour), Int(now.wMinute), Int(now.wSecond))
+        #else
+        var seconds = time(nil)
+        var parts = tm()
+        localtime_r(&seconds, &parts)
+        return String(format: "%02d:%02d:%02d", Int(parts.tm_hour), Int(parts.tm_min), Int(parts.tm_sec))
+        #endif
     }
 
     /// A connection's life is in the log: when it opened, who said hello on it, when and WHY it
