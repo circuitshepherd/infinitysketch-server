@@ -55,15 +55,15 @@ public enum DocJSON {
     }
 
     /// The newest `.infsketch` format version the edits in this file understand — the app's
-    /// `SketchDocData.currentFormatVersion` at this server's release (6: one mixed `placedObjects`
-    /// list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
+    /// `SketchDocData.currentFormatVersion` at this server's release (7: a text's `inlineMath` and
+    /// the document's `newTextsInlineMath`, formulas; 6: one mixed `placedObjects` list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
     /// refuses it: a format change can move where elements live, and an edit made on the old
     /// shape answers not-found for elements that exist, or writes a key the newer app no longer
     /// reads. That is what v1.4.0 does to a format-5 document — it looks in `placedTextsData`,
     /// finds nothing, and tells the agent the text is not there. The document itself stays an
     /// opaque payload for sync; only these direct edits read its shape. **Raise this together
     /// with the app's format version, in the same paired release.**
-    public static let knownFormatVersion = 6
+    public static let knownFormatVersion = 7
 
     // MARK: - Read
 
@@ -93,13 +93,19 @@ public enum DocJSON {
     /// false) into the entry's `colorSchemeIsDark`. Every pre-existing array
     /// element — including ones this module doesn't understand — is preserved
     /// untouched in place.
+    ///
+    /// `inlineMath` (format 7, formulas): nil takes the document's `newTextsInlineMath` (absent =
+    /// false). The key is written only when true, and writing it raises the document to format 7
+    /// (`writeInlineMath`); false and nil on a document without the default write exactly the
+    /// entry this wrote before formulas existed.
     public static func addText(
         to bytes: Data,
         id: UUID,
         text: String,
         x: Double,
         y: Double,
-        pinned: Bool
+        pinned: Bool,
+        inlineMath: Bool? = nil
     ) throws -> Data {
         // Programmer-error contract, not a document property: JSON (the only
         // transport MCP tool arguments arrive over) cannot encode NaN/Infinity,
@@ -123,6 +129,8 @@ public enum DocJSON {
             entry["kind"] = ElementKind.text.rawValue
             entry["layer"] = "front"
         }
+        let formulas = inlineMath ?? ((doc["newTextsInlineMath"] as? Bool) ?? false)
+        writeInlineMath(formulas, into: &entry, doc: &doc)
         elements.append(entry)
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
@@ -152,7 +160,8 @@ public enum DocJSON {
         textId: String,
         newText: String?,
         x: Double?,
-        y: Double?
+        y: Double?,
+        inlineMath: Bool? = nil
     ) throws -> Data {
         // See addText: non-finite coordinates are a programmer error by contract.
         precondition((x?.isFinite ?? true) && (y?.isFinite ?? true),
@@ -173,9 +182,42 @@ public enum DocJSON {
             entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
         }
 
+        if let inlineMath {
+            writeInlineMath(inlineMath, into: &entry, doc: &doc)
+        }
+
         elements[index] = entry
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
+    }
+
+    /// Sets one text's `inlineMath` (format 7) and nothing else — the device path of `add_text` /
+    /// `edit_text`: the server writes the key on the bytes the device returned (the new text's id
+    /// is in the reply's `meta`), so it is the one writer of the key on both paths and the device's
+    /// op spec never carries it. Throws `.textNotFound` when no text has that id.
+    public static func setInlineMath(in bytes: Data, textId: String, to inlineMath: Bool) throws -> Data {
+        try editText(in: bytes, textId: textId, newText: nil, x: nil, y: nil, inlineMath: inlineMath)
+    }
+
+    /// The format that introduced `inlineMath` (formulas).
+    static let inlineMathFormatVersion = 7
+
+    /// Writes a text entry's `inlineMath` the app's way — the key only when true, absent when false
+    /// — and, when it writes the key, raises the document's `formatVersion` to 7 if it says older
+    /// (a file without the key is format 1). An app that knows only format 6 then REFUSES the
+    /// document (its newer-format door) instead of opening it and stripping the key at its next
+    /// save — the stated cost of every format change (design decision A1). Never lowers a version
+    /// and never moves the text: the server cannot measure, and the device re-lays it at open.
+    private static func writeInlineMath(_ on: Bool, into entry: inout [String: Any], doc: inout [String: Any]) {
+        guard on else {
+            entry.removeValue(forKey: "inlineMath")
+            return
+        }
+        entry["inlineMath"] = true
+        let version = (doc["formatVersion"] as? NSNumber)?.intValue ?? (doc["formatVersion"] as? Int) ?? 1
+        if version < inlineMathFormatVersion {
+            doc["formatVersion"] = inlineMathFormatVersion
+        }
     }
 
     /// Removes a text entry by id, leaving every other array element (including

@@ -1183,6 +1183,86 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `inlineMath` is a key the server writes itself: it does not force a device, so it works on
+    /// a document nobody has open, with no device connected at all.
+    @Test func addTextWithInlineMathStaysServerSide() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x^2$", "canvasX": 0, "canvasY": 0, "inlineMath": true])
+        #expect(isError != true, "\(toolResultText(content))")
+        let id = addedId(from: toolResultText(content))
+        let stored = try #require(try JSONSerialization.jsonObject(with: await rawDocument(client, "d")) as? [String: Any])
+        let list = (stored["placedObjects"] as? [[String: Any]]) ?? (stored["placedTextsData"] as? [[String: Any]]) ?? []
+        let entry = try #require(list.first { $0["id"] as? String == id })
+        #expect(entry["inlineMath"] as? Bool == true)
+        #expect((stored["formatVersion"] as? NSNumber)?.intValue == 7)
+
+        // edit_text with inlineMath alone switches it off, server-side too.
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "d", "textId": .string(id), "inlineMath": false])
+        #expect(editIsError != true, "\(toolResultText(editContent))")
+        let edited = try await rawDocument(client, "d")
+        #expect(Self.storedInlineMath(edited, id) == nil)
+        #expect(String(decoding: edited, as: UTF8.self).contains(id), "the text is still there")
+
+        await server.stop()
+    }
+
+    /// The device path (a styled call): the envelope does NOT carry `inlineMath` — the server sets
+    /// the key on the bytes the device returned, on the text the reply's `meta` names (B2: one
+    /// writer, so the two paths cannot disagree).
+    @Test func styledAddTextWithInlineMathSetsTheKeyOnTheDevicesBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let textId = "AAAAAAAA-0000-0000-0000-0000000000F1"
+        let reply = Data(#"""
+        {"formatVersion": 7, "darkColorScheme": false, "placedObjects": [
+          {"kind": "text", "layer": "front", "id": "AAAAAAAA-0000-0000-0000-0000000000F1",
+           "text": ["$x$", {}], "rect": [[0, 0], [20, 20]],
+           "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+           "opacity": 1, "pinned": false, "wordWrapEnabled": false, "colorSchemeIsDark": false}]}
+        """#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: reply, meta: Data(#"{"id": "\#(textId)"}"#.utf8)),
+            capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 0, "canvasY": 0, "color": "#FF0000", "inlineMath": true])
+        #expect(isError != true, "\(toolResultText(content))")
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["inlineMath"] == nil, "the device never sees inlineMath")
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), textId) == true)
+
+        // edit_text on the device path: the fake device answers bytes WITHOUT the key, so only the
+        // server can have put it there.
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(textId), "color": "#00FF00", "inlineMath": true])
+        #expect(editIsError != true, "\(toolResultText(editContent))")
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["inlineMath"] == nil)
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), textId) == true)
+
+        await server.stop()
+    }
+
+    static func storedInlineMath(_ bytes: Data, _ id: String) -> Bool? {
+        guard let doc = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        let list = (doc["placedObjects"] as? [[String: Any]]) ?? (doc["placedTextsData"] as? [[String: Any]]) ?? []
+        return list.first { $0["id"] as? String == id }?["inlineMath"] as? Bool
+    }
+
     @Test func styledEditTextRelaysThroughTheDevice() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }

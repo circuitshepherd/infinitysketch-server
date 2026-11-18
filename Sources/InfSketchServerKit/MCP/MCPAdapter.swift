@@ -512,6 +512,13 @@ public actor MCPAdapter {
         }
     }
 
+    /// Formulas (document format 7). A key the SERVER writes on both paths — never in a device's
+    /// op spec, never in `hasStyleArgs`, so it does not force a device (design decision B2).
+    private static let inlineMathProperty: Value = .object(["type": "boolean", "description": """
+        true: every $…$ in this text is shown as a typeset formula ($$…$$ for the large form, \\$ for \
+        a dollar sign); false: $ is a normal character. Omitted on add_text: the document's own default.
+        """])
+
     /// Word wrap, the Text Format panel's Word Wrap card as arguments. Device-relayed under
     /// `authorText+textWrap`: an app without it would ignore the keys and answer success.
     private static let textWrapProperties: [String: Value] = [
@@ -742,7 +749,9 @@ public actor MCPAdapter {
                 before setting a `family`. `anchor` picks the point of the box that stays put \
                 as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / \
                 `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the \
-                strokes (both need a device). \(writeToolCaveats)
+                strokes (both need a device). Formulas: write the LaTeX between `$…$` and set \
+                `inlineMath: true`; the write does not report whether a formula typesets — \
+                render_sketch shows it. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -774,6 +783,7 @@ public actor MCPAdapter {
                         ]),
                         "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                           "description": "front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device."]),
+                        "inlineMath": inlineMathProperty,
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
@@ -801,7 +811,8 @@ public actor MCPAdapter {
                 of the box that stays put as the text grows (needs a device); an anchored text \
                 keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word \
                 wrap on or off and set its width (needs a device). To move a text between layers \
-                use set_layer. \(writeToolCaveats)
+                use set_layer. `inlineMath` switches formulas on or off; omitted, the text keeps \
+                its setting. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -830,6 +841,7 @@ public actor MCPAdapter {
                                 """,
                             "items": textSpanItemSchema,
                         ]),
+                        "inlineMath": inlineMathProperty,
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
@@ -1653,7 +1665,8 @@ public actor MCPAdapter {
                 never writes to the document. unknownDoc if the document doesn't exist.
 
                 REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, \
-                color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth}`. The box \
+                color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, \
+                inlineMath}`. The box \
                 is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
                 picked anchor — the point of its box that stays put as the text grows — as \
                 {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the \
@@ -1666,7 +1679,8 @@ public actor MCPAdapter {
                 light-canonical and ABSENT for the automatic color; `family` is absent for the \
                 system font. `alignment` is left / center / right / justified / natural, or mixed. \
                 `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
-                (the text's own points, before its transform).
+                (the text's own points, before its transform). `inlineMath` is true when every $…$ \
+                in the text shows as a typeset formula (add_text / edit_text set it).
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -3856,6 +3870,7 @@ public actor MCPAdapter {
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
+            let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -3863,7 +3878,7 @@ public actor MCPAdapter {
             let newId = UUID()
             let out: Data
             do {
-                out = try DocJSON.addText(to: bytes, id: newId, text: text, x: x, y: y, pinned: pinned)
+                out = try DocJSON.addText(to: bytes, id: newId, text: text, x: x, y: y, pinned: pinned, inlineMath: inlineMath)
             } catch let error as DocJSON.DocJSONError {
                 return Self.errorResult(Self.reason(for: error))
             }
@@ -3892,6 +3907,7 @@ public actor MCPAdapter {
     private func callAddTextStyled(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
+            let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -3921,14 +3937,27 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
+            let newId = out.meta
+                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+                .flatMap { $0["id"] }
+            // A said `inlineMath` is written by the server on the device's bytes (B2); an omitted
+            // one is the device's: it gives a new text the document's default itself.
+            var fullDoc = out.bytes
+            if let inlineMath {
+                guard let newId else { return Self.errorResult("deviceFailed: the reply names no text id") }
+                do {
+                    fullDoc = try DocJSON.setInlineMath(in: out.bytes, textId: newId, to: inlineMath)
+                } catch let error as DocJSON.DocJSONError {
+                    return Self.errorResult(Self.reason(for: error))
+                }
+            }
+
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
                 var summary = "added styled text at seq \(seq)"
-                if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
-                   let id = decoded["id"] {
-                    summary += "\nid: \(id)"
+                if let newId {
+                    summary += "\nid: \(newId)"
                 }
                 return summary
             }
@@ -4126,6 +4155,7 @@ public actor MCPAdapter {
             let newText = try Self.optionalStringArg(arguments, "text")
             let x = try Self.optionalDoubleArg(arguments, "canvasX")
             let y = try Self.optionalDoubleArg(arguments, "canvasY")
+            let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             var read = prefetched
             if read == nil { read = await manager.currentBytesOrFetch(docId: docId) }
@@ -4134,7 +4164,7 @@ public actor MCPAdapter {
             }
             let out: Data
             do {
-                out = try DocJSON.editText(in: bytes, textId: textId, newText: newText, x: x, y: y)
+                out = try DocJSON.editText(in: bytes, textId: textId, newText: newText, x: x, y: y, inlineMath: inlineMath)
             } catch let error as DocJSON.DocJSONError {
                 return Self.errorResult(Self.reason(for: error))
             }
@@ -4159,6 +4189,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
+            let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -4188,8 +4219,18 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
+            // A said `inlineMath` is written by the server on the device's bytes (B2).
+            var fullDoc = out.bytes
+            if let inlineMath {
+                do {
+                    fullDoc = try DocJSON.setInlineMath(in: out.bytes, textId: textId, to: inlineMath)
+                } catch let error as DocJSON.DocJSONError {
+                    return Self.errorResult(Self.reason(for: error))
+                }
+            }
+
             return await submitAndRespond(
-                docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
+                docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
                 "edited \(textId) at seq \(seq)"
             }

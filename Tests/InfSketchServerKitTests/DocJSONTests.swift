@@ -602,4 +602,107 @@ import Testing
         #expect(offsets == offsets.sorted(), "top-level keys must appear in the bytes in sorted order")
         #expect(obj["documentId"] as? String == "D", "the edit must not touch an identity it doesn't own")
     }
+
+    // MARK: - Formulas (`inlineMath`, document format 7)
+
+    static func entry(_ bytes: Data, _ id: String) throws -> [String: Any] {
+        let obj = try #require(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let list = (obj["placedObjects"] as? [[String: Any]]) ?? (obj["placedTextsData"] as? [[String: Any]]) ?? []
+        return try #require(list.first { $0["id"] as? String == id })
+    }
+
+    static func formatVersion(_ bytes: Data) throws -> Int? {
+        let obj = try #require(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        return (obj["formatVersion"] as? NSNumber)?.intValue
+    }
+
+    /// A format-6 document with one text, in the one-list shape.
+    static let format6: Data = Data(#"""
+    {
+      "formatVersion": 6,
+      "darkColorScheme": false,
+      "placedObjects": [
+        {"kind": "text", "layer": "front", "id": "AAAAAAAA-0000-0000-0000-000000000001",
+         "text": ["$x^2$", {}], "rect": [[10, 20], [1, 1]],
+         "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+         "opacity": 1, "pinned": false, "wordWrapEnabled": false, "colorSchemeIsDark": false}
+      ]
+    }
+    """#.utf8)
+
+    /// The same, at format 7 with the document default for new texts switched on.
+    static var format7DefaultOn: Data {
+        Data(String(decoding: format6, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 6,", with: "\"formatVersion\": 7, \"newTextsInlineMath\": true,")
+            .utf8)
+    }
+
+    @Test func addTextWritesInlineMathOnlyWhenOn() throws {
+        let on = UUID(), off = UUID(), unsaid = UUID()
+        let withOn = try DocJSON.addText(to: Self.fixture, id: on, text: "$a$", x: 0, y: 0, pinned: false, inlineMath: true)
+        #expect(try Self.entry(withOn, on.uuidString)["inlineMath"] as? Bool == true)
+        let withOff = try DocJSON.addText(to: Self.fixture, id: off, text: "$a$", x: 0, y: 0, pinned: false, inlineMath: false)
+        #expect(try Self.entry(withOff, off.uuidString)["inlineMath"] == nil)
+        let withNil = try DocJSON.addText(to: Self.fixture, id: unsaid, text: "$a$", x: 0, y: 0, pinned: false, inlineMath: nil)
+        #expect(try Self.entry(withNil, unsaid.uuidString)["inlineMath"] == nil)
+        // A call without the argument writes exactly what it wrote before formulas existed.
+        let legacy = try DocJSON.addText(to: Self.fixture, id: unsaid, text: "$a$", x: 0, y: 0, pinned: false)
+        #expect(legacy == withNil)
+    }
+
+    @Test func addTextTakesTheDocumentDefaultWhenNotSaid() throws {
+        let unsaid = UUID(), off = UUID()
+        let fromDefault = try DocJSON.addText(to: Self.format7DefaultOn, id: unsaid, text: "$a$", x: 0, y: 0, pinned: false, inlineMath: nil)
+        #expect(try Self.entry(fromDefault, unsaid.uuidString)["inlineMath"] as? Bool == true)
+        let saidOff = try DocJSON.addText(to: Self.format7DefaultOn, id: off, text: "$a$", x: 0, y: 0, pinned: false, inlineMath: false)
+        #expect(try Self.entry(saidOff, off.uuidString)["inlineMath"] == nil)
+    }
+
+    @Test func editTextSetsAndClearsInlineMath() throws {
+        let t1 = "AAAAAAAA-0000-0000-0000-000000000001"
+        // `inlineMath` alone is a valid edit: no text, no position.
+        let on = try DocJSON.editText(in: Self.format6, textId: t1, newText: nil, x: nil, y: nil, inlineMath: true)
+        #expect(try Self.entry(on, t1)["inlineMath"] as? Bool == true)
+        #expect((try Self.entry(on, t1)["text"] as? [Any])?.first as? String == "$x^2$")
+        let rect = try #require(try Self.entry(on, t1)["rect"] as? [Any])
+        let numbers = rect.compactMap { $0 as? [Any] }.flatMap { $0 }.compactMap { ($0 as? NSNumber)?.doubleValue ?? ($0 as? Int).map(Double.init) }
+        #expect(numbers == [10, 20, 1, 1], "the text does not move")
+        let off = try DocJSON.editText(in: on, textId: t1, newText: nil, x: nil, y: nil, inlineMath: false)
+        #expect(try Self.entry(off, t1)["inlineMath"] == nil)
+        // nil leaves the value as it is — on stays on, absent stays absent.
+        let keptOn = try DocJSON.editText(in: on, textId: t1, newText: "$y$", x: nil, y: nil, inlineMath: nil)
+        #expect(try Self.entry(keptOn, t1)["inlineMath"] as? Bool == true)
+        let keptOff = try DocJSON.editText(in: Self.format6, textId: t1, newText: "$y$", x: nil, y: nil, inlineMath: nil)
+        #expect(try Self.entry(keptOff, t1)["inlineMath"] == nil)
+        // The old signature is the nil case.
+        #expect(try DocJSON.editText(in: on, textId: t1, newText: "$y$", x: nil, y: nil) == keptOn)
+        #expect(throws: DocJSON.DocJSONError.textNotFound) {
+            _ = try DocJSON.editText(in: Self.format6, textId: "nope", newText: nil, x: nil, y: nil, inlineMath: true)
+        }
+    }
+
+    @Test func switchingFormulasOnRaisesAFormat6DocumentTo7() throws {
+        let t1 = "AAAAAAAA-0000-0000-0000-000000000001"
+        #expect(try Self.formatVersion(DocJSON.editText(in: Self.format6, textId: t1, newText: nil, x: nil, y: nil, inlineMath: true)) == 7)
+        #expect(try Self.formatVersion(DocJSON.addText(to: Self.format6, id: UUID(), text: "a", x: 0, y: 0, pinned: false, inlineMath: true)) == 7)
+        #expect(try Self.formatVersion(DocJSON.editText(in: Self.format6, textId: t1, newText: nil, x: nil, y: nil, inlineMath: false)) == 6)
+        #expect(try Self.formatVersion(DocJSON.addText(to: Self.format6, id: UUID(), text: "a", x: 0, y: 0, pinned: false, inlineMath: false)) == 6)
+        #expect(try Self.formatVersion(DocJSON.addText(to: Self.format6, id: UUID(), text: "a", x: 0, y: 0, pinned: false)) == 6)
+        // A document without the key is format 1; a formula raises it too, a plain write does not.
+        #expect(try Self.formatVersion(DocJSON.addText(to: Self.fixture, id: UUID(), text: "a", x: 0, y: 0, pinned: false, inlineMath: true)) == 7)
+        #expect(try Self.formatVersion(DocJSON.addText(to: Self.fixture, id: UUID(), text: "a", x: 0, y: 0, pinned: false)) == nil)
+    }
+
+    /// The device path: the server sets the key on the bytes the device returned.
+    @Test func setInlineMathWritesTheKeyOnDeviceBytes() throws {
+        let t1 = "AAAAAAAA-0000-0000-0000-000000000001"
+        let on = try DocJSON.setInlineMath(in: Self.format6, textId: t1, to: true)
+        #expect(try Self.entry(on, t1)["inlineMath"] as? Bool == true)
+        #expect(try Self.formatVersion(on) == 7)
+        let off = try DocJSON.setInlineMath(in: on, textId: t1, to: false)
+        #expect(try Self.entry(off, t1)["inlineMath"] == nil)
+        #expect(throws: DocJSON.DocJSONError.textNotFound) {
+            _ = try DocJSON.setInlineMath(in: Self.format6, textId: "nope", to: true)
+        }
+    }
 }
