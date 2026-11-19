@@ -875,7 +875,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "Element ids (stroke, text, image or arrow id). Any number.",
+                        "description": "Element ids (stroke, text, image, arrow or formula id — a formula's needs a device with the `formulas` capability). Any number.",
                     ]),
                     "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
@@ -952,7 +952,8 @@ public actor MCPAdapter {
         Tool(
             name: "transform_elements",
             description: """
-                Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, \
+                Move, scale or rotate named strokes, texts, images, arrows (`arrowIds`) AND formulas \
+                (`formulaIds`) together — on ANY document, \
                 open or not. This is how you reposition a placed image: transform_strokes takes \
                 strokes only, and edit_text can move a text but not turn or resize it, so before \
                 this an image could be named, pinned, reordered, copied and deleted but never \
@@ -991,6 +992,10 @@ public actor MCPAdapter {
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points, so its heads never skew. A scale changes its WIDTH only when the arrow's `keepsWidth` is false (list_arrows reports it; true by default, so a scaled arrow keeps its width).",
                     ]),
+                    "formulaIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Formula ids, as returned by list_formulas. Needs a device with the `formulas` capability.",
+                    ]),
                     "canvasTranslate": .object([
                         "type": "array", "items": .object(["type": "number"]),
                         "description": "[dx, dy] in canvas points.",
@@ -1014,12 +1019,13 @@ public actor MCPAdapter {
         Tool(
             name: "reset_element_transforms",
             description: """
-                Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, \
+                Put placed texts, images and formulas back to their ORIGINAL SIZE, unrotated and unskewed, \
                 WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and \
                 "Reset text transforms" selection-menu items, and the same implementation, so the \
                 two cannot disagree. An image keeps its CENTER where it is shown; a text keeps its \
                 ANCHOR point (the `anchor` list_texts reports, or the automatic one on its first \
-                baseline). Only the transform changes — content, style, anchor and wrap width stay. \
+                baseline); a formula keeps the left end of its baseline (`formulaIds` need a \
+                device with the `formulas` capability). Only the transform changes — content, style, anchor and wrap width stay. \
                 Works on any document, open or not.
 
                 ATOMIC: every id must resolve or nothing is reset. When every named element is \
@@ -1039,6 +1045,10 @@ public actor MCPAdapter {
                     "imageIds": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "Placed-image ids, as returned by list_images.",
+                    ]),
+                    "formulaIds": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Formula ids, as returned by list_formulas.",
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
@@ -1372,10 +1382,11 @@ public actor MCPAdapter {
         Tool(
             name: "set_layer",
             description: """
-                Moves placed texts, images and arrows into the front object layer (above the \
-                strokes) or the back one (behind strokes and grids) — the app's Layer card. Each \
-                one that changes layer lands on TOP of its new layer; one already there stays \
-                where it is. `ids` may mix text, image and arrow ids. A pinned image paints in \
+                Moves placed texts, images, arrows and formulas into the front object layer (above \
+                the strokes) or the back one (behind strokes and grids) — the app's Layer card. \
+                Each one that changes layer lands on TOP of its new layer; one already there stays \
+                where it is. `ids` may mix text, image, arrow and formula ids (a formula's needs a \
+                device with the `formulas` capability). A pinned image paints in \
                 the pinned-images layer whatever its layer, and returns to this one when \
                 unpinned (set_pinned). Atomic: an unknown id fails with elementNotFound and \
                 nothing moves. REQUIRES a connected device with the objectLayerWrites \
@@ -1387,7 +1398,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array", "items": .object(["type": "string"]),
-                        "description": "Text, image and/or arrow ids — a non-empty list.",
+                        "description": "Text, image, arrow and/or formula ids — a non-empty list.",
                     ]),
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front or back."]),
@@ -1432,14 +1443,15 @@ public actor MCPAdapter {
         Tool(
             name: "set_pinned",
             description: """
-                Sets the `pinned` flag on the named placed texts, images and/or arrows of a \
-                document. `ids` may mix text, image and arrow ids (as returned by \
-                list_texts/list_images/list_arrows/add_text/add_image/add_arrow). A pinned \
+                Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas of \
+                a document. `ids` may mix their ids (as returned by \
+                list_texts/list_images/list_arrows/list_formulas and the add_ tools). A pinned \
                 element is protected from the user's touches (move, delete, transform). A pinned \
                 IMAGE also paints in the pinned-images layer, beneath everything but the paper, \
-                and returns to its own layer when unpinned; a pinned text or arrow stays where \
-                it paints. Server-side, no device needed. Atomic: if any id isn't a text, image \
-                or arrow in the document it fails with elementNotFound and nothing changes. \
+                and returns to its own layer when unpinned; a pinned text, arrow or formula stays \
+                where it paints. Server-side, no device needed. Atomic: if any id isn't a text, \
+                image, arrow or formula in the document it fails with elementNotFound and nothing \
+                changes. \
                 unknownDoc if the document doesn't exist. \
                 \(writeToolCaveats)
                 """,
@@ -1449,7 +1461,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "ids": .object([
                         "type": "array",
-                        "description": "Ids of the placed texts/images/arrows to (un)pin — a non-empty list.",
+                        "description": "Ids of the placed texts/images/arrows/formulas to (un)pin — a non-empty list.",
                         "items": .object(["type": "string"]),
                     ]),
                     "pinned": .object(["type": "boolean", "description": "true to pin, false to unpin."]),
@@ -2061,6 +2073,121 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "list_formulas",
+            description: """
+                Lists a document's formula objects, one per formula — measured by a connected \
+                InfinitySketch device with the `formulas` capability, which typesets each one \
+                (noDeviceAvailable if none). Never writes. A `$…$` formula inside a text is part \
+                of that text (list_texts' `inlineMath`), not listed here.
+
+                REPLY: an ARRAY of `{id, latex, typeset, message?, box, baseline, size, color?, \
+                opacity, pinned, layer, tags}`. `latex` is the source as stored. `typeset` false \
+                means the engine cannot set it: the app shows the source as plain text and \
+                `message` is the parser's reason — fix it with edit_formula. `box` is [x, y, \
+                width, height], the canvas-space bounding box of the typeset box as drawn \
+                (rotation and scale included), and `baseline` [x, y] the left end of its \
+                baseline. `size` is \
+                in points. `color` is light-canonical `#RRGGBBAA`, absent for Automatic (the \
+                paper's label color). `layer` is `front` or `back`.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to read."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_formula",
+            description: """
+                Places a formula object: ONE LaTeX formula per object, typeset by the app — what \
+                its Formula button makes. Write `latex` WITHOUT `$` markers: `\\frac{a}{b}`, \
+                not `$\\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with \
+                `inlineMath: true` (add_text), with each formula between `$` signs. `x` and `y` \
+                are the LEFT END OF THE BASELINE in canvas points, so formulas placed at the same \
+                y-coordinate sit on one line, as text does. `size` is the point size it is \
+                typeset at (1–2000); omitted, the user's text size, else 20. `color` is \
+                light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a \
+                dark-authored hex); omitted, the user's text color, else Automatic — black on \
+                light paper, white on dark. A source that does not typeset is STORED and \
+                reported (`typeset: false` with the parser's `message`), shown as its source \
+                text until you correct it with edit_formula. A blank source fails with \
+                emptyFormula, one over 4000 characters with formulaTooLong. Goes on top of Front \
+                objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
+
+                REPLY: one JSON object `{id, typeset, message?, box, baseline, seq}` — `box` is \
+                [x, y, width, height] of the typeset box and `baseline` [x, y] the left end of its \
+                baseline, in canvas space. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 characters."]),
+                    "x": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
+                    "y": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
+                    "size": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` (and the colors named in the source) were chosen for a dark page. Default light."]),
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front (above the strokes, the default) or back (behind strokes and grids)."]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for the new formula (see tag_elements); find it again later with find_elements.",
+                    ]),
+                ]),
+                "required": .array(["docId", "latex", "x", "y"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "edit_formula",
+            description: """
+                Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` \
+                markers), `size` (points, 1–2000) and `color` (light-canonical; \
+                `colorAppearance` only together with `color`) — give at least one. The LEFT END \
+                OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
+                or scaled, so a longer source grows to the right. A source that does not typeset \
+                is stored and reported as on add_formula. formulaNotFound for an unknown id. An \
+                edit that changes nothing writes nothing. REQUIRES a device with the `formulas` \
+                capability.
+
+                REPLY: `{id, typeset, message?, box, baseline, seq}` as add_formula's; an edit \
+                that changed nothing has `unchanged: true` and no `seq`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "id": .object(["type": "string", "description": "The formula (list_formulas' or add_formula's `id`)."]),
+                    "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 characters."]),
+                    "size": .object(["type": "number", "description": "The new point size, 1–2000."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light. Only with `color`."]),
+                ]),
+                "required": .array(["docId", "id"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "remove_formula",
+            description: """
+                Removes a formula object from a document by id (from list_formulas or \
+                add_formula). Done by the SERVER, so it needs no connected device and works on a \
+                document nobody has open. formulaNotFound when no formula has that id. \
+                \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "id": .object(["type": "string", "description": "The id of the formula to remove, from list_formulas."]),
+                ]),
+                "required": .array(["docId", "id"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "list_images",
             description: """
                 Lists a document's placed images, one per image, as \
@@ -2323,19 +2450,25 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to render."]),
                     "include": .object([
                         "type": "string",
-                        "enum": .array(["document", "strokes", "arrows", "none"].map(Value.string)),
+                        "enum": .array(["document", "strokes", "arrows", "formulas", "none"].map(Value.string)),
                         "description": """
                             What document content to render, alongside any ephemeral \
                             strokes and arrows below. "document" (default): every stroke, placed \
-                            image, text and arrow. "strokes": only the strokes named \
+                            image, text, arrow and formula. "strokes": only the strokes named \
                             by strokeIds — no images or texts. "arrows": only the arrows named \
-                            by arrowIds (and restyle.arrowIds) — a clean swatch. "none": nothing from \
-                            the document.
+                            by arrowIds (and restyle.arrowIds) — a clean swatch. "formulas": only \
+                            the formulas named by formulaIds (needs a device with the `formulas` \
+                            capability). "none": nothing from the document.
                             """,
                     ]),
                     "arrowIds": .object([
                         "type": "array",
                         "description": "With include: \"arrows\", the arrow ids (list_arrows) to show.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "formulaIds": .object([
+                        "type": "array",
+                        "description": "With include: \"formulas\" (which requires it), the formula ids (list_formulas) to show.",
                         "items": .object(["type": "string"]),
                     ]),
                     "arrows": .object([
@@ -2572,7 +2705,9 @@ public actor MCPAdapter {
                 endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, \
                 boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth \
                 point between its ends), segmentMiddle (the middle of one of an arrow's segments). \
-                An arrow's ends and middle report as endpoint and midpoint.
+                An arrow's ends and middle report as endpoint and midpoint. A formula's box \
+                points report as boxCorner / boxEdgeMiddle / boxCenter and its baseline as \
+                textBaseline, like a text's.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2898,8 +3033,8 @@ public actor MCPAdapter {
                 (absent JSON keys read as nothing, not as an error):
 
                 - `elements` — what is selected. NOT "strokes": each entry is \
-                  `{kind: "stroke"|"text"|"image"|"arrow", id, canvasBounds, pinned}`, so one \
-                  list covers all four kinds.
+                  `{kind: "stroke"|"text"|"image"|"arrow"|"formula", id, canvasBounds, pinned}`, \
+                  so one list covers all five kinds (a formula's `canvasBounds` is its typeset box).
                 - `canvasBounds` — the union of the selected elements. NOT "bounds".
                 - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the \
                   user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
@@ -3098,7 +3233,8 @@ public actor MCPAdapter {
                 Select specific elements by id on a connected device's live rect-select, replacing \
                 any existing selection. Pass `strokeIds` (stroke ids, from \
                 `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from \
-                `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — \
+                `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`), \
+                and/or `formulaIds` (from `list_formulas`; needs a device with the `formulas` capability) — \
                 at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized \
                 to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee \
                 exactly where they dragged it. REQUIRES a connected `controlSelection` device.
@@ -3125,6 +3261,11 @@ public actor MCPAdapter {
                     "arrowIds": .object([
                         "type": "array",
                         "description": "Arrow ids to select, from list_arrows or get_selection.",
+                        "items": .object(["type": "string"]),
+                    ]),
+                    "formulaIds": .object([
+                        "type": "array",
+                        "description": "Formula ids to select, from list_formulas or get_selection.",
                         "items": .object(["type": "string"]),
                     ]),
                     "keepRect": .object([
@@ -3186,7 +3327,8 @@ public actor MCPAdapter {
                 the overall selection bounds/referencePoint, and — per grid — the same line \
                 families render_sketch reports, so you can align the proposed transform before \
                 committing it. Arrows preview as they will commit: a scale keeps an arrow's width \
-                unless its `keepsWidth` is false. `include`: "withContext" (default) renders the grid and the \
+                unless its `keepsWidth` is false. Selected formulas move too (`kind: "formula"`, their \
+                typeset box as bounds). `include`: "withContext" (default) renders the grid and the \
                 rest of the document's content behind the moved selection; "selectionOnly" \
                 renders just the transformed selection, transparent background, no grid pixels \
                 (grid metadata is still reported). `rect` bounds the render like \
@@ -3252,7 +3394,7 @@ public actor MCPAdapter {
                 transform_selection's, composed left-to-right around the single reference \
                 point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width \
                 unless its `keepsWidth` is false). Returns the new elements' \
-                keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if \
+                keys/ids (formulas' as `createdFormulaIds`). Pass `expect` = a prior get_selection's `signature` to be rejected if \
                 the user changed the selection since (selectionChanged). REQUIRES a connected \
                 `controlSelection` device with an active selection.
                 """,
@@ -3310,22 +3452,23 @@ public actor MCPAdapter {
         Tool(
             name: "copy_elements",
             description: """
-                Copies named strokes/texts/images/arrows from document `source` INTO document \
+                Copies named strokes/texts/images/arrows/formulas from document `source` INTO document \
                 `target`, as FRESH clones (fresh ids) — unlike \
                 merge_docs, elements are never deduped by identity, so copying the same \
                 source element twice yields two distinct clones. `source` is left \
-                untouched; `target` gains the copies, texts, images and arrows keeping the \
-                order they had among each other. At least one of `strokeIds`/ \
-                `textIds`/`imageIds`/`arrowIds` is required. \
+                untouched; `target` gains the copies, texts, images, arrows and formulas keeping \
+                the order they had among each other. At least one of `strokeIds`/ \
+                `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a \
+                device with the `formulas` capability). \
                 REQUIRES a connected device with the copyElements capability — fails with \
                 noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if \
                 either document is absent, and deviceFailed: elementNotFound if an id \
                 isn't found in `source`. \(writeToolCaveats)
 
                 REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, \
-                `createdImageIds` and `createdArrowIds` — deliberately not `strokeIds`/`textIds`/ \
-                `imageIds`/`arrowIds`, which are this tool's ARGUMENTS and name the elements in \
-                the SOURCE.
+                `createdImageIds`, `createdArrowIds` and `createdFormulaIds` — deliberately not \
+                `strokeIds`/`textIds`/`imageIds`/`arrowIds`/`formulaIds`, which are this tool's \
+                ARGUMENTS and name the elements in the SOURCE.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -3352,6 +3495,11 @@ public actor MCPAdapter {
                         "description": "Arrow ids to clone, from list_arrows.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "formulaIds": .object([
+                        "type": "array",
+                        "description": "Formula ids to clone, from list_formulas.",
+                        "items": .object(["type": "string"]),
+                    ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
             ])
@@ -3359,17 +3507,17 @@ public actor MCPAdapter {
         Tool(
             name: "reorder_elements",
             description: """
-                Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE \
-                document — bring-to-front or send-to-back, authored by a connected \
-                InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` \
-                is required. `mode` selects the direction: "front" moves the named \
+                Sets the z-order (draw order) of named strokes/texts/images/arrows/formulas within \
+                ONE document — bring-to-front or send-to-back, authored by a connected \
+                InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds`/ \
+                `formulaIds` is required (`formulaIds` need a device with the `formulas` capability). `mode` selects the direction: "front" moves the named \
                 elements to the top of the draw order, "back" to the bottom. A stroke moves \
-                among the strokes. A text, image or arrow moves to the top (or bottom) of the \
-                LAYER it paints in, above (or below) every object of that layer WHATEVER ITS \
-                KIND — texts, images and arrows share one order. The document paints in \
-                LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose \
-                `layer` is "back"), the grid, strokes, front objects — this tool never moves \
-                anything between layers. list_texts/list_images/list_arrows report each \
+                among the strokes. A text, image, arrow or formula moves to the top (or bottom) of \
+                the LAYER it paints in, above (or below) every object of that layer WHATEVER ITS \
+                KIND — texts, images, arrows and formulas share one order. The document paints in \
+                LAYERS, bottom to top: pinned images, back objects (texts/images/arrows/formulas \
+                whose `layer` is "back"), the grid, strokes, front objects — this tool never moves \
+                anything between layers. list_texts/list_images/list_arrows/list_formulas report each \
                 object's `layer`; set_layer changes it, and set_pinned moves an image into or \
                 out of the pinned-images layer. \
                 REQUIRES a connected device with the reorderElements capability — fails \
@@ -3402,10 +3550,15 @@ public actor MCPAdapter {
                         "description": "Arrow ids to reorder, from list_arrows.",
                         "items": .object(["type": "string"]),
                     ]),
+                    "formulaIds": .object([
+                        "type": "array",
+                        "description": "Formula ids to reorder, from list_formulas.",
+                        "items": .object(["type": "string"]),
+                    ]),
                     "mode": .object([
                         "type": "string",
                         "enum": .array(["front", "back"].map(Value.string)),
-                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — strokes among the strokes, each text, image or arrow within the layer it paints in.",
+                        "description": "\"front\" moves the named elements to the top of the draw order, \"back\" to the bottom — strokes among the strokes, each text, image, arrow or formula within the layer it paints in.",
                     ]),
                 ]),
                 "required": .array(["docId", "mode"].map(Value.string)),
@@ -3790,6 +3943,10 @@ public actor MCPAdapter {
         case "edit_text": return await callEditText(arguments)
         case "remove_text": return await callRemoveText(arguments)
         case "remove_arrow": return await callRemoveArrow(arguments)
+        case "add_formula": return await callAddFormula(arguments)
+        case "edit_formula": return await callEditFormula(arguments)
+        case "list_formulas": return await callListFormulas(arguments)
+        case "remove_formula": return await callRemoveFormula(arguments)
         case "delete_doc": return await callDeleteDoc(arguments)
         case "remove_image": return await callRemoveImage(arguments)
         case "set_pinned": return await callSetPinned(arguments)
@@ -4326,6 +4483,155 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
             ) { seq in
                 "removed arrow \(arrowId) at seq \(seq)"
+            }
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    // MARK: - Formula objects (format 7)
+    //
+    // `add_formula` / `edit_formula` / `list_formulas` go to a device that says `formulas`: only a
+    // device can typeset, and the reply carries what it measured. `remove_formula` is the
+    // server's own JSON edit, like `remove_arrow`. The server refuses before any device is asked
+    // only what it can judge without typesetting — a blank source and one that is too long
+    // (`formulaSourceRefusal`), by the device's own names; everything else is the device's, and
+    // its refusal is forwarded by name.
+
+    /// `add_formula` — the arguments given are relayed verbatim (the device validates), the result
+    /// written back under the byte CAS.
+    private func callAddFormula(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let latex = try Self.stringArg(arguments, "latex")
+            _ = try Self.doubleArg(arguments, "x")
+            _ = try Self.doubleArg(arguments, "y")
+            if let refusal = Self.formulaSourceRefusal(latex) { return Self.errorResult(refusal) }
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string("addFormula")]
+            for key in ["latex", "x", "y", "size", "color", "colorAppearance", "layer", "tags"] {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `edit_formula` — like `add_formula`; the device refuses an edit that names none of
+    /// `latex` / `size` / `color`, and `colorAppearance` without `color`.
+    private func callEditFormula(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            _ = try Self.nonEmptyStringArg(arguments, "id")
+            if let latex = try Self.optionalStringArg(arguments, "latex"),
+               let refusal = Self.formulaSourceRefusal(latex) {
+                return Self.errorResult(refusal)
+            }
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            var envelope: [String: Value] = ["op": .string("editFormula")]
+            for key in ["id", "latex", "size", "color", "colorAppearance"] {
+                if let value = arguments?[key], !value.isNull { envelope[key] = value }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(envelope)) }
+            catch { return Self.errorResult("invalidArguments") }
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The shared tail of `add_formula` / `edit_formula`: ask a `formulas` device, write what it
+    /// returned under the byte CAS, and answer with what it MEASURED (`{id, typeset, message?,
+    /// box, baseline}`, its reply `meta`) plus the `seq`. The device answers an edit that changes
+    /// nothing with the request's own bytes: then nothing is written (a pointless write bumps
+    /// `seq` for every subscriber and spends the agent's one `undo_last_edit`) and the reply says
+    /// `unchanged: true`, without a `seq`.
+    private func relayFormulaWrite(docId: String, bytes: Data, spec: Data) async -> CallTool.Result {
+        let out: DeviceCommandBroker.StrokeOpReply
+        do {
+            out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "formulas")
+        } catch let error as DeviceCommandBroker.DeviceCommandError {
+            return Self.strokeOpErrorResult(error)
+        } catch {
+            return Self.errorResult("deviceFailed: \(error)")
+        }
+        // An absent or undecodable meta still writes (the bytes are the device's own, CAS-guarded);
+        // the reply then carries only what is known.
+        let measured = out.meta.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if out.bytes == bytes {
+            var reply = measured
+            reply["unchanged"] = true
+            return Self.textResult(Self.jsonText(reply))
+        }
+        return await submitAndRespond(
+            docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
+        ) { seq in
+            var reply = measured
+            reply["seq"] = seq
+            return Self.jsonText(reply)
+        }
+    }
+
+    /// `list_formulas` — read-only, relayed to a `formulas` device (an older app has none and is
+    /// never asked); its bare JSON array is passed straight through.
+    private func callListFormulas(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string("listFormulas")])) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec, capability: "formulas")
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return Self.textResult(String(data: out.bytes, encoding: .utf8) ?? "")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// `remove_formula` — server-side, like remove_arrow: no device, works on a closed document.
+    private func callRemoveFormula(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let formulaId = try Self.nonEmptyStringArg(arguments, "id")
+            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let out: Data
+            do {
+                out = try DocJSON.removeFormula(from: bytes, formulaId: formulaId)
+            } catch let error as DocJSON.DocJSONError {
+                return Self.errorResult(Self.reason(for: error))
+            }
+            return await submitAndRespond(
+                docId: docId, createIfMissing: false, fullDoc: out, expectedBytes: bytes
+            ) { seq in
+                "removed formula \(formulaId) at seq \(seq)"
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -5377,12 +5683,13 @@ public actor MCPAdapter {
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
+            let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
             let mode = try Self.stringArg(arguments, "mode")
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
-            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var reorderEnvelope: [String: Value] = [
                 "op": .string("reorderElements"),
                 "strokeIds": .array(strokeIds.map(Value.string)),
@@ -5391,6 +5698,7 @@ public actor MCPAdapter {
                 "mode": .string(mode),
             ]
             if !arrowIds.isEmpty { reorderEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
+            if !formulaIds.isEmpty { reorderEnvelope["formulaIds"] = .array(formulaIds.map(Value.string)) }
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object(reorderEnvelope))
@@ -5402,9 +5710,10 @@ public actor MCPAdapter {
                 // moves them within their kind and still answers success.
                 var parts = ["reorderElements"]
                 if !arrowIds.isEmpty { parts.append("arrows") }
-                if !(textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) { parts.append("objectLayerWrites") }
+                if !(textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) { parts.append("objectLayerWrites") }
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: parts.joined(separator: "+"))
+                                                       capability: Self.joiningFormulas(parts.joined(separator: "+"),
+                                                                                        if: !formulaIds.isEmpty))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5439,8 +5748,11 @@ public actor MCPAdapter {
             } catch { return Self.errorResult("invalidArguments") }
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: "reorderElements+objectLayerWrites")
+                // `ids` mix kinds: a formula's id among them joins `formulas` (`idsNameAFormula`).
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: bytes, spec: spec,
+                    capability: Self.joiningFormulas("reorderElements+objectLayerWrites",
+                                                     if: Self.idsNameAFormula(ids, in: bytes)))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5506,7 +5818,10 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "tagElements")
+                // `ids` mix kinds: a formula's id among them joins `formulas` (`idsNameAFormula`).
+                out = try await broker.requestStrokeOp(
+                    docId: docId, docBytes: bytes, spec: spec,
+                    capability: Self.joiningFormulas("tagElements", if: Self.idsNameAFormula(ids, in: bytes)))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5642,8 +5957,17 @@ public actor MCPAdapter {
                 // app would ignore the keys and answer a render WITHOUT them (`authorStrokes+arrows`).
                 let wantsArrows = arguments?["arrows"] != nil || arguments?["restyle"] != nil
                     || arguments?["arrowIds"] != nil || arguments?["include"] == .string("arrows")
+                // The same for formulas: an older app would ignore `formulaIds` (or refuse the
+                // include by name), so a render naming them goes only to a `formulas` device.
+                let wantsFormulas: Bool = {
+                    if arguments?["include"] == .string("formulas") { return true }
+                    if case .array(let ids)? = arguments?["formulaIds"] { return !ids.isEmpty }
+                    return false
+                }()
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
-                                                       capability: wantsArrows ? "authorStrokes+arrows" : "authorStrokes")
+                                                       capability: Self.joiningFormulas(
+                                                           wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
+                                                           if: wantsFormulas))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5748,7 +6072,7 @@ public actor MCPAdapter {
 
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
-        "scale", "appearance", "colorAppearance", "arrowIds", "arrows", "restyle",
+        "scale", "appearance", "colorAppearance", "arrowIds", "arrows", "restyle", "formulaIds",
     ]
 
     // MARK: - Stroke-editing tools (spec 2026-07-14):
@@ -5951,16 +6275,52 @@ public actor MCPAdapter {
     /// silently dropping a real edit is far worse than a redundant one.
     /// What `restore_stroke_widths` was given, by name: an arrow id is a UUID, a stroke id the
     /// composite key — "2 strokes and 1 arrow", "1 arrow" (whole-branch review #5).
-    static func restoreTargetsNoun(_ ids: [String]) -> String {
-        let arrows = ids.filter { UUID(uuidString: $0) != nil }.count
-        let strokes = ids.count - arrows
+    /// A formula's id is a UUID too, so `formulaIds` — the document's, `DocJSON.elementIds` — are
+    /// counted as formulas, never as arrows: "1 arrow and 1 formula" (formula plan, place 258).
+    static func restoreTargetsNoun(_ ids: [String], formulaIds: Set<String>) -> String {
+        let formulas = ids.filter(formulaIds.contains).count
+        let arrows = ids.filter { !formulaIds.contains($0) && UUID(uuidString: $0) != nil }.count
+        let strokes = ids.count - arrows - formulas
         func n(_ c: Int, _ word: String) -> String { "\(c) \(word)\(c == 1 ? "" : "s")" }
-        switch (strokes, arrows) {
-        case (_, 0): return strokes == 1 ? "stroke" : "strokes"
-        case (0, _): return arrows == 1 ? "arrow" : "arrows"
-        default: return "elements (\(n(strokes, "stroke")) and \(n(arrows, "arrow")))"
+        let kinds = [(strokes, "stroke"), (arrows, "arrow"), (formulas, "formula")].filter { $0.0 > 0 }
+        if kinds.count <= 1 {
+            let (count, word) = kinds.first ?? (strokes, "stroke")
+            return count == 1 ? word : word + "s"
         }
+        let parts = kinds.map { n($0.0, $0.1) }
+        return "elements (\(parts.dropLast().joined(separator: ", ")) and \(parts.last!))"
     }
+
+    /// The capability rule for a tool whose `ids` may MIX kinds (`set_layer`, `tag_elements`):
+    /// does any of them name a formula in THIS document? The server cannot tell a formula's id
+    /// from an arrow's or a text's without the document, so it reads the document's JSON — but
+    /// only when an id is UUID-shaped, since a formula's always is and a stroke's never is.
+    static func idsNameAFormula(_ ids: [String], in bytes: Data) -> Bool {
+        let candidates = ids.filter { UUID(uuidString: $0) != nil }
+        guard !candidates.isEmpty else { return false }
+        return !DocJSON.elementIds(.formula, in: bytes).isDisjoint(with: candidates)
+    }
+
+    /// `formulas` joined onto a capability when the call names a formula (`+arrows`' rule): an
+    /// app that does not know formulas decodes `formulaIds` by IGNORING it and would answer success
+    /// with the formulas left out, so it must never receive such a call — and every call without
+    /// one still reaches it, on exactly the capability it had before.
+    static func joiningFormulas(_ capability: String, if namesFormulas: Bool) -> String {
+        namesFormulas ? capability + "+formulas" : capability
+    }
+
+    /// What the SERVER refuses of a formula source before any device is asked, by the device's
+    /// own names: blank after trimming (`emptyFormula`) or more than 4000 UTF-16 units — the
+    /// editor's limit — (`formulaTooLong`). A source that does not typeset is NOT refused: the
+    /// device stores it and reports the parser's message.
+    static func formulaSourceRefusal(_ latex: String) -> String? {
+        if latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "emptyFormula" }
+        if latex.utf16.count > maxFormulaSourceLength { return "formulaTooLong" }
+        return nil
+    }
+
+    /// The app's `PlacedFormulaGeometry.maxSourceLength`.
+    static let maxFormulaSourceLength = 4000
 
     private func callRestoreStrokeWidths(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
@@ -5994,13 +6354,15 @@ public actor MCPAdapter {
                 let restoredIds: [String]
                 let unchangedIds: [String]
             }
+            // A formula's id is a UUID like an arrow's: the noun asks the document which is which.
+            let formulaIds = DocJSON.elementIds(.formula, in: docBytes)
             let meta = out.meta.flatMap { try? JSONDecoder().decode(RestoreMeta.self, from: $0) }
             let restoredCount = meta?.restoredIds.count ?? ids.count
             let unchangedCount = meta?.unchangedIds.count ?? 0
 
             guard restoredCount > 0 else {
                 return CallTool.Result(content: [.text(
-                    text: "no change: \(ids.count == 1 ? "the" : "all \(ids.count)") \(Self.restoreTargetsNoun(ids)) "
+                    text: "no change: \(ids.count == 1 ? "the" : "all \(ids.count)") \(Self.restoreTargetsNoun(ids, formulaIds: formulaIds)) "
                         + "already \(ids.count == 1 ? "has" : "have") the width "
                         + "they were drawn with (none had a scale to factor out) — nothing was written",
                     annotations: nil, _meta: nil)])
@@ -6011,7 +6373,7 @@ public actor MCPAdapter {
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
-                var summary = "restored \(restoredCount) of \(ids.count) \(Self.restoreTargetsNoun(ids)) at seq \(seq)"
+                var summary = "restored \(restoredCount) of \(ids.count) \(Self.restoreTargetsNoun(ids, formulaIds: formulaIds)) at seq \(seq)"
                 if unchangedCount > 0 {
                     summary += "; \(unchangedCount) had no scale to factor out"
                 }
@@ -6426,6 +6788,7 @@ public actor MCPAdapter {
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds")
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds")
             let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds")
+            let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds")
             let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
@@ -6448,6 +6811,9 @@ public actor MCPAdapter {
             if let arrowIds, !arrowIds.isEmpty {
                 envelope["arrowIds"] = .array(arrowIds.map(Value.string))
             }
+            if let formulaIds, !formulaIds.isEmpty {
+                envelope["formulaIds"] = .array(formulaIds.map(Value.string))
+            }
 
             let spec: Data
             do {
@@ -6460,7 +6826,9 @@ public actor MCPAdapter {
             do {
                 out = try await broker.requestStrokeOp(
                     docId: docId, docBytes: docBytes, spec: spec,
-                    capability: (arrowIds?.isEmpty ?? true) ? "controlSelection" : "controlSelection+arrows")
+                    capability: Self.joiningFormulas(
+                        (arrowIds?.isEmpty ?? true) ? "controlSelection" : "controlSelection+arrows",
+                        if: !(formulaIds?.isEmpty ?? true)))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -6805,13 +7173,14 @@ public actor MCPAdapter {
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
+            let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
             guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
             guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
             guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
 
-            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count
+            let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var copyEnvelope: [String: Value] = [
                 "op": .string("copyElements"),
                 "strokeIds": .array(strokeIds.map(Value.string)),
@@ -6819,6 +7188,7 @@ public actor MCPAdapter {
                 "imageIds": .array(imageIds.map(Value.string)),
             ]
             if !arrowIds.isEmpty { copyEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
+            if !formulaIds.isEmpty { copyEnvelope["formulaIds"] = .array(formulaIds.map(Value.string)) }
             let spec: Data
             do {
                 // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
@@ -6830,7 +7200,8 @@ public actor MCPAdapter {
             do {
                 out = try await broker.requestStrokeOp(
                     docId: target, docBytes: targetBytes, spec: spec,
-                    capability: arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
+                    capability: Self.joiningFormulas(arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
+                                                     if: !formulaIds.isEmpty),
                     specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
@@ -6869,6 +7240,9 @@ public actor MCPAdapter {
                     }
                     if let ids = decoded["createdArrowIds"], !ids.isEmpty {
                         summary += "\ncreatedArrowIds: \(ids.joined(separator: ", "))"
+                    }
+                    if let ids = decoded["createdFormulaIds"], !ids.isEmpty {
+                        summary += "\ncreatedFormulaIds: \(ids.joined(separator: ", "))"
                     }
                 }
                 return summary
@@ -7133,6 +7507,7 @@ public actor MCPAdapter {
         case .elementNotFound: return "elementNotFound"
         case .invalidColor: return "invalidSpec"
         case .arrowNotFound: return "arrowNotFound"
+        case .formulaNotFound: return "formulaNotFound"
         case .documentFormatNewer(let file):
             // The app's own token for the same state, so an agent handles both alike.
             return "\(DeviceCommandBroker.formatRefusalPrefix): file \(file), this server edits up to \(DocJSON.knownFormatVersion) — "
@@ -7161,13 +7536,17 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
-            for key in ["strokeIds", "textIds", "imageIds", "arrowIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
+            for key in ["strokeIds", "textIds", "imageIds", "arrowIds", "formulaIds", "canvasTranslate", "scale", "rotate", "canvasAnchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             // Names arrows only with a NON-EMPTY list: `arrowIds: []` must not exclude an older
             // app (review M4, 2026-10-14).
             let namesArrows: Bool = {
                 if case .array(let ids)? = envelope["arrowIds"] { return !ids.isEmpty }
+                return false
+            }()
+            let namesFormulas: Bool = {
+                if case .array(let ids)? = envelope["formulaIds"] { return !ids.isEmpty }
                 return false
             }()
             let spec: Data
@@ -7177,7 +7556,9 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: namesArrows ? "transformElements+arrows" : "transformElements")
+                                                       capability: Self.joiningFormulas(
+                                                           namesArrows ? "transformElements+arrows" : "transformElements",
+                                                           if: namesFormulas))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -7204,24 +7585,28 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let textIds = try Self.optionalStringArrayArg(arguments, "textIds") ?? []
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
-            guard !textIds.isEmpty || !imageIds.isEmpty else { return Self.errorResult("missingArgument") }
+            let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
+            guard !textIds.isEmpty || !imageIds.isEmpty || !formulaIds.isEmpty else { return Self.errorResult("missingArgument") }
             guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
+            var resetEnvelope: [String: Value] = [
+                "op": .string("resetElementTransforms"),
+                "textIds": .array(textIds.map(Value.string)),
+                "imageIds": .array(imageIds.map(Value.string)),
+            ]
+            if !formulaIds.isEmpty { resetEnvelope["formulaIds"] = .array(formulaIds.map(Value.string)) }
             let spec: Data
             do {
-                spec = try JSONEncoder().encode(Value.object([
-                    "op": .string("resetElementTransforms"),
-                    "textIds": .array(textIds.map(Value.string)),
-                    "imageIds": .array(imageIds.map(Value.string)),
-                ]))
+                spec = try JSONEncoder().encode(Value.object(resetEnvelope))
             } catch {
                 return Self.errorResult("invalidArguments")
             }
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
-                                                       capability: "transformElements")
+                                                       capability: Self.joiningFormulas("transformElements",
+                                                                                        if: !formulaIds.isEmpty))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -7232,7 +7617,7 @@ public actor MCPAdapter {
                 let unchangedIds: [String]
             }
             let meta = out.meta.flatMap { try? JSONDecoder().decode(ResetMeta.self, from: $0) }
-            let total = textIds.count + imageIds.count
+            let total = textIds.count + imageIds.count + formulaIds.count
             let resetCount = meta?.resetIds.count ?? total
             guard resetCount > 0 else {
                 return CallTool.Result(content: [.text(

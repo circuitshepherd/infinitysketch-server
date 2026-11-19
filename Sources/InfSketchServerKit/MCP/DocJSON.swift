@@ -49,6 +49,7 @@ public enum DocJSON {
         case elementNotFound
         case invalidColor
         case arrowNotFound
+        case formulaNotFound
         /// The document was written by an app whose file format is newer than the one these
         /// edits know (`knownFormatVersion`).
         case documentFormatNewer(file: Int)
@@ -261,6 +262,30 @@ public enum DocJSON {
         return try serialize(doc)
     }
 
+    /// Removes a formula object by id from the object list, every other slot left in place — the
+    /// `removeArrow` rule: a formula is plain JSON (`kind: "formula"`), so this needs no device and
+    /// works on a closed document. The format version is left as it is (a removal never raises or
+    /// lowers it). Throws `.formulaNotFound` when no formula has that id (a document without an
+    /// object list has no formulas).
+    public static func removeFormula(from bytes: Data, formulaId: String) throws -> Data {
+        var doc = try parseDocumentForEdit(bytes)
+        guard usesObjectList(doc) else { throw DocJSONError.formulaNotFound }
+        var formulas = elements(.formula, of: doc)
+        guard let index = entryIndex(withId: formulaId, in: formulas) else {
+            throw DocJSONError.formulaNotFound
+        }
+        formulas.remove(at: index)
+        setElements(formulas, .formula, in: &doc)
+        return try serialize(doc)
+    }
+
+    /// The ids of a document's elements of `kind` — a lenient READ (bytes that do not parse have
+    /// none). What the adapter asks to learn whether a mixed `ids` list names a formula.
+    static func elementIds(_ kind: ElementKind, in bytes: Data) -> Set<String> {
+        guard let doc = try? parseDocument(bytes) else { return [] }
+        return Set(elements(kind, of: doc).compactMap { ($0 as? [String: Any])?["id"] as? String })
+    }
+
     /// Removes a placed-image entry by id, then orphan-prunes its backing
     /// `pastedImagesData` blob IFF no *remaining* placed image still
     /// references the same `pastedImageDataId` — two placed images can share
@@ -287,9 +312,9 @@ public enum DocJSON {
         return try serialize(doc)
     }
 
-    /// Sets the `pinned` flag to `pinned` on every placed text, image or arrow whose
-    /// `id` is in `ids`. `ids` may mix text ids and image ids — both arrays are
-    /// scanned. ATOMIC: every id must resolve to a text or image, else
+    /// Sets the `pinned` flag to `pinned` on every placed text, image, arrow or formula whose
+    /// `id` is in `ids`. `ids` may mix the kinds — every one is scanned. ATOMIC: every id must
+    /// resolve to one of them, else
     /// `.elementNotFound` is thrown and nothing is mutated. Only the `pinned`
     /// field of a matched entry changes; every other field, and every
     /// non-dictionary / unmatched element (in either array), is preserved in
@@ -300,9 +325,10 @@ public enum DocJSON {
         let texts = elements(.text, of: doc)
         let images = elements(.image, of: doc)
         let arrows = usesObjectList(doc) ? elements(.arrow, of: doc) : []
+        let formulas = usesObjectList(doc) ? elements(.formula, of: doc) : []
 
         // Validate BEFORE mutating (atomic): every requested id must be present.
-        let present = Set((texts + images + arrows).compactMap { ($0 as? [String: Any])?["id"] as? String })
+        let present = Set((texts + images + arrows + formulas).compactMap { ($0 as? [String: Any])?["id"] as? String })
         for id in ids where !present.contains(id) {
             throw DocJSONError.elementNotFound
         }
@@ -323,6 +349,7 @@ public enum DocJSON {
             setElements(repin(texts), .text, in: &doc)
             setElements(repin(images), .image, in: &doc)
             if !arrows.isEmpty { setElements(repin(arrows), .arrow, in: &doc) }
+            if !formulas.isEmpty { setElements(repin(formulas), .formula, in: &doc) }
         } else {
             if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
             if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
@@ -450,13 +477,17 @@ public enum DocJSON {
     /// and write here goes through these two functions, so both shapes are edited in place and
     /// a format-5 document never gains a stray old key (the app would still keep its elements,
     /// but the list's order and layers are the source of truth).
-    /// `arrow` (document format 6) exists only in the one list; its legacy key is never present.
-    enum ElementKind: String { case text, image, arrow
-        var legacyKey: String {
+    /// `arrow` (document format 6) and `formula` (format 7) exist only in the one list: no app
+    /// ever wrote a per-kind array for them, so they have NO legacy key (nil), and a document
+    /// without the list has none of them.
+    enum ElementKind: String { case text, image, arrow, formula
+        /// The per-kind array a document from before format 5 keeps this kind in; nil for a kind
+        /// that only ever lived in `placedObjects`.
+        var legacyKey: String? {
             switch self {
             case .text: return "placedTextsData"
             case .image: return "placedImagesData"
-            case .arrow: return "placedArrowsData"
+            case .arrow, .formula: return nil
             }
         }
     }
@@ -468,7 +499,8 @@ public enum DocJSON {
         if let objects = doc["placedObjects"] as? [Any] {
             return objects.filter { (($0 as? [String: Any])?["kind"] as? String) == kind.rawValue }
         }
-        return (doc[kind.legacyKey] as? [Any]) ?? []
+        guard let key = kind.legacyKey else { return [] }
+        return (doc[key] as? [Any]) ?? []
     }
 
     /// Write back `kind`'s elements after an edit. In the one-list shape that kind's elements
@@ -477,7 +509,13 @@ public enum DocJSON {
     /// elements and an element without an id keep their slots untouched.
     static func setElements(_ new: [Any], _ kind: ElementKind, in doc: inout [String: Any]) {
         guard let objects = doc["placedObjects"] as? [Any] else {
-            doc[kind.legacyKey] = new
+            // A kind with no legacy key has no elements in such a document, and every caller
+            // that writes one checks `usesObjectList` first — so there is nothing to write.
+            guard let key = kind.legacyKey else {
+                assert(new.isEmpty, "\(kind) has no place in a document without an object list")
+                return
+            }
+            doc[key] = new
             return
         }
         func id(_ element: Any) -> String? { (element as? [String: Any])?["id"] as? String }

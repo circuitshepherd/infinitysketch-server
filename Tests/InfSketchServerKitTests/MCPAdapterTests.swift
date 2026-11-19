@@ -371,7 +371,8 @@ actor FakeCreateDocDevice {
 /// `strokeOpReply` — either a success (`autoReply: .bytes`) or a device-side
 /// failure (`autoReply: .failure`). `nil` stalls every request (recorded but
 /// never answered) — the `opInProgress`/manual-release scenarios.
-private actor FakeStrokeOpDevice {
+/// Internal, not private: `FormulaToolsTests` drives its tools through the same fake.
+actor FakeStrokeOpDevice {
     struct ReceivedRequest {
         let requestId: UInt32
         let docId: String
@@ -804,8 +805,9 @@ private actor FakeStrokeOpDevice {
     /// this from `listToolsContainsAllFiftySevenTools`. remove_arrow (review I2) added one,
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
     /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
-    /// `listToolsContainsAllFiftyNineTools`.
-    @Test func listToolsContainsAllSixtySixTools() async throws {
+    /// `listToolsContainsAllFiftyNineTools`. The formula tools (2026-11-19) added four, renaming
+    /// this from `listToolsContainsAllSixtySixTools`.
+    @Test func listToolsContainsAllSeventyTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -831,6 +833,7 @@ private actor FakeStrokeOpDevice {
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
             "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
+            "list_formulas", "add_formula", "edit_formula", "remove_formula",
         ])
         // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
         let editText = try #require(tools.first { $0.name == "edit_text" })
@@ -2415,11 +2418,11 @@ private actor FakeStrokeOpDevice {
     /// restore_stroke_widths names what it was given (whole-branch review #5).
     @Test func restoreWidthsNamesStrokesAndArrows() {
         let arrow = UUID().uuidString
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"]) == "stroke")
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"]) == "strokes")
-        #expect(MCPAdapter.restoreTargetsNoun([arrow]) == "arrow")
-        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString]) == "arrows")
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow]) == "elements (1 stroke and 1 arrow)")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"], formulaIds: []) == "stroke")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"], formulaIds: []) == "strokes")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow], formulaIds: []) == "arrow")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString], formulaIds: []) == "arrows")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow], formulaIds: []) == "elements (1 stroke and 1 arrow)")
     }
 
     /// The preset writes relay their arguments to an `arrowPresetWrites` device and pass its reply
@@ -4481,7 +4484,8 @@ private actor FakeStrokeOpDevice {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
                                      "add_text", "edit_text", "render_sketch",
-                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style"]
+                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
+                                     "add_formula", "edit_formula"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
             .map(\.name))
@@ -6517,6 +6521,10 @@ private actor FakeStrokeOpDevice {
             "restyle_strokes": ["storedColor"],
             "fill_region": ["storedColors"],
             "draw_dots": ["storedColors"],
+            "list_formulas": ["latex", "typeset", "message", "box", "baseline", "size", "color",
+                              "opacity", "pinned", "layer", "tags"],
+            "add_formula": ["id", "typeset", "message", "box", "baseline", "seq"],
+            "edit_formula": ["typeset", "box", "baseline", "seq", "unchanged"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }

@@ -253,7 +253,7 @@ actor Connection {
             if !caps.isDisjoint(with: [
                 "createDoc", "authorStrokes", "authorText", "controlSelection",
                 "mergeDocs", "authorImage", "authorGrids", "copyElements", "reorderElements", "tagElements", "transformElements",
-                "provideContent", "render", "snapObjects", "arrows",
+                "provideContent", "render", "snapObjects", "arrows", "formulas",
             ]) {
                 registeredWithBroker = true
                 await broker.register(

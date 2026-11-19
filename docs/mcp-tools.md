@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-69 tools, served over streamable HTTP at `/mcp`.
+73 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -88,6 +88,17 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | [`get_new_arrow_style`](#get_new_arrow_style) | Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted fields take. |
 | [`set_new_arrow_style`](#set_new_arrow_style) | Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) and/or the style fields given; what is not given stays — the color too with a… |
 
+## Formulas
+
+One LaTeX formula per object, written without `$` markers; mathematics inside a sentence is a text with `inlineMath: true` instead. Adding, editing and listing need a device with the `formulas` capability, which typesets; `remove_formula` is done by the server. Move, copy, reorder and select them with the element and selection tools' `formulaIds`.
+
+| Tool | Summary |
+|---|---|
+| [`list_formulas`](#list_formulas) | Lists a document's formula objects, one per formula — measured by a connected InfinitySketch device with the `formulas` capability, which typesets each one (noDeviceAvailable if… |
+| [`add_formula`](#add_formula) | Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. |
+| [`edit_formula`](#edit_formula) | Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `size` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together with… |
+| [`remove_formula`](#remove_formula) | Removes a formula object from a document by id (from list_formulas or add_formula). |
+
 ## Grids
 
 `visible` (drawn) and `enabled` (snapped-to) are independent. `snap` is a MULTIPLIER of `spacing`, not a distance.
@@ -104,19 +115,19 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 
 ## Elements
 
-Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
+Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
 
 | Tool | Summary |
 |---|---|
 | [`tag_elements`](#tag_elements) | Give elements durable TAGS, so you can find your own work again later — the strokes that make up a roof, the series of markers on a plot, the text that titles a chart. |
 | [`find_elements`](#find_elements) | Resolve TAGS to element ids, so you can act on them with any tool that takes ids. |
 | [`list_tags`](#list_tags) | Every tag in a document, with how many live things carry it, split by family. |
-| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. |
-| [`reset_element_transforms`](#reset_element_transforms) | Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
-| [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
-| [`set_layer`](#set_layer) | Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
-| [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by… |
-| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so… |
+| [`transform_elements`](#transform_elements) | Move, scale or rotate named strokes, texts, images, arrows (`arrowIds`) AND formulas (`formulaIds`) together — on ANY document, open or not. |
+| [`reset_element_transforms`](#reset_element_transforms) | Put placed texts, images and formulas back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text… |
+| [`reorder_elements`](#reorder_elements) | Sets the z-order (draw order) of named strokes/texts/images/arrows/formulas within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. |
+| [`set_layer`](#set_layer) | Moves placed texts, images, arrows and formulas into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
+| [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas of a document. `ids` may mix their ids (as returned by… |
+| [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by… |
 
 ## Selection
 
@@ -801,6 +812,62 @@ Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `pre
 
 ---
 
+## Formulas — reference
+
+### `list_formulas`
+
+Lists a document's formula objects, one per formula — measured by a connected InfinitySketch device with the `formulas` capability, which typesets each one (noDeviceAvailable if none). Never writes. A `$…$` formula inside a text is part of that text (list_texts' `inlineMath`), not listed here.
+
+REPLY: an ARRAY of `{id, latex, typeset, message?, box, baseline, size, color?, opacity, pinned, layer, tags}`. `latex` is the source as stored. `typeset` false means the engine cannot set it: the app shows the source as plain text and `message` is the parser's reason — fix it with edit_formula. `box` is [x, y, width, height], the canvas-space bounding box of the typeset box as drawn (rotation and scale included), and `baseline` [x, y] the left end of its baseline. `size` is in points. `color` is light-canonical `#RRGGBBAA`, absent for Automatic (the paper's label color). `layer` is `front` or `back`.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to read. |
+
+### `add_formula`
+
+Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. Write `latex` WITHOUT `$` markers: `\frac{a}{b}`, not `$\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with `inlineMath: true` (add_text), with each formula between `$` signs. `x` and `y` are the LEFT END OF THE BASELINE in canvas points, so formulas placed at the same y-coordinate sit on one line, as text does. `size` is the point size it is typeset at (1–2000); omitted, the user's text size, else 20. `color` is light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a dark-authored hex); omitted, the user's text color, else Automatic — black on light paper, white on dark. A source that does not typeset is STORED and reported (`typeset: false` with the parser's `message`), shown as its source text until you correct it with edit_formula. A blank source fails with emptyFormula, one over 4000 characters with formulaTooLong. Goes on top of Front objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
+
+REPLY: one JSON object `{id, typeset, message?, box, baseline, seq}` — `box` is [x, y, width, height] of the typeset box and `baseline` [x, y] the left end of its baseline, in canvas space. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `latex` | string | yes | The LaTeX source of ONE formula, without `$` markers, at most 4000 characters. |
+| `x` | number | yes | Canvas x-coordinate of the left end of the baseline. |
+| `y` | number | yes | Canvas y-coordinate of the baseline. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic. |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` (and the colors named in the source) were chosen for a dark page. Default light. |
+| `layer` | string — `front`, `back` | no | front (above the strokes, the default) or back (behind strokes and grids). |
+| `size` | number | no | Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20. |
+| `tags` | array | no | Durable tags for the new formula (see tag_elements); find it again later with find_elements. |
+
+### `edit_formula`
+
+Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `size` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together with `color`) — give at least one. The LEFT END OF THE BASELINE stays where it is on the canvas, also when the formula is rotated or scaled, so a longer source grows to the right. A source that does not typeset is stored and reported as on add_formula. formulaNotFound for an unknown id. An edit that changes nothing writes nothing. REQUIRES a device with the `formulas` capability.
+
+REPLY: `{id, typeset, message?, box, baseline, seq}` as add_formula's; an edit that changed nothing has `unchanged: true` and no `seq`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `id` | string | yes | The formula (list_formulas' or add_formula's `id`). |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. Only with `color`. |
+| `latex` | string | no | The new LaTeX source, without `$` markers, at most 4000 characters. |
+| `size` | number | no | The new point size, 1–2000. |
+
+### `remove_formula`
+
+Removes a formula object from a document by id (from list_formulas or add_formula). Done by the SERVER, so it needs no connected device and works on a document nobody has open. formulaNotFound when no formula has that id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `id` | string | yes | The id of the formula to remove, from list_formulas. |
+
+---
+
 ## Grids — reference
 
 ### `list_grids`
@@ -889,7 +956,7 @@ maxCandidates (default 64) is a SAFETY VALVE, not a working parameter: truncatio
 
 OBJECTS: pass objects: true to also get the points of the drawing itself within objectRadius (canvas points, default 50) — stroke ends, midpoints, crossings of two strokes, where a stroke crosses a grid line, the corners, edge middles and center of images and texts, and text baselines. They come back in a separate objectCandidates list, ordered by distance, each naming the element(s) it belongs to by the same ids list_strokes, list_texts and list_images report — so you can connect a new line to a SPECIFIC stroke's end. Needs a device with the snapObjects capability (noDeviceAvailable otherwise).
 
-REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from. With objects: true each entry also carries `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth point between its ends), segmentMiddle (the middle of one of an arrow's segments). An arrow's ends and middle report as endpoint and midpoint.
+REPLY: an ARRAY, one entry per point you asked about, each `{canvasPoint, candidates}` where a candidate is `{canvasPosition, distance, kind, parents}` — `kind` is the sort of snap (a grid line, or an intersection of two families) and `parents` names the grid(s) and families it came from. With objects: true each entry also carries `objectCandidates`, each `{canvasPosition, distance, kind, elementIds}` plus `gridId` and `familyId` for a stroke × grid-line crossing — `kind` is one of endpoint, midpoint, strokeIntersection, gridIntersection, boxCorner, boxEdgeMiddle, boxCenter, textBaseline, arrowPoint (an arrow's corner or smooth point between its ends), segmentMiddle (the middle of one of an arrow's segments). An arrow's ends and middle report as endpoint and midpoint. A formula's box points report as boxCorner / boxEdgeMiddle / boxCenter and its baseline as textBaseline, like a text's.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -915,7 +982,7 @@ Many-to-many: an element carries any number of tags and a tag covers any number 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Element ids (stroke, text, image or arrow id). Any number. |
+| `ids` | array | yes | Element ids (stroke, text, image, arrow or formula id — a formula's needs a device with the `formulas` capability). Any number. |
 | `mode` | string — `add`, `remove`, `replace` | no | add (default) / remove / replace. replace with an empty tags clears. |
 | `tags` | array | no | The tags to add, remove, or replace with. |
 
@@ -950,7 +1017,7 @@ REPLY: an OBJECT mapping each tag to `{"elements": N, "grids": M}` — live elem
 
 ### `transform_elements`
 
-Move, scale or rotate named strokes, texts, images AND arrows (`arrowIds`) together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
+Move, scale or rotate named strokes, texts, images, arrows (`arrowIds`) AND formulas (`formulaIds`) together — on ANY document, open or not. This is how you reposition a placed image: transform_strokes takes strokes only, and edit_text can move a text but not turn or resize it, so before this an image could be named, pinned, reordered, copied and deleted but never nudged without the document being open and a live selection running.
 
 Ops are named, never a raw matrix, and mean exactly what they mean on transform_strokes: `scale` then `rotate`, both about `anchor`, then `translate`. `anchor` defaults to the centre of the whole set's bounding box across all three kinds. Identity survives — a stroke keeps its id and its width-edit history, texts and images keep theirs; this is a MOVE, not a copy.
 
@@ -962,6 +1029,7 @@ An ARROW is baked: its points move; a `scale` changes its drawnWidth only when i
 | `arrowIds` | array | no | Arrow ids, as returned by list_arrows. An arrow's transform is baked into its points, so its heads never skew. A scale changes its WIDTH only when the arrow's `keepsWidth` is false (list_arrows reports it; true by default, so a scaled arrow keeps its width). |
 | `canvasAnchor` | array | no | [x, y]. Defaults to the centre of the whole set's bounding box. |
 | `canvasTranslate` | array | no | [dx, dy] in canvas points. |
+| `formulaIds` | array | no | Formula ids, as returned by list_formulas. Needs a device with the `formulas` capability. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
 | `rotate` | number | no | Degrees about the anchor; positive = clockwise on screen. |
 | `scale` | array | no | [sx, sy] about the anchor; non-zero. |
@@ -970,60 +1038,63 @@ An ARROW is baked: its points move; a `scale` changes its drawnWidth only when i
 
 ### `reset_element_transforms`
 
-Put placed texts and images back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text transforms" selection-menu items, and the same implementation, so the two cannot disagree. An image keeps its CENTER where it is shown; a text keeps its ANCHOR point (the `anchor` list_texts reports, or the automatic one on its first baseline). Only the transform changes — content, style, anchor and wrap width stay. Works on any document, open or not.
+Put placed texts, images and formulas back to their ORIGINAL SIZE, unrotated and unskewed, WHERE THEY ARE — the agent door onto the app's "Reset image transforms" and "Reset text transforms" selection-menu items, and the same implementation, so the two cannot disagree. An image keeps its CENTER where it is shown; a text keeps its ANCHOR point (the `anchor` list_texts reports, or the automatic one on its first baseline); a formula keeps the left end of its baseline (`formulaIds` need a device with the `formulas` capability). Only the transform changes — content, style, anchor and wrap width stay. Works on any document, open or not.
 
 ATOMIC: every id must resolve or nothing is reset. When every named element is already untransformed (a plain move at most), NOTHING is written and the reply says so. Strokes are not touched: to undo a stroke's scaled ink width use restore_stroke_widths, and to move or turn anything use transform_elements. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `formulaIds` | array | no | Formula ids, as returned by list_formulas. |
 | `imageIds` | array | no | Placed-image ids, as returned by list_images. |
 | `textIds` | array | no | Placed-text ids, as returned by list_texts. |
 
 ### `reorder_elements`
 
-Sets the z-order (draw order) of named strokes/texts/images/arrows within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds` is required. `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom. A stroke moves among the strokes. A text, image or arrow moves to the top (or bottom) of the LAYER it paints in, above (or below) every object of that layer WHATEVER ITS KIND — texts, images and arrows share one order. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows report each object's `layer`; set_layer changes it, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the z-order (draw order) of named strokes/texts/images/arrows/formulas within ONE document — bring-to-front or send-to-back, authored by a connected InfinitySketch device. At least one of `strokeIds`/`textIds`/`imageIds`/`arrowIds`/ `formulaIds` is required (`formulaIds` need a device with the `formulas` capability). `mode` selects the direction: "front" moves the named elements to the top of the draw order, "back" to the bottom. A stroke moves among the strokes. A text, image, arrow or formula moves to the top (or bottom) of the LAYER it paints in, above (or below) every object of that layer WHATEVER ITS KIND — texts, images, arrows and formulas share one order. The document paints in LAYERS, bottom to top: pinned images, back objects (texts/images/arrows/formulas whose `layer` is "back"), the grid, strokes, front objects — this tool never moves anything between layers. list_texts/list_images/list_arrows/list_formulas report each object's `layer`; set_layer changes it, and set_pinned moves an image into or out of the pinned-images layer. REQUIRES a connected device with the reorderElements capability — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, unknownDoc if the document doesn't exist, and deviceFailed: <reason> (e.g. elementNotFound) for an unknown id. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — strokes among the strokes, each text, image or arrow within the layer it paints in. |
+| `mode` | string — `front`, `back` | yes | "front" moves the named elements to the top of the draw order, "back" to the bottom — strokes among the strokes, each text, image, arrow or formula within the layer it paints in. |
 | `arrowIds` | array | no | Arrow ids to reorder, from list_arrows. |
+| `formulaIds` | array | no | Formula ids to reorder, from list_formulas. |
 | `imageIds` | array | no | Placed-image ids to reorder, from list_images. |
 | `strokeIds` | array | no | Stroke ids to reorder, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to reorder, from list_texts. |
 
 ### `set_layer`
 
-Moves placed texts, images and arrows into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. Each one that changes layer lands on TOP of its new layer; one already there stays where it is. `ids` may mix text, image and arrow ids. A pinned image paints in the pinned-images layer whatever its layer, and returns to this one when unpinned (set_pinned). Atomic: an unknown id fails with elementNotFound and nothing moves. REQUIRES a connected device with the objectLayerWrites capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Moves placed texts, images, arrows and formulas into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. Each one that changes layer lands on TOP of its new layer; one already there stays where it is. `ids` may mix text, image, arrow and formula ids (a formula's needs a device with the `formulas` capability). A pinned image paints in the pinned-images layer whatever its layer, and returns to this one when unpinned (set_pinned). Atomic: an unknown id fails with elementNotFound and nothing moves. REQUIRES a connected device with the objectLayerWrites capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Text, image and/or arrow ids — a non-empty list. |
+| `ids` | array | yes | Text, image, arrow and/or formula ids — a non-empty list. |
 | `layer` | string — `front`, `back` | yes | front or back. |
 
 ### `set_pinned`
 
-Sets the `pinned` flag on the named placed texts, images and/or arrows of a document. `ids` may mix text, image and arrow ids (as returned by list_texts/list_images/list_arrows/add_text/add_image/add_arrow). A pinned element is protected from the user's touches (move, delete, transform). A pinned IMAGE also paints in the pinned-images layer, beneath everything but the paper, and returns to its own layer when unpinned; a pinned text or arrow stays where it paints. Server-side, no device needed. Atomic: if any id isn't a text, image or arrow in the document it fails with elementNotFound and nothing changes. unknownDoc if the document doesn't exist. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas of a document. `ids` may mix their ids (as returned by list_texts/list_images/list_arrows/list_formulas and the add_ tools). A pinned element is protected from the user's touches (move, delete, transform). A pinned IMAGE also paints in the pinned-images layer, beneath everything but the paper, and returns to its own layer when unpinned; a pinned text, arrow or formula stays where it paints. Server-side, no device needed. Atomic: if any id isn't a text, image, arrow or formula in the document it fails with elementNotFound and nothing changes. unknownDoc if the document doesn't exist. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `ids` | array | yes | Ids of the placed texts/images/arrows to (un)pin — a non-empty list. |
+| `ids` | array | yes | Ids of the placed texts/images/arrows/formulas to (un)pin — a non-empty list. |
 | `pinned` | boolean | yes | true to pin, false to unpin. |
 
 ### `copy_elements`
 
-Copies named strokes/texts/images/arrows from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images and arrows keeping the order they had among each other. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds` is required. REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images, arrows and formulas keeping the order they had among each other. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a device with the `formulas` capability). REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
-REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds` and `createdArrowIds` — deliberately not `strokeIds`/`textIds`/ `imageIds`/`arrowIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
+REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds`, `createdArrowIds` and `createdFormulaIds` — deliberately not `strokeIds`/`textIds`/`imageIds`/`arrowIds`/`formulaIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `source` | string | yes | The document to copy FROM (left unchanged). |
 | `target` | string | yes | The document to copy INTO (gains the clones). |
 | `arrowIds` | array | no | Arrow ids to clone, from list_arrows. |
+| `formulaIds` | array | no | Formula ids to clone, from list_formulas. |
 | `imageIds` | array | no | Placed-image ids to clone, from list_images. |
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
@@ -1042,12 +1113,13 @@ Select every stroke, placed text, and placed image in the document on a connecte
 
 ### `select_elements`
 
-Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`) — at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
+Select specific elements by id on a connected device's live rect-select, replacing any existing selection. Pass `strokeIds` (stroke ids, from `list_strokes`/`get_strokes`), `textIds`, and/or `imageIds` (text/image ids, from `get_selection` or the document summary), and/or `arrowIds` (from `list_arrows`), and/or `formulaIds` (from `list_formulas`; needs a device with the `formulas` capability) — at least one id across the arrays is required (enforced device-side). By default the selection rectangle is resized to hug the chosen elements; pass `keepRect: true` to leave the user's own marquee exactly where they dragged it. REQUIRES a connected `controlSelection` device.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name). |
 | `arrowIds` | array | no | Arrow ids to select, from list_arrows or get_selection. |
+| `formulaIds` | array | no | Formula ids to select, from list_formulas or get_selection. |
 | `imageIds` | array | no | Placed-image ids to select. |
 | `keepRect` | boolean | no | Keep the existing selection rectangle instead of resizing it to the chosen elements. Defaults to false. |
 | `strokeIds` | array | no | Stroke ids to select. |
@@ -1067,7 +1139,7 @@ Read the user's CURRENT live rect-select selection on a connected device. REQUIR
 
 THE REPLY'S KEYS, because guessing them wastes a round trip and fails SILENTLY (absent JSON keys read as nothing, not as an error):
 
-- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image"|"arrow", id, canvasBounds, pinned}`, so one   list covers all four kinds.
+- `elements` — what is selected. NOT "strokes": each entry is   `{kind: "stroke"|"text"|"image"|"arrow"|"formula", id, canvasBounds, pinned}`,   so one list covers all five kinds (a formula's `canvasBounds` is its typeset box).
 - `canvasBounds` — the union of the selected elements. NOT "bounds".
 - `canvasRect` — the MARQUEE itself, which is a different thing: it is where the   user dragged, and it can be non-empty while `elements` is empty. NOT "rect".
 - `canvasReferencePoint` — the pivot the user placed, absent if they have not.
@@ -1111,7 +1183,7 @@ Each item of `ops`:
 
 ### `preview_selection`
 
-Preview a proposed transform of the user's live selection WITHOUT committing anything — the agent's scratchpad for a selection edit, the same role render_sketch's ephemeral strokes play for stroke authoring: synthesize → render → refine → only then commit via transform_selection. `ops` is 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), the same shape as transform_selection: rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — pivoting on the reference point the USER placed (noReferencePoint if none is set). Returns a PNG plus metadata: canvas-space bounds for each transformed selected element (and, with includePoints, each stroke's transformed points), the overall selection bounds/referencePoint, and — per grid — the same line families render_sketch reports, so you can align the proposed transform before committing it. Arrows preview as they will commit: a scale keeps an arrow's width unless its `keepsWidth` is false. `include`: "withContext" (default) renders the grid and the rest of the document's content behind the moved selection; "selectionOnly" renders just the transformed selection, transparent background, no grid pixels (grid metadata is still reported). `rect` bounds the render like render_sketch's; omit for auto-fit. Nothing here is ever written to the document or the live selection. REQUIRES a connected `controlSelection` device with an active selection.
+Preview a proposed transform of the user's live selection WITHOUT committing anything — the agent's scratchpad for a selection edit, the same role render_sketch's ephemeral strokes play for stroke authoring: synthesize → render → refine → only then commit via transform_selection. `ops` is 1 to 16 operations, composed left-to-right into one undo step (single fixed reference point), the same shape as transform_selection: rotate {op:"rotate",degrees} (+ = clockwise, relative), scale {op:"scale",factor} (uniform), translate {op:"translate",dx,dy}, flipHorizontal / flipVertical — pivoting on the reference point the USER placed (noReferencePoint if none is set). Returns a PNG plus metadata: canvas-space bounds for each transformed selected element (and, with includePoints, each stroke's transformed points), the overall selection bounds/referencePoint, and — per grid — the same line families render_sketch reports, so you can align the proposed transform before committing it. Arrows preview as they will commit: a scale keeps an arrow's width unless its `keepsWidth` is false. Selected formulas move too (`kind: "formula"`, their typeset box as bounds). `include`: "withContext" (default) renders the grid and the rest of the document's content behind the moved selection; "selectionOnly" renders just the transformed selection, transparent background, no grid pixels (grid metadata is still reported). `rect` bounds the render like render_sketch's; omit for auto-fit. Nothing here is ever written to the document or the live selection. REQUIRES a connected `controlSelection` device with an active selection.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -1124,7 +1196,7 @@ Preview a proposed transform of the user's live selection WITHOUT committing any
 
 ### `duplicate_selection`
 
-Duplicate the user's live selection on a connected device. With no `ops`: a provisional copy in place — like the toolbar's duplicate, it commits on a later edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as transform_selection's, composed left-to-right around the single reference point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width unless its `keepsWidth` is false). Returns the new elements' keys/ids. Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). REQUIRES a connected `controlSelection` device with an active selection.
+Duplicate the user's live selection on a connected device. With no `ops`: a provisional copy in place — like the toolbar's duplicate, it commits on a later edit and is deleted on a later deselect. With `ops` (1 to 16, same shape as transform_selection's, composed left-to-right around the single reference point): clone + transform as one "stamp" undo step (a scale keeps an arrow's width unless its `keepsWidth` is false). Returns the new elements' keys/ids (formulas' as `createdFormulaIds`). Pass `expect` = a prior get_selection's `signature` to be rejected if the user changed the selection since (selectionChanged). REQUIRES a connected `controlSelection` device with an active selection.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -1184,7 +1256,8 @@ REPLY: a PNG image plus a metadata text block. With writeToFile: true there is N
 | `background` | string — `transparent`, `paper`, `paper+grid` | no | "transparent", "paper" (the document's background colour for the current appearance), or "paper+grid" (default — the grid is what agents align to). |
 | `canvasRect` | array | no | [x, y, w, h] in canvas coordinates. Omit for auto-fit: the tight bounding box of everything rendered, expanded by padding. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
-| `include` | string — `document`, `strokes`, `arrows`, `none` | no | What document content to render, alongside any ephemeral strokes and arrows below. "document" (default): every stroke, placed image, text and arrow. "strokes": only the strokes named by strokeIds — no images or texts. "arrows": only the arrows named by arrowIds (and restyle.arrowIds) — a clean swatch. "none": nothing from the document. |
+| `formulaIds` | array | no | With include: "formulas" (which requires it), the formula ids (list_formulas) to show. |
+| `include` | string — `document`, `strokes`, `arrows`, `formulas`, `none` | no | What document content to render, alongside any ephemeral strokes and arrows below. "document" (default): every stroke, placed image, text, arrow and formula. "strokes": only the strokes named by strokeIds — no images or texts. "arrows": only the arrows named by arrowIds (and restyle.arrowIds) — a clean swatch. "formulas": only the formulas named by formulaIds (needs a device with the `formulas` capability). "none": nothing from the document. |
 | `maxPixels` | number | no | Pixel budget. Defaults to 1000000, hard ceiling 4000000. An over-large request is downscaled, not rejected, and the metadata reports the scale actually used. |
 | `padding` | number | no | Auto-fit margin in canvas points. Defaults to 10% of the fitted box's larger side, minimum 20. |
 | `restyle` | object | no | Render EXISTING arrows as if restyled — the document unchanged: `arrowIds` plus any of restyle_arrows' fields (preset, heads, widths, dash, color, opacity, keepsWidth …), applied by the same code restyle_arrows uses. Iterate: render → adjust → render → restyle_arrows. The metadata's `restyledArrows` reports each one's `canvasBounds` and resolved `style`. Combine with include: "arrows" for an isolated swatch. |
