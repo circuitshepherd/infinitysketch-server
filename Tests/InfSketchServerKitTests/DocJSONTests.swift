@@ -81,13 +81,36 @@ import Testing
         #expect(edited.text == "Replaced")
         #expect(edited.x == 7)
         #expect(edited.y == 400)   // untouched axis preserved
-        // Replacing the string resets runs to [string, {}] (formatting reset, documented):
+        // The new characters keep the style of the text's FIRST run, copied as it is — the
+        // attributes are UIKit-archived data this side cannot make, but it can keep them.
+        // (Until 2026-11-19 a new string reset the runs to [string, {}].)
         let obj = try JSONSerialization.jsonObject(with: out) as! [String: Any]
         let texts = obj["placedTextsData"] as! [[String: Any]]
         let entry = texts.first(where: { ($0["id"] as? String)?.hasSuffix("0002") == true })!
         let runs = entry["text"] as! [Any]
         #expect(runs.count == 2)
-        #expect((runs[1] as? [String: Any])?.isEmpty == true)
+        #expect(runs[0] as? String == "Replaced")
+        #expect(runs[1] as? [String: String] == ["NSColor": "ZHVtbXk=", "NSFont": "ZHVtbXk="])
+    }
+
+    /// A text of several runs becomes one run in the FIRST run's style; a text without a style
+    /// stays without one; a first run that is not an attribute object gives the plain run.
+    @Test func newCharactersTakeTheFirstRunsStyle() throws {
+        func runs(after textJSON: String) throws -> [Any] {
+            let doc = Data("""
+            {"placedTextsData": [{"id": "AAAAAAAA-0000-0000-0000-000000000009", "text": \(textJSON),
+              "rect": [[0, 0], [1, 1]], "pinned": false}], "strokeAnchors": {}}
+            """.utf8)
+            let out = try DocJSON.editText(in: doc, textId: "AAAAAAAA-0000-0000-0000-000000000009", newText: "N", x: nil, y: nil)
+            let obj = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+            return ((obj["placedTextsData"] as! [[String: Any]])[0]["text"] as! [Any])
+        }
+        let mixed = try runs(after: #"["a", {"NSFont": "one"}, "b", {"NSFont": "two", "NSColor": "c"}]"#)
+        #expect(mixed.count == 2 && mixed[0] as? String == "N" && mixed[1] as? [String: String] == ["NSFont": "one"])
+        let plain = try runs(after: #"["a", {}]"#)
+        #expect(plain.count == 2 && (plain[1] as? [String: Any])?.isEmpty == true)
+        let odd = try runs(after: #"["a", 3]"#)
+        #expect(odd.count == 2 && (odd[1] as? [String: Any])?.isEmpty == true)
     }
 
     @Test func editPositionOnlyPreservesRuns() throws {

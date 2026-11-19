@@ -835,9 +835,11 @@ actor FakeStrokeOpDevice {
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
             "list_formulas", "add_formula", "edit_formula", "remove_formula",
         ])
-        // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
+        // What a new `text` does to the style is load-bearing enough to pin: it keeps the first
+        // character's (until 2026-11-19 it reset the formatting, and the text here said "resets").
         let editText = try #require(tools.first { $0.name == "edit_text" })
-        #expect(editText.description?.contains("resets") == true)
+        #expect(editText.description?.contains("KEEP THE STYLE OF THE TEXT'S FIRST CHARACTER") == true)
+        #expect(editText.description?.contains("resets") == false)
 
         await server.stop()
     }
@@ -2813,6 +2815,42 @@ actor FakeStrokeOpDevice {
         #expect(stroke["color"] as? String == "#FF00AA")
         #expect(stroke["inkType"] as? String == "marker")
 
+        await server.stop()
+    }
+
+    /// A stroke takes `tags`, as a dot, a fill, a text, an arrow and a formula do (2026-11-19: an
+    /// agent that drew a page had to tag its 61 strokes in a second call). The device has decoded
+    /// the key since tags exist; only this side's schema did not offer it. A candidate stroke of
+    /// render_sketch is never written and takes none.
+    @Test func drawStrokesOffersAndCarriesTags() async throws {
+        func itemProperties(of tool: String) throws -> [String: Value] {
+            let definition = try #require(MCPAdapter.toolDefinitions.first { $0.name == tool })
+            guard case .object(let schema) = definition.inputSchema, case .object(let properties)? = schema["properties"],
+                  case .object(let strokes)? = properties["strokes"], case .object(let items)? = strokes["items"],
+                  case .object(let itemProperties)? = items["properties"] else {
+                Issue.record("\(tool): no strokes item schema"); return [:]
+            }
+            return itemProperties
+        }
+        #expect(try itemProperties(of: "draw_strokes")["tags"] != nil)
+        #expect(try itemProperties(of: "render_sketch")["tags"] == nil)
+
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+        let strokesArg: Value = .array([.object([
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+            "tags": .array([.string("axis"), .string("fft")]),
+        ])])
+        let (_, isError) = try await client.callTool(name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let stroke = try #require((envelope["strokes"] as? [[String: Any]])?.first)
+        #expect(stroke["tags"] as? [String] == ["axis", "fft"])
         await server.stop()
     }
 

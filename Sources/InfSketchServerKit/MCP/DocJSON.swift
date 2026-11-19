@@ -138,8 +138,11 @@ public enum DocJSON {
     }
 
     /// Mutates an existing text entry by id. `newText` (when non-nil) replaces
-    /// the run array wholesale with `[newText, {}]` — a documented formatting
-    /// reset, mirroring what a fresh `addText` would produce for that string.
+    /// the run array with ONE run of the new characters in the style of the
+    /// text's FIRST run, whose attribute object is copied as it is (it is
+    /// UIKit-archived data this side cannot make, but it can keep it). Until
+    /// 2026-11-19 it was `[newText, {}]`, a formatting reset: an agent that
+    /// corrected a label's wording got it back in the default size and color.
     /// `x`/`y` (when non-nil) update only that axis of `rect`'s origin; the
     /// untouched axis, size, sibling entries (including unrecognized array
     /// elements), and every other key are passed through unchanged (not
@@ -176,7 +179,7 @@ public enum DocJSON {
         }
 
         if let newText {
-            entry["text"] = makeTextRuns(newText)
+            entry["text"] = textRuns(newText, inTheStyleOf: entry["text"])
         }
 
         if x != nil || y != nil {
@@ -579,6 +582,15 @@ public enum DocJSON {
         if let n = any as? NSNumber { return n.doubleValue }
         if let i = any as? Int { return Double(i) }
         return nil
+    }
+
+    /// `text` as one run with the attributes of `existing`'s first run (`[string, {…}, string,
+    /// {…}, …]`), copied without being read. A first run that is not an attribute object (a
+    /// shape this side does not know) gives the plain run.
+    private static func textRuns(_ text: String, inTheStyleOf existing: Any?) -> [Any] {
+        guard let runs = existing as? [Any], runs.count >= 2, let attributes = runs[1] as? [String: Any]
+        else { return makeTextRuns(text) }
+        return [text, attributes]
     }
 
     /// `[text, {}]` — a fresh, unformatted run array (also used by `makeEntry`).

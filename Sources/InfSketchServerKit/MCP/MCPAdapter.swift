@@ -653,6 +653,22 @@ public actor MCPAdapter {
         ]),
     ])
 
+
+    /// `draw_strokes`'s item: the shared stroke item plus `tags`. A candidate stroke of
+    /// `render_sketch` is never written, so it takes none. The device's `StrokeSpec` has decoded
+    /// `tags` since tags exist (it is how `draw_dots` and `fill_region` tag what they make).
+    private static let committedStrokeItemSchema: Value = {
+        guard case .object(var schema) = strokeItemSchema, case .object(var properties)? = schema["properties"]
+        else { return strokeItemSchema }
+        properties["tags"] = .object([
+            "type": "array",
+            "items": .object(["type": "string"]),
+            "description": "Durable tags for this stroke, so find_elements can reach it again later (see tag_elements).",
+        ])
+        schema["properties"] = .object(properties)
+        return .object(schema)
+    }()
+
     /// The canonical per-stroke item schema — points/width/color/inkType —
     /// shared verbatim by `draw_strokes`'s `strokes` array and, since Task 5,
     /// `render_sketch`'s EPHEMERAL `strokes` array: both decode app-side into
@@ -798,13 +814,13 @@ public actor MCPAdapter {
                 Mutates an existing placed text by id: replace its string and/or move it, or \
                 restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` \
                 array (parts of it independently — a whole-field style is the base each span \
-                overrides). WARNING: replacing the text via PLAIN `text` (no style/spans) \
-                resets that entry's rich formatting to plain defaults — the attributed run's \
-                bold/italic/font/colour attributes are UIKit-archived data no server-side code \
-                can synthesize, so a new plain text run always replaces the old ones wholesale. \
-                A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles \
-                the EXISTING characters (or replaces them with `text`/`spans` if given) and \
-                needs a connected device — plain edits do not. Position-only edits (canvasX \
+                overrides). New characters given as `text` KEEP THE STYLE OF THE TEXT'S FIRST \
+                CHARACTER (font, size, color); a text of several styles becomes one run in \
+                that style, and style fields given beside `text` are set on top of it. `spans` \
+                say every run's style themselves. A STYLED edit (any of \
+                color/fontSize/bold/italic/family/spans present) restyles the EXISTING \
+                characters (or the new ones, if `text`/`spans` is given) and needs a connected \
+                device — plain edits do not. Position-only edits (canvasX \
                 and/or canvasY with no text/style) do not touch formatting. Colours: \
                 #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark \
                 canvas). Font \
@@ -1540,7 +1556,7 @@ public actor MCPAdapter {
                 Draws one or more freehand strokes into a document, authored by a connected \
                 InfinitySketch device. Each stroke is a list of (x, y) points in canvas \
                 coordinates — the same space as add_text's x/y — plus optional width, color, \
-                inkType, and smooth fields. Points are a POLYLINE by default (smooth: false, \
+                inkType, smooth and tags fields (tags: so find_elements reaches your strokes later). Points are a POLYLINE by default (smooth: false, \
                 the default): straight segments and sharp corners, which is almost certainly \
                 what you mean. Set smooth: true to have them treated as spline knots and \
                 smoothly interpolated instead — useful for a curve given as a few sparse \
@@ -1586,8 +1602,9 @@ public actor MCPAdapter {
                         // would just fall back to its default. Pinned server-side by
                         // drawStrokesSpecEnvelopeMatchesCanonicalShape; change both repos
                         // in lockstep or not at all. Shared verbatim with render_sketch's
-                        // ephemeral `strokes` array via strokeItemSchema.
-                        "items": strokeItemSchema,
+                        // ephemeral `strokes` array via strokeItemSchema; a committed
+                        // stroke also takes `tags`.
+                        "items": committedStrokeItemSchema,
                     ]),
                 ]),
                 "required": .array(["docId", "strokes"].map(Value.string)),
