@@ -6521,10 +6521,10 @@ actor FakeStrokeOpDevice {
             "restyle_strokes": ["storedColor"],
             "fill_region": ["storedColors"],
             "draw_dots": ["storedColors"],
-            "list_formulas": ["latex", "typeset", "message", "box", "baseline", "size", "color",
-                              "opacity", "pinned", "layer", "tags"],
-            "add_formula": ["id", "typeset", "message", "box", "baseline", "seq"],
-            "edit_formula": ["typeset", "box", "baseline", "seq", "unchanged"],
+            "list_formulas": ["latex", "typeset", "message", "canvasBounds", "canvasBaseline", "fontSize",
+                              "color", "opacity", "pinned", "layer", "tags"],
+            "add_formula": ["id", "typeset", "message", "canvasBounds", "canvasBaseline", "seq"],
+            "edit_formula": ["typeset", "canvasBounds", "canvasBaseline", "seq", "unchanged"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }

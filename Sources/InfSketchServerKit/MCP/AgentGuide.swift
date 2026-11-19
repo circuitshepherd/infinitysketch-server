@@ -211,13 +211,13 @@ enum AgentGuide {
 
     **Mathematics has two forms; pick by what it sits in.** A formula ON ITS OWN — an equation, \
     a labeled quantity beside a diagram — is a formula object: `add_formula` with ONE LaTeX \
-    formula WITHOUT `$` markers (`E = mc^2`, `\\frac{a}{b}`), at `x`/`y` = the LEFT END OF ITS \
-    BASELINE in canvas points, typeset at `size` points. Mathematics INSIDE A SENTENCE is a text \
+    formula WITHOUT `$` markers (`E = mc^2`, `\\frac{a}{b}`), at `canvasX`/`canvasY` = the LEFT END \
+    OF ITS BASELINE, typeset at `fontSize` points. Mathematics INSIDE A SENTENCE is a text \
     with `inlineMath: true` (`add_text`), each formula between `$` signs. **A source that does \
     not typeset is stored, not refused**: `typeset: false` and the parser's `message` come back, \
     the app shows the source as plain text, and you correct it with `edit_formula` — which keeps \
     the baseline's left end in place, so a changed source never jumps. `list_formulas` reports \
-    each one's `box` and `baseline` as measured by the device; `remove_formula` works on a closed \
+    each one's `canvasBounds` and `canvasBaseline` as measured by the device; `remove_formula` works on a closed \
     document. Move, copy, reorder and select formulas with the element and selection tools' \
     `formulaIds`, and their ids work in `set_layer`, `set_pinned` and `tag_elements`. The color \
     is light-canonical, as everywhere. These need a device with the `formulas` capability — an \

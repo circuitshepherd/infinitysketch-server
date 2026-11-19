@@ -163,7 +163,8 @@ import MCP
     @Test func theToolTextsSayWhatAnAgentNeeds() throws {
         let add = try Self.description("add_formula")
         for needed in ["ONE LaTeX formula per object", "WITHOUT `$` markers", "`inlineMath: true`",
-                       "LEFT END OF THE BASELINE", "point size", "light-canonical", "STORED",
+                       "LEFT END OF THE BASELINE", "point size", "`canvasX`", "`fontSize`", "canvasBounds",
+                       "canvasBaseline", "invalidFontSize", "light-canonical", "STORED",
                        "`message`", "edit_formula", "emptyFormula", "formulaTooLong", "`formulas` capability"] {
             #expect(add.contains(needed), "add_formula does not say \(needed)")
         }
@@ -244,7 +245,7 @@ extension MCPAdapterTests {
     }
 
     static let reply = Data(#"{"aaa001_thumbnailData":"","placedObjects":["after"]}"#.utf8)
-    static let meta = Data(#"{"baseline":[40,71],"box":[40,50,30,28],"id":"EEEEEEEE-0000-0000-0000-000000000002","typeset":true}"#.utf8)
+    static let meta = Data(#"{"canvasBaseline":[40,71],"canvasBounds":[40,50,30,28],"id":"EEEEEEEE-0000-0000-0000-000000000002","typeset":true}"#.utf8)
 
     @Test func addFormulaGoesToADeviceWithTheFormulasCapability() async throws {
         let (server, port, task) = try await startServer()
@@ -256,7 +257,7 @@ extension MCPAdapterTests {
         let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Self.reply),
                                                capabilities: ["authorText", "arrows"])
         let (refused, refusedError) = try await client.callTool(name: "add_formula", arguments: [
-            "docId": "d", "latex": "x^2", "x": 40, "y": 71])
+            "docId": "d", "latex": "x^2", "canvasX": 40, "canvasY": 71])
         #expect(refusedError == true)
         #expect(text(refused).hasPrefix("noDeviceAvailable") && text(refused).contains("`formulas`"), "\(text(refused))")
         #expect(await old.receivedRequests.isEmpty)
@@ -266,28 +267,28 @@ extension MCPAdapterTests {
                                                   capabilities: ["formulas"])
         defer { Task { await device.close() } }
         let (content, isError) = try await client.callTool(name: "add_formula", arguments: [
-            "docId": "d", "latex": #"\frac{a}{b}"#, "x": 40, "y": 71, "size": 30, "color": "#FF0000",
+            "docId": "d", "latex": #"\frac{a}{b}"#, "canvasX": 40, "canvasY": 71, "fontSize": 30, "color": "#FF0000",
             "colorAppearance": "dark", "layer": "back", "tags": .array(["eq"])])
         #expect(isError != true, "\(text(content))")
         let s = try await spec(device)
         #expect(s["op"] as? String == "addFormula")
-        #expect(Set(s.keys) == ["op", "latex", "x", "y", "size", "color", "colorAppearance", "layer", "tags"])
+        #expect(Set(s.keys) == ["op", "latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags"])
         #expect(s["latex"] as? String == #"\frac{a}{b}"#)
-        #expect(s["x"] as? Double == 40 && s["y"] as? Double == 71 && s["size"] as? Double == 30)
+        #expect(s["canvasX"] as? Double == 40 && s["canvasY"] as? Double == 71 && s["fontSize"] as? Double == 30)
         #expect(s["tags"] as? [String] == ["eq"])
         #expect(await device.receivedRequests.last?.docBytes == D.document)
         // The reply is the device's measurement with the seq, and the document is the device's bytes.
         let reply = try #require(try JSONSerialization.jsonObject(with: Data(text(content).utf8)) as? [String: Any])
         #expect(reply["id"] as? String == "EEEEEEEE-0000-0000-0000-000000000002")
         #expect(reply["typeset"] as? Bool == true)
-        #expect(reply["box"] as? [Double] == [40, 50, 30, 28])
-        #expect(reply["baseline"] as? [Double] == [40, 71])
+        #expect(reply["canvasBounds"] as? [Double] == [40, 50, 30, 28])
+        #expect(reply["canvasBaseline"] as? [Double] == [40, 71])
         #expect(reply["seq"] as? Int != nil)
         #expect(try await raw(client, "d") == Self.reply)
 
         // Only the arguments given travel.
-        _ = try await client.callTool(name: "add_formula", arguments: ["docId": "d", "latex": "y", "x": 0, "y": 0])
-        #expect(Set(try await spec(device).keys) == ["op", "latex", "x", "y"])
+        _ = try await client.callTool(name: "add_formula", arguments: ["docId": "d", "latex": "y", "canvasX": 0, "canvasY": 0])
+        #expect(Set(try await spec(device).keys) == ["op", "latex", "canvasX", "canvasY"])
         await server.stop()
     }
 
@@ -300,12 +301,12 @@ extension MCPAdapterTests {
         let editor = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
                                                   capabilities: ["formulas"])
         let (content, isError) = try await client.callTool(name: "edit_formula", arguments: [
-            "docId": "d", "id": .string(D.formula), "latex": "y^3", "size": 40, "color": "#00FF00",
+            "docId": "d", "id": .string(D.formula), "latex": "y^3", "fontSize": 40, "color": "#00FF00",
             "colorAppearance": "light"])
         #expect(isError != true, "\(text(content))")
         let s = try await spec(editor)
         #expect(s["op"] as? String == "editFormula")
-        #expect(Set(s.keys) == ["op", "id", "latex", "size", "color", "colorAppearance"])
+        #expect(Set(s.keys) == ["op", "id", "latex", "fontSize", "color", "colorAppearance"])
         #expect(s["id"] as? String == D.formula)
         let reply = try #require(try JSONSerialization.jsonObject(with: Data(text(content).utf8)) as? [String: Any])
         #expect(reply["typeset"] as? Bool == true && reply["seq"] as? Int != nil)
@@ -354,8 +355,8 @@ extension MCPAdapterTests {
 
         let long = String(repeating: "x", count: 4001)
         let calls: [(String, [String: Value], String)] = [
-            ("add_formula", ["latex": "  ", "x": 0, "y": 0], "emptyFormula"),
-            ("add_formula", ["latex": .string(long), "x": 0, "y": 0], "formulaTooLong"),
+            ("add_formula", ["latex": "  ", "canvasX": 0, "canvasY": 0], "emptyFormula"),
+            ("add_formula", ["latex": .string(long), "canvasX": 0, "canvasY": 0], "formulaTooLong"),
             ("edit_formula", ["id": .string(D.formula), "latex": "\n"], "emptyFormula"),
             ("edit_formula", ["id": .string(D.formula), "latex": .string(long)], "formulaTooLong"),
         ]
@@ -509,6 +510,47 @@ extension MCPAdapterTests {
             plain: ["docId": "d"],
             withFormula: ["docId": "d", "include": "formulas", "formulaIds": f],
             relayedKey: "formulaIds", port: port, client: client)
+        await server.stop()
+    }
+
+    /// The wire names, as SETS (controller ruling S2-R11): what the server sends for each op, and
+    /// that the old spellings are refused BY NAME before any device is asked (no aliasing). The
+    /// app pins its decoder and replies the same way (`AgentFormulaToolsTests.
+    /// theRepliesNameTheirFieldsLikeTheTextTools`), so a one-sided rename fails a test.
+    @Test func theWireNamesAreTheTextTools() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                                  capabilities: ["formulas"])
+        defer { Task { await device.close() } }
+        let (content, _) = try await client.callTool(name: "add_formula", arguments: [
+            "docId": "d", "latex": "a", "canvasX": 1, "canvasY": 2, "fontSize": 30, "color": "#FF0000",
+            "colorAppearance": "light", "layer": "front", "tags": .array(["eq"])])
+        #expect(Set(try await spec(device).keys)
+                == ["op", "latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags"])
+        // The device's measurement reaches the agent under its own names, with the seq.
+        let reply = try #require(try JSONSerialization.jsonObject(with: Data(text(content).utf8)) as? [String: Any])
+        #expect(Set(reply.keys) == ["id", "typeset", "canvasBounds", "canvasBaseline", "seq"])
+        _ = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "latex": "b", "fontSize": 40, "color": "#00FF00",
+            "colorAppearance": "dark"])
+        #expect(Set(try await spec(device).keys) == ["op", "id", "latex", "fontSize", "color", "colorAppearance"])
+        let asked = await device.receivedRequests.count
+
+        let old: [(String, [String: Value], String)] = [
+            ("add_formula", ["latex": "a", "x": 1, "y": 2], "x"),
+            ("add_formula", ["latex": "a", "canvasX": 1, "canvasY": 2, "size": 30], "size"),
+            ("edit_formula", ["id": .string(D.formula), "size": 30], "size"),
+        ]
+        for (tool, args, key) in old {
+            var a = args; a["docId"] = "d"
+            let (refused, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError == true, "\(tool) with \(key)")
+            #expect(text(refused).contains(key) && text(refused).hasPrefix("invalidArgument"), "\(tool): \(text(refused))")
+        }
+        #expect(await device.receivedRequests.count == asked, "an old spelling never reaches the device")
         await server.stop()
     }
 

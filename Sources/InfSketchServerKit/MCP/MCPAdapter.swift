@@ -2080,14 +2080,13 @@ public actor MCPAdapter {
                 (noDeviceAvailable if none). Never writes. A `$…$` formula inside a text is part \
                 of that text (list_texts' `inlineMath`), not listed here.
 
-                REPLY: an ARRAY of `{id, latex, typeset, message?, box, baseline, size, color?, \
-                opacity, pinned, layer, tags}`. `latex` is the source as stored. `typeset` false \
-                means the engine cannot set it: the app shows the source as plain text and \
-                `message` is the parser's reason — fix it with edit_formula. `box` is [x, y, \
-                width, height], the canvas-space bounding box of the typeset box as drawn \
-                (rotation and scale included), and `baseline` [x, y] the left end of its \
-                baseline. `size` is \
-                in points. `color` is light-canonical `#RRGGBBAA`, absent for Automatic (the \
+                REPLY: an ARRAY of `{id, latex, typeset, message?, canvasBounds, canvasBaseline, \
+                fontSize, color?, opacity, pinned, layer, tags}`. `latex` is the source as stored. \
+                `typeset` false means the engine cannot set it: the app shows the source as plain \
+                text and `message` is the parser's reason — fix it with edit_formula. \
+                `canvasBounds` is [left, top, width, height], the canvas-space bounding box of the \
+                typeset box as drawn (rotation and scale included), and `canvasBaseline` the \
+                canvas point at the left end of its baseline. `fontSize` is in points. `color` is light-canonical `#RRGGBBAA`, absent for Automatic (the \
                 paper's label color). `layer` is `front` or `back`.
                 """,
             inputSchema: .object([
@@ -2104,30 +2103,32 @@ public actor MCPAdapter {
                 Places a formula object: ONE LaTeX formula per object, typeset by the app — what \
                 its Formula button makes. Write `latex` WITHOUT `$` markers: `\\frac{a}{b}`, \
                 not `$\\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with \
-                `inlineMath: true` (add_text), with each formula between `$` signs. `x` and `y` \
-                are the LEFT END OF THE BASELINE in canvas points, so formulas placed at the same \
-                y-coordinate sit on one line, as text does. `size` is the point size it is \
+                `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and \
+                `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same \
+                `canvasY` sit on one line, as text does. `fontSize` is the point size it is \
                 typeset at (1–2000); omitted, the user's text size, else 20. `color` is \
                 light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a \
                 dark-authored hex); omitted, the user's text color, else Automatic — black on \
                 light paper, white on dark. A source that does not typeset is STORED and \
                 reported (`typeset: false` with the parser's `message`), shown as its source \
                 text until you correct it with edit_formula. A blank source fails with \
-                emptyFormula, one over 4000 characters with formulaTooLong. Goes on top of Front \
+                emptyFormula, one over 4000 characters with formulaTooLong, a `fontSize` outside \
+                1–2000 with invalidFontSize. Goes on top of Front \
                 objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
 
-                REPLY: one JSON object `{id, typeset, message?, box, baseline, seq}` — `box` is \
-                [x, y, width, height] of the typeset box and `baseline` [x, y] the left end of its \
-                baseline, in canvas space. \(writeToolCaveats)
+                REPLY: one JSON object `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` \
+                — `canvasBounds` is [left, top, width, height] of the typeset box as drawn and \
+                `canvasBaseline` the point at the left end of its baseline, in canvas space. \
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 characters."]),
-                    "x": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
-                    "y": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
-                    "size": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
+                    "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
+                    "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` (and the colors named in the source) were chosen for a dark page. Default light."]),
@@ -2138,22 +2139,23 @@ public actor MCPAdapter {
                         "description": "Durable tags for the new formula (see tag_elements); find it again later with find_elements.",
                     ]),
                 ]),
-                "required": .array(["docId", "latex", "x", "y"].map(Value.string)),
+                "required": .array(["docId", "latex", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
             name: "edit_formula",
             description: """
                 Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` \
-                markers), `size` (points, 1–2000) and `color` (light-canonical; \
+                markers), `fontSize` (points, 1–2000) and `color` (light-canonical; \
                 `colorAppearance` only together with `color`) — give at least one. The LEFT END \
                 OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
                 or scaled, so a longer source grows to the right. A source that does not typeset \
-                is stored and reported as on add_formula. formulaNotFound for an unknown id. An \
+                is stored and reported as on add_formula. formulaNotFound for an unknown id, \
+                invalidFontSize for a size outside 1–2000. An \
                 edit that changes nothing writes nothing. REQUIRES a device with the `formulas` \
                 capability.
 
-                REPLY: `{id, typeset, message?, box, baseline, seq}` as add_formula's; an edit \
+                REPLY: `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` as add_formula's; an edit \
                 that changed nothing has `unchanged: true` and no `seq`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -2162,7 +2164,7 @@ public actor MCPAdapter {
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "id": .object(["type": "string", "description": "The formula (list_formulas' or add_formula's `id`)."]),
                     "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 characters."]),
-                    "size": .object(["type": "number", "description": "The new point size, 1–2000."]),
+                    "fontSize": .object(["type": "number", "description": "The new point size, 1–2000."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light. Only with `color`."]),
@@ -4506,14 +4508,14 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let latex = try Self.stringArg(arguments, "latex")
-            _ = try Self.doubleArg(arguments, "x")
-            _ = try Self.doubleArg(arguments, "y")
+            _ = try Self.doubleArg(arguments, "canvasX")
+            _ = try Self.doubleArg(arguments, "canvasY")
             if let refusal = Self.formulaSourceRefusal(latex) { return Self.errorResult(refusal) }
             guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
-            for key in ["latex", "x", "y", "size", "color", "colorAppearance", "layer", "tags"] {
+            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
@@ -4528,7 +4530,7 @@ public actor MCPAdapter {
     }
 
     /// `edit_formula` — like `add_formula`; the device refuses an edit that names none of
-    /// `latex` / `size` / `color`, and `colorAppearance` without `color`.
+    /// `latex` / `fontSize` / `color`, and `colorAppearance` without `color`.
     private func callEditFormula(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -4541,7 +4543,7 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("editFormula")]
-            for key in ["id", "latex", "size", "color", "colorAppearance"] {
+            for key in ["id", "latex", "fontSize", "color", "colorAppearance"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
@@ -4557,7 +4559,7 @@ public actor MCPAdapter {
 
     /// The shared tail of `add_formula` / `edit_formula`: ask a `formulas` device, write what it
     /// returned under the byte CAS, and answer with what it MEASURED (`{id, typeset, message?,
-    /// box, baseline}`, its reply `meta`) plus the `seq`. The device answers an edit that changes
+    /// canvasBounds, canvasBaseline}`, its reply `meta`) plus the `seq`. The device answers an edit that changes
     /// nothing with the request's own bytes: then nothing is written (a pointless write bumps
     /// `seq` for every subscriber and spends the agent's one `undo_last_edit`) and the reply says
     /// `unchanged: true`, without a `seq`.
