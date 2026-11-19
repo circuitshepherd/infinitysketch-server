@@ -2112,7 +2112,7 @@ public actor MCPAdapter {
                 light paper, white on dark. A source that does not typeset is STORED and \
                 reported (`typeset: false` with the parser's `message`), shown as its source \
                 text until you correct it with edit_formula. A blank source fails with \
-                emptyFormula, one over 4000 characters with formulaTooLong, a `fontSize` outside \
+                emptyFormula, one longer than 4000 UTF-16 code units (most characters count 1, an emoji 2) with formulaTooLong, a `fontSize` outside \
                 1–2000 with invalidFontSize. Goes on top of Front \
                 objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
 
@@ -2125,7 +2125,7 @@ public actor MCPAdapter {
                 "type": "object",
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
-                    "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 characters."]),
+                    "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
                     "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
                     "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
                     "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
@@ -2149,7 +2149,7 @@ public actor MCPAdapter {
                 markers), `fontSize` (points, 1–2000) and `color` (light-canonical; \
                 `colorAppearance` only together with `color`) — give at least one. The LEFT END \
                 OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
-                or scaled, so a longer source grows to the right. A source that does not typeset \
+                or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset \
                 is stored and reported as on add_formula. formulaNotFound for an unknown id, \
                 invalidFontSize for a size outside 1–2000. An \
                 edit that changes nothing writes nothing. REQUIRES a device with the `formulas` \
@@ -2163,7 +2163,7 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "id": .object(["type": "string", "description": "The formula (list_formulas' or add_formula's `id`)."]),
-                    "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 characters."]),
+                    "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
                     "fontSize": .object(["type": "number", "description": "The new point size, 1–2000."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -4957,10 +4957,15 @@ public actor MCPAdapter {
                         let inkType: String
                         let width: Double
                         let color: String
+                        /// Which of the three the strokes inherited ("inkType", "drawnWidth",
+                        /// "color"), from a newer device; nil from an older one, which then reads
+                        /// as all three — the reply it always printed.
+                        let inherited: [String]?
                         enum CodingKeys: String, CodingKey {
                             case inkType
                             case width = "drawnWidth"
                             case color
+                            case inherited
                         }
                     }
                     let keys: [String]?
@@ -4987,7 +4992,16 @@ public actor MCPAdapter {
                     // and colour it is not (measured: a stroke drawn at width 4 / #112233FF was
                     // reported back as the picker's width and color #000000FF).
                     if let tool = decoded.resolvedTool {
-                        summary += "\ninherited from the user's tool: inkType \(tool.inkType), drawnWidth \(Self.trimmed(tool.width)), color \(tool.color)"
+                        // Only what was inherited: a stroke given its width and color but no ink
+                        // inherited the ink alone (final review F6).
+                        let named = tool.inherited.map(Set.init) ?? ["inkType", "drawnWidth", "color"]
+                        let parts = [("inkType", "inkType \(tool.inkType)"),
+                                     ("drawnWidth", "drawnWidth \(Self.trimmed(tool.width))"),
+                                     ("color", "color \(tool.color)")]
+                            .filter { named.contains($0.0) }.map(\.1)
+                        if !parts.isEmpty {
+                            summary += "\ninherited from the user's tool: \(parts.joined(separator: ", "))"
+                        }
                     }
                     // A width below the ink's floor renders as almost nothing, so it is raised
                     // rather than silently drawn invisible (art-session finding 12).
@@ -6072,6 +6086,34 @@ public actor MCPAdapter {
         return nil
     }
 
+    /// The fields of one `ops[]` item of transform_selection, duplicate_selection and
+    /// preview_selection — the device's `SelectionOpSpec`, read off transform_selection's item
+    /// schema so the two cannot drift.
+    static let selectionOpKeys: Set<String> = {
+        guard let t = toolDefinitions.first(where: { $0.name == "transform_selection" }),
+              case .object(let schema) = t.inputSchema,
+              case .object(let properties)? = schema["properties"],
+              case .object(let ops)? = properties["ops"],
+              case .object(let items)? = ops["items"],
+              case .object(let fields)? = items["properties"] else { return [] }
+        return Set(fields.keys)
+    }()
+
+    /// The first key of an `ops[]` item outside `selectionOpKeys`, as an `invalidArgument` reason;
+    /// nil when every item takes only those. The device's decoder IGNORES an unknown key, so
+    /// without this `{op: "rotate", canvasAnchor: …}` turned about the reference point while
+    /// the agent believed otherwise (final review F7).
+    static func selectionOpKeyRefusal(_ ops: Value?) -> String? {
+        guard case .array(let items)? = ops else { return nil }
+        for (index, item) in items.enumerated() {
+            guard case .object(let fields) = item else { return "invalidArgument: ops[\(index)] must be an object" }
+            if let bad = fields.keys.sorted().first(where: { !selectionOpKeys.contains($0) }) {
+                return "invalidArgument: ops[\(index)].\(bad) — an op takes only: \(selectionOpKeys.sorted().joined(separator: ", "))"
+            }
+        }
+        return nil
+    }
+
     private static let renderSpecParameterNames = [
         "include", "strokeIds", "strokes", "canvasRect", "padding", "background", "axes", "maxPixels",
         "scale", "appearance", "colorAppearance", "arrowIds", "arrows", "restyle", "formulaIds",
@@ -6613,6 +6655,7 @@ public actor MCPAdapter {
     /// surfaced verbatim as `deviceFailed: <reason>`.
     private func callTransformSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
+            if let refusal = Self.selectionOpKeyRefusal(arguments?["ops"]) { return Self.errorResult(refusal) }
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
@@ -6944,6 +6987,7 @@ public actor MCPAdapter {
     /// rendered together — requires `ops`.
     private func callPreviewSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
+            if let refusal = Self.selectionOpKeyRefusal(arguments?["ops"]) { return Self.errorResult(refusal) }
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let include = try Self.optionalStringArg(arguments, "include")
@@ -7004,6 +7048,7 @@ public actor MCPAdapter {
     /// verbatim as `deviceFailed: <reason>`.
     private func callDuplicateSelection(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
+            if let refusal = Self.selectionOpKeyRefusal(arguments?["ops"]) { return Self.errorResult(refusal) }
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ops = try Self.optionalValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")

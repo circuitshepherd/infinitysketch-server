@@ -159,17 +159,17 @@ import MCP
     }
 
     /// The things an agent cannot find out by trying: no `$` markers, a formula in a sentence is a
-    /// text, where `x`/`y` are, that a source that does not typeset is stored and how to fix it.
+    /// text, where `canvasX`/`canvasY` are, that a source that does not typeset is stored and how to fix it.
     @Test func theToolTextsSayWhatAnAgentNeeds() throws {
         let add = try Self.description("add_formula")
         for needed in ["ONE LaTeX formula per object", "WITHOUT `$` markers", "`inlineMath: true`",
                        "LEFT END OF THE BASELINE", "point size", "`canvasX`", "`fontSize`", "canvasBounds",
                        "canvasBaseline", "invalidFontSize", "light-canonical", "STORED",
-                       "`message`", "edit_formula", "emptyFormula", "formulaTooLong", "`formulas` capability"] {
+                       "`message`", "edit_formula", "emptyFormula", "formulaTooLong", "4000 UTF-16 code units", "`formulas` capability"] {
             #expect(add.contains(needed), "add_formula does not say \(needed)")
         }
         let edit = try Self.description("edit_formula")
-        for needed in ["WITHOUT `$`", "LEFT END", "formulaNotFound", "`unchanged: true`"] {
+        for needed in ["WITHOUT `$`", "LEFT END", "formulaNotFound", "`unchanged: true`", "grows along its baseline"] {
             #expect(edit.contains(needed), "edit_formula does not say \(needed)")
         }
         #expect(try Self.description("remove_formula").contains("needs no connected device"))

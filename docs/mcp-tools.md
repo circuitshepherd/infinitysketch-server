@@ -826,7 +826,7 @@ REPLY: an ARRAY of `{id, latex, typeset, message?, canvasBounds, canvasBaseline,
 
 ### `add_formula`
 
-Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. Write `latex` WITHOUT `$` markers: `\frac{a}{b}`, not `$\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same `canvasY` sit on one line, as text does. `fontSize` is the point size it is typeset at (1–2000); omitted, the user's text size, else 20. `color` is light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a dark-authored hex); omitted, the user's text color, else Automatic — black on light paper, white on dark. A source that does not typeset is STORED and reported (`typeset: false` with the parser's `message`), shown as its source text until you correct it with edit_formula. A blank source fails with emptyFormula, one over 4000 characters with formulaTooLong, a `fontSize` outside 1–2000 with invalidFontSize. Goes on top of Front objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
+Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. Write `latex` WITHOUT `$` markers: `\frac{a}{b}`, not `$\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same `canvasY` sit on one line, as text does. `fontSize` is the point size it is typeset at (1–2000); omitted, the user's text size, else 20. `color` is light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a dark-authored hex); omitted, the user's text color, else Automatic — black on light paper, white on dark. A source that does not typeset is STORED and reported (`typeset: false` with the parser's `message`), shown as its source text until you correct it with edit_formula. A blank source fails with emptyFormula, one longer than 4000 UTF-16 code units (most characters count 1, an emoji 2) with formulaTooLong, a `fontSize` outside 1–2000 with invalidFontSize. Goes on top of Front objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
 
 REPLY: one JSON object `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` — `canvasBounds` is [left, top, width, height] of the typeset box as drawn and `canvasBaseline` the point at the left end of its baseline, in canvas space. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
@@ -835,7 +835,7 @@ REPLY: one JSON object `{id, typeset, message?, canvasBounds, canvasBaseline, se
 | `canvasX` | number | yes | Canvas x-coordinate of the left end of the baseline. |
 | `canvasY` | number | yes | Canvas y-coordinate of the baseline. |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `latex` | string | yes | The LaTeX source of ONE formula, without `$` markers, at most 4000 characters. |
+| `latex` | string | yes | The LaTeX source of ONE formula, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` (and the colors named in the source) were chosen for a dark page. Default light. |
 | `fontSize` | number | no | Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20. |
@@ -844,7 +844,7 @@ REPLY: one JSON object `{id, typeset, message?, canvasBounds, canvasBaseline, se
 
 ### `edit_formula`
 
-Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together with `color`) — give at least one. The LEFT END OF THE BASELINE stays where it is on the canvas, also when the formula is rotated or scaled, so a longer source grows to the right. A source that does not typeset is stored and reported as on add_formula. formulaNotFound for an unknown id, invalidFontSize for a size outside 1–2000. An edit that changes nothing writes nothing. REQUIRES a device with the `formulas` capability.
+Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together with `color`) — give at least one. The LEFT END OF THE BASELINE stays where it is on the canvas, also when the formula is rotated or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset is stored and reported as on add_formula. formulaNotFound for an unknown id, invalidFontSize for a size outside 1–2000. An edit that changes nothing writes nothing. REQUIRES a device with the `formulas` capability.
 
 REPLY: `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` as add_formula's; an edit that changed nothing has `unchanged: true` and no `seq`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
@@ -855,7 +855,7 @@ REPLY: `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` as add_formu
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. Only with `color`. |
 | `fontSize` | number | no | The new point size, 1–2000. |
-| `latex` | string | no | The new LaTeX source, without `$` markers, at most 4000 characters. |
+| `latex` | string | no | The new LaTeX source, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2). |
 
 ### `remove_formula`
 

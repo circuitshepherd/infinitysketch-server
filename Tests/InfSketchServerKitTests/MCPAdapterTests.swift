@@ -2331,6 +2331,40 @@ actor FakeStrokeOpDevice {
             .hasPrefix("invalidArgument: restyle.ids") == true)
     }
 
+    /// An `ops[]` item takes transform_selection's op fields and nothing else; a key outside them
+    /// is refused BY NAME before any device is asked — the device's decoder would ignore it, and
+    /// `{op: "rotate", canvasAnchor: …}` would pivot on the reference point while the agent
+    /// believed otherwise.
+    @Test func selectionOpItemsTakeExactlyTheOpFields() {
+        #expect(MCPAdapter.selectionOpKeys == ["op", "degrees", "factor", "dx", "dy"])
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.object(["op": "rotate", "degrees": 90]),
+                                                          .object(["op": "translate", "dx": 1, "dy": 2])])) == nil)
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.object(["op": "rotate", "degrees": 90]),
+                                                          .object(["op": "rotate", "degrees": 9, "canvasAnchor": .array([])])]))
+                == "invalidArgument: ops[1].canvasAnchor — an op takes only: degrees, dx, dy, factor, op")
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.string("rotate")])) == "invalidArgument: ops[0] must be an object")
+        #expect(MCPAdapter.selectionOpKeyRefusal(nil) == nil)
+    }
+
+    @Test(arguments: ["transform_selection", "duplicate_selection", "preview_selection"])
+    func anUnknownKeyInAnOpIsRefusedByName(_ tool: String) async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"], subscribeTo: "d")
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([.object(["op": "translate", "canvasDelta": .array([1, 2])])])
+        let (content, isError) = try await client.callTool(name: tool, arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArgument: ops[0].canvasDelta — an op takes only: degrees, dx, dy, factor, op")
+        #expect(await device.receivedRequests.isEmpty, "refused before any device is asked")
+        await server.stop()
+    }
+
     /// add_arrow and restyle_arrows forward `keepsWidth` to the device (Josef, 2026-10-15).
     @Test func arrowWritesForwardKeepsWidth() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
@@ -2706,6 +2740,36 @@ actor FakeStrokeOpDevice {
         #expect(text.contains("19.5"), "resolvedTool.width must reach the reply: \(text)")
         #expect(text.contains("#12AB34FF"), "resolvedTool.color must reach the reply: \(text)")
 
+        await server.stop()
+    }
+
+    /// A newer device lists WHAT was inherited (`resolvedTool.inherited`): a stroke given its
+    /// width and color but no ink inherited the ink only, and the reply says only that. Absent
+    /// (an older device) the three are printed as before — that is `drawReplyMetaMatchesCanonicalShape`.
+    @Test func drawStrokesSaysOnlyWhatWasInherited() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let meta = Data(#"""
+        {"keys":["111-222.5"],"resolvedTool":{"color":"#12AB34FF","drawnWidth":19.5,"inherited":["inkType"],"inkType":"marker"}}
+        """#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": .array([.object([
+                "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)])]),
+                "drawnWidth": .double(2), "color": .string("#000000FF"),
+            ])])])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("\ninherited from the user's tool: inkType marker\n") || text.hasSuffix("inherited from the user's tool: inkType marker"),
+                "only the ink was inherited: \(text)")
+        #expect(!text.contains("19.5") && !text.contains("#12AB34FF"), "width and color were given: \(text)")
         await server.stop()
     }
 
