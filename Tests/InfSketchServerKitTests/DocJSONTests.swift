@@ -705,4 +705,28 @@ import Testing
             _ = try DocJSON.setInlineMath(in: Self.format6, textId: "nope", to: true)
         }
     }
+
+    /// A said value the device's bytes already hold leaves those bytes as they are: a rewrite
+    /// re-sorts the keys and is a new byte string for no change, and the device's bytes carry a
+    /// current thumbnail.
+    @Test func setInlineMathLeavesTheDevicesBytesAloneWhenTheValueIsThere() throws {
+        let t1 = "AAAAAAAA-0000-0000-0000-000000000001"
+        let deviceBytes = Data(String(decoding: Self.format6, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 6,",
+                                  with: "\"aaa001_thumbnailData\": \"AAAA\", \"formatVersion\": 7,")
+            .replacingOccurrences(of: "\"colorSchemeIsDark\": false}",
+                                  with: "\"colorSchemeIsDark\": false, \"inlineMath\": true}")
+            .utf8)
+        #expect(try Self.entry(deviceBytes, t1)["inlineMath"] as? Bool == true, "the premise: on already")
+        #expect(try DocJSON.setInlineMath(in: deviceBytes, textId: t1, to: true) == deviceBytes)
+        #expect(try DocJSON.setInlineMath(in: Self.format6, textId: t1, to: false) == Self.format6,
+                "absent is off: switching off what is off changes nothing")
+        // A different value is still written.
+        let off = try DocJSON.setInlineMath(in: deviceBytes, textId: t1, to: false)
+        #expect(off != deviceBytes)
+        #expect(try Self.entry(off, t1)["inlineMath"] == nil)
+        #expect(throws: DocJSON.DocJSONError.textNotFound) {
+            _ = try DocJSON.setInlineMath(in: deviceBytes, textId: "nope", to: true)
+        }
+    }
 }

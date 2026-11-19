@@ -195,8 +195,18 @@ public enum DocJSON {
     /// `edit_text`: the server writes the key on the bytes the device returned (the new text's id
     /// is in the reply's `meta`), so it is the one writer of the key on both paths and the device's
     /// op spec never carries it. Throws `.textNotFound` when no text has that id.
+    ///
+    /// When the entry already holds the requested value the device's bytes come back UNCHANGED:
+    /// a rewrite would re-sort the keys and drop nothing but would still be a new byte string, and
+    /// the device's bytes carry a current thumbnail that must not be lost for no change.
     public static func setInlineMath(in bytes: Data, textId: String, to inlineMath: Bool) throws -> Data {
-        try editText(in: bytes, textId: textId, newText: nil, x: nil, y: nil, inlineMath: inlineMath)
+        let doc = try parseDocumentForEdit(bytes)
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements) else { throw DocJSONError.textNotFound }
+        let value = (elements[index] as? [String: Any])?["inlineMath"]
+        let current = (value as? Bool) ?? (value as? NSNumber)?.boolValue ?? false
+        if current == inlineMath { return bytes }
+        return try editText(in: bytes, textId: textId, newText: nil, x: nil, y: nil, inlineMath: inlineMath)
     }
 
     /// The format that introduced `inlineMath` (formulas).

@@ -1213,6 +1213,28 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `inlineMath` is a boolean: a string is refused by name, on add_text and on edit_text.
+    @Test func inlineMathThatIsNotABooleanIsRefusedByName() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "$x$", "canvasX": 0, "canvasY": 0, "inlineMath": "yes"])
+        #expect(isError == true)
+        #expect(toolResultText(content).contains("inlineMath"), "\(toolResultText(content))")
+        let (added, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "plain", "canvasX": 0, "canvasY": 0])
+        let id = addedId(from: toolResultText(added))
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "d", "textId": .string(id), "inlineMath": "yes"])
+        #expect(editIsError == true)
+        #expect(toolResultText(editContent).contains("inlineMath"), "\(toolResultText(editContent))")
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), id) == nil)
+        await server.stop()
+    }
+
     /// The device path (a styled call): the envelope does NOT carry `inlineMath` — the server sets
     /// the key on the bytes the device returned, on the text the reply's `meta` names (B2: one
     /// writer, so the two paths cannot disagree).

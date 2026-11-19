@@ -516,7 +516,7 @@ public actor MCPAdapter {
     /// op spec, never in `hasStyleArgs`, so it does not force a device (design decision B2).
     private static let inlineMathProperty: Value = .object(["type": "boolean", "description": """
         true: every $…$ in this text is shown as a typeset formula ($$…$$ for the large form, \\$ for \
-        a dollar sign); false: $ is a normal character. Omitted on add_text: the document's own default.
+        a dollar sign); false: $ is a normal character.
         """])
 
     /// Word wrap, the Text Format panel's Word Wrap card as arguments. Device-relayed under
@@ -750,8 +750,9 @@ public actor MCPAdapter {
                 as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / \
                 `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the \
                 strokes (both need a device). Formulas: write the LaTeX between `$…$` and set \
-                `inlineMath: true`; the write does not report whether a formula typesets — \
-                render_sketch shows it. \(writeToolCaveats)
+                `inlineMath: true` (omitted, the new text takes the document's own default); the \
+                write does not report whether a formula typesets — render_sketch shows it. \
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
