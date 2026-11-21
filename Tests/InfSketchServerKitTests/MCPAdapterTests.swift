@@ -371,7 +371,8 @@ actor FakeCreateDocDevice {
 /// `strokeOpReply` — either a success (`autoReply: .bytes`) or a device-side
 /// failure (`autoReply: .failure`). `nil` stalls every request (recorded but
 /// never answered) — the `opInProgress`/manual-release scenarios.
-private actor FakeStrokeOpDevice {
+/// Internal, not private: `FormulaToolsTests` drives its tools through the same fake.
+actor FakeStrokeOpDevice {
     struct ReceivedRequest {
         let requestId: UInt32
         let docId: String
@@ -804,8 +805,9 @@ private actor FakeStrokeOpDevice {
     /// this from `listToolsContainsAllFiftySevenTools`. remove_arrow (review I2) added one,
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
     /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
-    /// `listToolsContainsAllFiftyNineTools`.
-    @Test func listToolsContainsAllSixtySixTools() async throws {
+    /// `listToolsContainsAllFiftyNineTools`. The formula tools (2026-11-19) added four, renaming
+    /// this from `listToolsContainsAllSixtySixTools`.
+    @Test func listToolsContainsAllSeventyTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -831,10 +833,13 @@ private actor FakeStrokeOpDevice {
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
             "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
+            "list_formulas", "add_formula", "edit_formula", "remove_formula",
         ])
-        // The formatting-reset warning is load-bearing enough to regression-test verbatim presence.
+        // What a new `text` does to the style is load-bearing enough to pin: it keeps the first
+        // character's (until 2026-11-19 it reset the formatting, and the text here said "resets").
         let editText = try #require(tools.first { $0.name == "edit_text" })
-        #expect(editText.description?.contains("resets") == true)
+        #expect(editText.description?.contains("KEEP THE STYLE OF THE TEXT'S FIRST CHARACTER") == true)
+        #expect(editText.description?.contains("resets") == false)
 
         await server.stop()
     }
@@ -1181,6 +1186,108 @@ private actor FakeStrokeOpDevice {
         #expect(await device.receivedRequests.isEmpty, "plain add_text must not relay to any device")
 
         await server.stop()
+    }
+
+    /// `inlineMath` is a key the server writes itself: it does not force a device, so it works on
+    /// a document nobody has open, with no device connected at all.
+    @Test func addTextWithInlineMathStaysServerSide() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x^2$", "canvasX": 0, "canvasY": 0, "inlineMath": true])
+        #expect(isError != true, "\(toolResultText(content))")
+        let id = addedId(from: toolResultText(content))
+        let stored = try #require(try JSONSerialization.jsonObject(with: await rawDocument(client, "d")) as? [String: Any])
+        let list = (stored["placedObjects"] as? [[String: Any]]) ?? (stored["placedTextsData"] as? [[String: Any]]) ?? []
+        let entry = try #require(list.first { $0["id"] as? String == id })
+        #expect(entry["inlineMath"] as? Bool == true)
+        #expect((stored["formatVersion"] as? NSNumber)?.intValue == 7)
+
+        // edit_text with inlineMath alone switches it off, server-side too.
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "d", "textId": .string(id), "inlineMath": false])
+        #expect(editIsError != true, "\(toolResultText(editContent))")
+        let edited = try await rawDocument(client, "d")
+        #expect(Self.storedInlineMath(edited, id) == nil)
+        #expect(String(decoding: edited, as: UTF8.self).contains(id), "the text is still there")
+
+        await server.stop()
+    }
+
+    /// `inlineMath` is a boolean: a string is refused by name, on add_text and on edit_text.
+    @Test func inlineMathThatIsNotABooleanIsRefusedByName() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "$x$", "canvasX": 0, "canvasY": 0, "inlineMath": "yes"])
+        #expect(isError == true)
+        #expect(toolResultText(content).contains("inlineMath"), "\(toolResultText(content))")
+        let (added, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "plain", "canvasX": 0, "canvasY": 0])
+        let id = addedId(from: toolResultText(added))
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "d", "textId": .string(id), "inlineMath": "yes"])
+        #expect(editIsError == true)
+        #expect(toolResultText(editContent).contains("inlineMath"), "\(toolResultText(editContent))")
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), id) == nil)
+        await server.stop()
+    }
+
+    /// The device path (a styled call): the envelope does NOT carry `inlineMath` — the server sets
+    /// the key on the bytes the device returned, on the text the reply's `meta` names (B2: one
+    /// writer, so the two paths cannot disagree).
+    @Test func styledAddTextWithInlineMathSetsTheKeyOnTheDevicesBytes() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let textId = "AAAAAAAA-0000-0000-0000-0000000000F1"
+        let reply = Data(#"""
+        {"formatVersion": 7, "darkColorScheme": false, "placedObjects": [
+          {"kind": "text", "layer": "front", "id": "AAAAAAAA-0000-0000-0000-0000000000F1",
+           "text": ["$x$", {}], "rect": [[0, 0], [20, 20]],
+           "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": 0, "ty": 0},
+           "opacity": 1, "pinned": false, "wordWrapEnabled": false, "colorSchemeIsDark": false}]}
+        """#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: reply, meta: Data(#"{"id": "\#(textId)"}"#.utf8)),
+            capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 0, "canvasY": 0, "color": "#FF0000", "inlineMath": true])
+        #expect(isError != true, "\(toolResultText(content))")
+        let received = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        #expect(spec["inlineMath"] == nil, "the device never sees inlineMath")
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), textId) == true)
+
+        // edit_text on the device path: the fake device answers bytes WITHOUT the key, so only the
+        // server can have put it there.
+        let (editContent, editIsError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": .string(textId), "color": "#00FF00", "inlineMath": true])
+        #expect(editIsError != true, "\(toolResultText(editContent))")
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["inlineMath"] == nil)
+        #expect(Self.storedInlineMath(try await rawDocument(client, "d"), textId) == true)
+
+        await server.stop()
+    }
+
+    static func storedInlineMath(_ bytes: Data, _ id: String) -> Bool? {
+        guard let doc = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        let list = (doc["placedObjects"] as? [[String: Any]]) ?? (doc["placedTextsData"] as? [[String: Any]]) ?? []
+        return list.first { $0["id"] as? String == id }?["inlineMath"] as? Bool
     }
 
     @Test func styledEditTextRelaysThroughTheDevice() async throws {
@@ -2226,6 +2333,40 @@ private actor FakeStrokeOpDevice {
             .hasPrefix("invalidArgument: restyle.ids") == true)
     }
 
+    /// An `ops[]` item takes transform_selection's op fields and nothing else; a key outside them
+    /// is refused BY NAME before any device is asked — the device's decoder would ignore it, and
+    /// `{op: "rotate", canvasAnchor: …}` would pivot on the reference point while the agent
+    /// believed otherwise.
+    @Test func selectionOpItemsTakeExactlyTheOpFields() {
+        #expect(MCPAdapter.selectionOpKeys == ["op", "degrees", "factor", "dx", "dy"])
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.object(["op": "rotate", "degrees": 90]),
+                                                          .object(["op": "translate", "dx": 1, "dy": 2])])) == nil)
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.object(["op": "rotate", "degrees": 90]),
+                                                          .object(["op": "rotate", "degrees": 9, "canvasAnchor": .array([])])]))
+                == "invalidArgument: ops[1].canvasAnchor — an op takes only: degrees, dx, dy, factor, op")
+        #expect(MCPAdapter.selectionOpKeyRefusal(.array([.string("rotate")])) == "invalidArgument: ops[0] must be an object")
+        #expect(MCPAdapter.selectionOpKeyRefusal(nil) == nil)
+    }
+
+    @Test(arguments: ["transform_selection", "duplicate_selection", "preview_selection"])
+    func anUnknownKeyInAnOpIsRefusedByName(_ tool: String) async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{}"#.utf8)),
+            capabilities: ["controlSelection"], subscribeTo: "d")
+        defer { Task { await device.close() } }
+
+        let opsArg: Value = .array([.object(["op": "translate", "canvasDelta": .array([1, 2])])])
+        let (content, isError) = try await client.callTool(name: tool, arguments: ["docId": "d", "ops": opsArg])
+        #expect(isError == true)
+        #expect(toolResultText(content) == "invalidArgument: ops[0].canvasDelta — an op takes only: degrees, dx, dy, factor, op")
+        #expect(await device.receivedRequests.isEmpty, "refused before any device is asked")
+        await server.stop()
+    }
+
     /// add_arrow and restyle_arrows forward `keepsWidth` to the device (Josef, 2026-10-15).
     @Test func arrowWritesForwardKeepsWidth() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
@@ -2313,11 +2454,11 @@ private actor FakeStrokeOpDevice {
     /// restore_stroke_widths names what it was given (whole-branch review #5).
     @Test func restoreWidthsNamesStrokesAndArrows() {
         let arrow = UUID().uuidString
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"]) == "stroke")
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"]) == "strokes")
-        #expect(MCPAdapter.restoreTargetsNoun([arrow]) == "arrow")
-        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString]) == "arrows")
-        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow]) == "elements (1 stroke and 1 arrow)")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0"], formulaIds: []) == "stroke")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", "seed2:2.0"], formulaIds: []) == "strokes")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow], formulaIds: []) == "arrow")
+        #expect(MCPAdapter.restoreTargetsNoun([arrow, UUID().uuidString], formulaIds: []) == "arrows")
+        #expect(MCPAdapter.restoreTargetsNoun(["seed1:1.0", arrow], formulaIds: []) == "elements (1 stroke and 1 arrow)")
     }
 
     /// The preset writes relay their arguments to an `arrowPresetWrites` device and pass its reply
@@ -2604,6 +2745,36 @@ private actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A newer device lists WHAT was inherited (`resolvedTool.inherited`): a stroke given its
+    /// width and color but no ink inherited the ink only, and the reply says only that. Absent
+    /// (an older device) the three are printed as before — that is `drawReplyMetaMatchesCanonicalShape`.
+    @Test func drawStrokesSaysOnlyWhatWasInherited() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let meta = Data(#"""
+        {"keys":["111-222.5"],"resolvedTool":{"color":"#12AB34FF","drawnWidth":19.5,"inherited":["inkType"],"inkType":"marker"}}
+        """#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta))
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "draw_strokes",
+            arguments: ["docId": "d", "strokes": .array([.object([
+                "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(0)])]),
+                "drawnWidth": .double(2), "color": .string("#000000FF"),
+            ])])])
+        #expect(isError != true)
+        let text = toolResultText(content)
+        #expect(text.contains("\ninherited from the user's tool: inkType marker\n") || text.hasSuffix("inherited from the user's tool: inkType marker"),
+                "only the ink was inherited: \(text)")
+        #expect(!text.contains("19.5") && !text.contains("#12AB34FF"), "width and color were given: \(text)")
+        await server.stop()
+    }
+
     @Test func drawStrokesSpecEnvelopeMatchesCanonicalShape() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -2644,6 +2815,42 @@ private actor FakeStrokeOpDevice {
         #expect(stroke["color"] as? String == "#FF00AA")
         #expect(stroke["inkType"] as? String == "marker")
 
+        await server.stop()
+    }
+
+    /// A stroke takes `tags`, as a dot, a fill, a text, an arrow and a formula do (2026-11-19: an
+    /// agent that drew a page had to tag its 61 strokes in a second call). The device has decoded
+    /// the key since tags exist; only this side's schema did not offer it. A candidate stroke of
+    /// render_sketch is never written and takes none.
+    @Test func drawStrokesOffersAndCarriesTags() async throws {
+        func itemProperties(of tool: String) throws -> [String: Value] {
+            let definition = try #require(MCPAdapter.toolDefinitions.first { $0.name == tool })
+            guard case .object(let schema) = definition.inputSchema, case .object(let properties)? = schema["properties"],
+                  case .object(let strokes)? = properties["strokes"], case .object(let items)? = strokes["items"],
+                  case .object(let itemProperties)? = items["properties"] else {
+                Issue.record("\(tool): no strokes item schema"); return [:]
+            }
+            return itemProperties
+        }
+        #expect(try itemProperties(of: "draw_strokes")["tags"] != nil)
+        #expect(try itemProperties(of: "render_sketch")["tags"] == nil)
+
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await device.close() } }
+        let strokesArg: Value = .array([.object([
+            "canvasPoints": .array([.array([.int(0), .int(0)]), .array([.int(10), .int(10)])]),
+            "tags": .array([.string("axis"), .string("fft")]),
+        ])])
+        let (_, isError) = try await client.callTool(name: "draw_strokes", arguments: ["docId": "d", "strokes": strokesArg])
+        #expect(isError != true)
+        let received = try #require(await device.receivedRequests.first)
+        let envelope = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let stroke = try #require((envelope["strokes"] as? [[String: Any]])?.first)
+        #expect(stroke["tags"] as? [String] == ["axis", "fft"])
         await server.stop()
     }
 
@@ -4379,7 +4586,8 @@ private actor FakeStrokeOpDevice {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
                                      "add_text", "edit_text", "render_sketch",
-                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style"]
+                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
+                                     "add_formula", "edit_formula"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
             .map(\.name))
@@ -6415,6 +6623,10 @@ private actor FakeStrokeOpDevice {
             "restyle_strokes": ["storedColor"],
             "fill_region": ["storedColors"],
             "draw_dots": ["storedColors"],
+            "list_formulas": ["latex", "typeset", "message", "canvasBounds", "canvasBaseline", "fontSize",
+                              "color", "opacity", "pinned", "layer", "tags"],
+            "add_formula": ["id", "typeset", "message", "canvasBounds", "canvasBaseline", "seq"],
+            "edit_formula": ["typeset", "canvasBounds", "canvasBaseline", "seq", "unchanged"],
         ]
         let (server, port, task) = try await startServer()
         defer { task.cancel() }

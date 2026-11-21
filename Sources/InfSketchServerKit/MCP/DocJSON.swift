@@ -49,21 +49,22 @@ public enum DocJSON {
         case elementNotFound
         case invalidColor
         case arrowNotFound
+        case formulaNotFound
         /// The document was written by an app whose file format is newer than the one these
         /// edits know (`knownFormatVersion`).
         case documentFormatNewer(file: Int)
     }
 
     /// The newest `.infsketch` format version the edits in this file understand — the app's
-    /// `SketchDocData.currentFormatVersion` at this server's release (6: one mixed `placedObjects`
-    /// list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
+    /// `SketchDocData.currentFormatVersion` at this server's release (7: a text's `inlineMath` and
+    /// the document's `newTextsInlineMath`, formulas; 6: one mixed `placedObjects` list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
     /// refuses it: a format change can move where elements live, and an edit made on the old
     /// shape answers not-found for elements that exist, or writes a key the newer app no longer
     /// reads. That is what v1.4.0 does to a format-5 document — it looks in `placedTextsData`,
     /// finds nothing, and tells the agent the text is not there. The document itself stays an
     /// opaque payload for sync; only these direct edits read its shape. **Raise this together
     /// with the app's format version, in the same paired release.**
-    public static let knownFormatVersion = 6
+    public static let knownFormatVersion = 7
 
     // MARK: - Read
 
@@ -93,13 +94,19 @@ public enum DocJSON {
     /// false) into the entry's `colorSchemeIsDark`. Every pre-existing array
     /// element — including ones this module doesn't understand — is preserved
     /// untouched in place.
+    ///
+    /// `inlineMath` (format 7, formulas): nil takes the document's `newTextsInlineMath` (absent =
+    /// false). The key is written only when true, and writing it raises the document to format 7
+    /// (`writeInlineMath`); false and nil on a document without the default write exactly the
+    /// entry this wrote before formulas existed.
     public static func addText(
         to bytes: Data,
         id: UUID,
         text: String,
         x: Double,
         y: Double,
-        pinned: Bool
+        pinned: Bool,
+        inlineMath: Bool? = nil
     ) throws -> Data {
         // Programmer-error contract, not a document property: JSON (the only
         // transport MCP tool arguments arrive over) cannot encode NaN/Infinity,
@@ -123,14 +130,19 @@ public enum DocJSON {
             entry["kind"] = ElementKind.text.rawValue
             entry["layer"] = "front"
         }
+        let formulas = inlineMath ?? ((doc["newTextsInlineMath"] as? Bool) ?? false)
+        writeInlineMath(formulas, into: &entry, doc: &doc)
         elements.append(entry)
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
     }
 
     /// Mutates an existing text entry by id. `newText` (when non-nil) replaces
-    /// the run array wholesale with `[newText, {}]` — a documented formatting
-    /// reset, mirroring what a fresh `addText` would produce for that string.
+    /// the run array with ONE run of the new characters in the style of the
+    /// text's FIRST run, whose attribute object is copied as it is (it is
+    /// UIKit-archived data this side cannot make, but it can keep it). Until
+    /// 2026-11-19 it was `[newText, {}]`, a formatting reset: an agent that
+    /// corrected a label's wording got it back in the default size and color.
     /// `x`/`y` (when non-nil) update only that axis of `rect`'s origin; the
     /// untouched axis, size, sibling entries (including unrecognized array
     /// elements), and every other key are passed through unchanged (not
@@ -152,7 +164,8 @@ public enum DocJSON {
         textId: String,
         newText: String?,
         x: Double?,
-        y: Double?
+        y: Double?,
+        inlineMath: Bool? = nil
     ) throws -> Data {
         // See addText: non-finite coordinates are a programmer error by contract.
         precondition((x?.isFinite ?? true) && (y?.isFinite ?? true),
@@ -166,16 +179,59 @@ public enum DocJSON {
         }
 
         if let newText {
-            entry["text"] = makeTextRuns(newText)
+            entry["text"] = textRuns(newText, inTheStyleOf: entry["text"])
         }
 
         if x != nil || y != nil {
             entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
         }
 
+        if let inlineMath {
+            writeInlineMath(inlineMath, into: &entry, doc: &doc)
+        }
+
         elements[index] = entry
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
+    }
+
+    /// Sets one text's `inlineMath` (format 7) and nothing else — the device path of `add_text` /
+    /// `edit_text`: the server writes the key on the bytes the device returned (the new text's id
+    /// is in the reply's `meta`), so it is the one writer of the key on both paths and the device's
+    /// op spec never carries it. Throws `.textNotFound` when no text has that id.
+    ///
+    /// When the entry already holds the requested value the device's bytes come back UNCHANGED:
+    /// a rewrite would re-sort the keys and drop nothing but would still be a new byte string, and
+    /// the device's bytes carry a current thumbnail that must not be lost for no change.
+    public static func setInlineMath(in bytes: Data, textId: String, to inlineMath: Bool) throws -> Data {
+        let doc = try parseDocumentForEdit(bytes)
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements) else { throw DocJSONError.textNotFound }
+        let value = (elements[index] as? [String: Any])?["inlineMath"]
+        let current = (value as? Bool) ?? (value as? NSNumber)?.boolValue ?? false
+        if current == inlineMath { return bytes }
+        return try editText(in: bytes, textId: textId, newText: nil, x: nil, y: nil, inlineMath: inlineMath)
+    }
+
+    /// The format that introduced `inlineMath` (formulas).
+    static let inlineMathFormatVersion = 7
+
+    /// Writes a text entry's `inlineMath` the app's way — the key only when true, absent when false
+    /// — and, when it writes the key, raises the document's `formatVersion` to 7 if it says older
+    /// (a file without the key is format 1). An app that knows only format 6 then REFUSES the
+    /// document (its newer-format door) instead of opening it and stripping the key at its next
+    /// save — the stated cost of every format change (design decision A1). Never lowers a version
+    /// and never moves the text: the server cannot measure, and the device re-lays it at open.
+    private static func writeInlineMath(_ on: Bool, into entry: inout [String: Any], doc: inout [String: Any]) {
+        guard on else {
+            entry.removeValue(forKey: "inlineMath")
+            return
+        }
+        entry["inlineMath"] = true
+        let version = (doc["formatVersion"] as? NSNumber)?.intValue ?? (doc["formatVersion"] as? Int) ?? 1
+        if version < inlineMathFormatVersion {
+            doc["formatVersion"] = inlineMathFormatVersion
+        }
     }
 
     /// Removes a text entry by id, leaving every other array element (including
@@ -209,6 +265,30 @@ public enum DocJSON {
         return try serialize(doc)
     }
 
+    /// Removes a formula object by id from the object list, every other slot left in place — the
+    /// `removeArrow` rule: a formula is plain JSON (`kind: "formula"`), so this needs no device and
+    /// works on a closed document. The format version is left as it is (a removal never raises or
+    /// lowers it). Throws `.formulaNotFound` when no formula has that id (a document without an
+    /// object list has no formulas).
+    public static func removeFormula(from bytes: Data, formulaId: String) throws -> Data {
+        var doc = try parseDocumentForEdit(bytes)
+        guard usesObjectList(doc) else { throw DocJSONError.formulaNotFound }
+        var formulas = elements(.formula, of: doc)
+        guard let index = entryIndex(withId: formulaId, in: formulas) else {
+            throw DocJSONError.formulaNotFound
+        }
+        formulas.remove(at: index)
+        setElements(formulas, .formula, in: &doc)
+        return try serialize(doc)
+    }
+
+    /// The ids of a document's elements of `kind` — a lenient READ (bytes that do not parse have
+    /// none). What the adapter asks to learn whether a mixed `ids` list names a formula.
+    static func elementIds(_ kind: ElementKind, in bytes: Data) -> Set<String> {
+        guard let doc = try? parseDocument(bytes) else { return [] }
+        return Set(elements(kind, of: doc).compactMap { ($0 as? [String: Any])?["id"] as? String })
+    }
+
     /// Removes a placed-image entry by id, then orphan-prunes its backing
     /// `pastedImagesData` blob IFF no *remaining* placed image still
     /// references the same `pastedImageDataId` — two placed images can share
@@ -235,9 +315,9 @@ public enum DocJSON {
         return try serialize(doc)
     }
 
-    /// Sets the `pinned` flag to `pinned` on every placed text, image or arrow whose
-    /// `id` is in `ids`. `ids` may mix text ids and image ids — both arrays are
-    /// scanned. ATOMIC: every id must resolve to a text or image, else
+    /// Sets the `pinned` flag to `pinned` on every placed text, image, arrow or formula whose
+    /// `id` is in `ids`. `ids` may mix the kinds — every one is scanned. ATOMIC: every id must
+    /// resolve to one of them, else
     /// `.elementNotFound` is thrown and nothing is mutated. Only the `pinned`
     /// field of a matched entry changes; every other field, and every
     /// non-dictionary / unmatched element (in either array), is preserved in
@@ -248,9 +328,10 @@ public enum DocJSON {
         let texts = elements(.text, of: doc)
         let images = elements(.image, of: doc)
         let arrows = usesObjectList(doc) ? elements(.arrow, of: doc) : []
+        let formulas = usesObjectList(doc) ? elements(.formula, of: doc) : []
 
         // Validate BEFORE mutating (atomic): every requested id must be present.
-        let present = Set((texts + images + arrows).compactMap { ($0 as? [String: Any])?["id"] as? String })
+        let present = Set((texts + images + arrows + formulas).compactMap { ($0 as? [String: Any])?["id"] as? String })
         for id in ids where !present.contains(id) {
             throw DocJSONError.elementNotFound
         }
@@ -271,6 +352,7 @@ public enum DocJSON {
             setElements(repin(texts), .text, in: &doc)
             setElements(repin(images), .image, in: &doc)
             if !arrows.isEmpty { setElements(repin(arrows), .arrow, in: &doc) }
+            if !formulas.isEmpty { setElements(repin(formulas), .formula, in: &doc) }
         } else {
             if doc["placedTextsData"] != nil { doc["placedTextsData"] = repin(texts) }
             if doc["placedImagesData"] != nil { doc["placedImagesData"] = repin(images) }
@@ -398,13 +480,17 @@ public enum DocJSON {
     /// and write here goes through these two functions, so both shapes are edited in place and
     /// a format-5 document never gains a stray old key (the app would still keep its elements,
     /// but the list's order and layers are the source of truth).
-    /// `arrow` (document format 6) exists only in the one list; its legacy key is never present.
-    enum ElementKind: String { case text, image, arrow
-        var legacyKey: String {
+    /// `arrow` (document format 6) and `formula` (format 7) exist only in the one list: no app
+    /// ever wrote a per-kind array for them, so they have NO legacy key (nil), and a document
+    /// without the list has none of them.
+    enum ElementKind: String { case text, image, arrow, formula
+        /// The per-kind array a document from before format 5 keeps this kind in; nil for a kind
+        /// that only ever lived in `placedObjects`.
+        var legacyKey: String? {
             switch self {
             case .text: return "placedTextsData"
             case .image: return "placedImagesData"
-            case .arrow: return "placedArrowsData"
+            case .arrow, .formula: return nil
             }
         }
     }
@@ -416,7 +502,8 @@ public enum DocJSON {
         if let objects = doc["placedObjects"] as? [Any] {
             return objects.filter { (($0 as? [String: Any])?["kind"] as? String) == kind.rawValue }
         }
-        return (doc[kind.legacyKey] as? [Any]) ?? []
+        guard let key = kind.legacyKey else { return [] }
+        return (doc[key] as? [Any]) ?? []
     }
 
     /// Write back `kind`'s elements after an edit. In the one-list shape that kind's elements
@@ -425,7 +512,13 @@ public enum DocJSON {
     /// elements and an element without an id keep their slots untouched.
     static func setElements(_ new: [Any], _ kind: ElementKind, in doc: inout [String: Any]) {
         guard let objects = doc["placedObjects"] as? [Any] else {
-            doc[kind.legacyKey] = new
+            // A kind with no legacy key has no elements in such a document, and every caller
+            // that writes one checks `usesObjectList` first — so there is nothing to write.
+            guard let key = kind.legacyKey else {
+                assert(new.isEmpty, "\(kind) has no place in a document without an object list")
+                return
+            }
+            doc[key] = new
             return
         }
         func id(_ element: Any) -> String? { (element as? [String: Any])?["id"] as? String }
@@ -489,6 +582,15 @@ public enum DocJSON {
         if let n = any as? NSNumber { return n.doubleValue }
         if let i = any as? Int { return Double(i) }
         return nil
+    }
+
+    /// `text` as one run with the attributes of `existing`'s first run (`[string, {…}, string,
+    /// {…}, …]`), copied without being read. A first run that is not an attribute object (a
+    /// shape this side does not know) gives the plain run.
+    private static func textRuns(_ text: String, inTheStyleOf existing: Any?) -> [Any] {
+        guard let runs = existing as? [Any], runs.count >= 2, let attributes = runs[1] as? [String: Any]
+        else { return makeTextRuns(text) }
+        return [text, attributes]
     }
 
     /// `[text, {}]` — a fresh, unformatted run array (also used by `makeEntry`).

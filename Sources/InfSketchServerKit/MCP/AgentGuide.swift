@@ -161,11 +161,11 @@ enum AgentGuide {
 
     ## Layers
 
-    **Texts, images and arrows are placed OBJECTS, in two layers.** A document paints, bottom to \
-    top: pinned images, BACK objects, the grid, the strokes, FRONT objects. A text or an arrow is \
-    `front` unless you say otherwise, an image `back`: `layer` on `add_text` / `add_image` / \
-    `add_arrow` sets it, `set_layer` moves existing ones, and `list_texts` / `list_images` / \
-    `list_arrows` report it. Within a layer the three kinds share ONE order — `reorder_elements` \
+    **Texts, images, arrows and formulas are placed OBJECTS, in two layers.** A document paints, \
+    bottom to top: pinned images, BACK objects, the grid, the strokes, FRONT objects. A text, an \
+    arrow or a formula is `front` unless you say otherwise, an image `back`: `layer` on \
+    `add_text` / `add_image` / `add_arrow` / `add_formula` sets it, `set_layer` moves existing \
+    ones, and the `list_` tools report it. Within a layer the kinds share ONE order — `reorder_elements` \
     puts an object above (or below) everything in its layer, whatever its kind. So a caption that \
     must sit behind the user's ink goes in `back`, and a callout over it stays `front`. Setting a \
     layer needs an app with the `objectLayerWrites` capability; an older app is never asked.
@@ -206,6 +206,22 @@ enum AgentGuide {
     `reorder_elements`, and its id in `tag_elements` and `set_pinned`. Its ends and middle are \
     `snap_points` candidates with `objects: true`. These need a device with the `arrows` \
     capability — an older app has none and is never asked.
+
+    ## Formulas
+
+    **Mathematics has two forms; pick by what it sits in.** A formula ON ITS OWN — an equation, \
+    a labeled quantity beside a diagram — is a formula object: `add_formula` with ONE LaTeX \
+    formula WITHOUT `$` markers (`E = mc^2`, `\\frac{a}{b}`), at `canvasX`/`canvasY` = the LEFT END \
+    OF ITS BASELINE, typeset at `fontSize` points. Mathematics INSIDE A SENTENCE is a text \
+    with `inlineMath: true` (`add_text`), each formula between `$` signs. **A source that does \
+    not typeset is stored, not refused**: `typeset: false` and the parser's `message` come back, \
+    the app shows the source as plain text, and you correct it with `edit_formula` — which keeps \
+    the baseline's left end in place, so a changed source never jumps. `list_formulas` reports \
+    each one's `canvasBounds` and `canvasBaseline` as measured by the device; `remove_formula` works on a closed \
+    document. Move, copy, reorder and select formulas with the element and selection tools' \
+    `formulaIds`, and their ids work in `set_layer`, `set_pinned` and `tag_elements`. The color \
+    is light-canonical, as everywhere. These need a device with the `formulas` capability — an \
+    older app has none and is never asked.
 
     ## Working alongside a person
 

@@ -74,13 +74,20 @@ enum ToolReference {
               tools: ["list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
                       "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
                       "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style"]),
+        Group(title: "Formulas",
+              blurb: "One LaTeX formula per object, written without `$` markers; mathematics inside "
+                   + "a sentence is a text with `inlineMath: true` instead. Adding, editing and "
+                   + "listing need a device with the `formulas` capability, which typesets; "
+                   + "`remove_formula` is done by the server. Move, copy, reorder and select them "
+                   + "with the element and selection tools' `formulaIds`.",
+              tools: ["list_formulas", "add_formula", "edit_formula", "remove_formula"]),
         Group(title: "Grids",
               blurb: "`visible` (drawn) and `enabled` (snapped-to) are independent. `snap` is a "
                    + "MULTIPLIER of `spacing`, not a distance.",
               tools: ["list_grids", "add_grid", "update_grid", "remove_grid", "reorder_grids",
                       "set_grid_origin", "snap_points"]),
         Group(title: "Elements",
-              blurb: "Strokes, texts, images and arrows addressed by id, whatever their kind. Resolve a "
+              blurb: "Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a "
                    + "tag to ids with `find_elements`, then act with the id-taking tools.",
               tools: ["tag_elements", "find_elements", "list_tags", "transform_elements",
                       "reset_element_transforms",
