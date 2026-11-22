@@ -6552,6 +6552,18 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments")
             }
 
+            // `device` is read HERE and never relayed (it says WHICH device, not what to render):
+            // a kind is a hello word, so asking for one is one more part a device has to offer.
+            // Outside the relay's `do`: a wrong type must answer as an argument error, not as a
+            // device failure.
+            var kind = ""
+            if let device = try Self.optionalStringArg(arguments, "device") {
+                guard ["mac", "ipad", "iphone"].contains(device) else {
+                    return Self.errorResult("invalidArguments: device must be mac, ipad or iphone")
+                }
+                kind = "+" + DeviceCommandBroker.kindPrefix + device
+            }
+
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 // A render that names arrows goes only to a device that can build them: an older
@@ -6571,15 +6583,6 @@ public actor MCPAdapter {
                     guard case .array(let items)? = arguments?["arrows"] else { return false }
                     return items.contains { if case .object(let fields) = $0 { return fields["styleBase"] != nil }; return false }
                 }()
-                // `device` is read HERE and never relayed (it says WHICH device, not what to
-                // render): a kind is a hello word, so asking for one is one more part to offer.
-                var kind = ""
-                if let device = try Self.optionalStringArg(arguments, "device") {
-                    guard ["mac", "ipad", "iphone"].contains(device) else {
-                        return Self.errorResult("invalidArguments: device must be mac, ipad or iphone")
-                    }
-                    kind = "+" + DeviceCommandBroker.kindPrefix + device
-                }
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",

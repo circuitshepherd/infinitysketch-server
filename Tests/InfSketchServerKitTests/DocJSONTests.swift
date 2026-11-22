@@ -111,7 +111,8 @@ import Testing
         let after = try JSONSerialization.jsonObject(with: out) as! [String: Any]
         let entry = (after["placedTextsData"] as! [[String: Any]])[index]
         let origin = (entry["rect"] as! [Any])[0] as! [Double]
-        #expect(origin == [500 - 37.5, 250 + 12], "origin + translation is the point asked for")
+        // Written out as Doubles: `250 + 12` inside the macro is an Int to the Linux toolchain.
+        #expect(origin == [462.5, 262.0], "origin + translation (37.5, -12) is the point asked for (500, 250)")
         #expect((entry["transform"] as! [String: Double])["tx"] == 37.5, "the transform is left alone")
 
         // One axis alone: the other keeps its origin.
