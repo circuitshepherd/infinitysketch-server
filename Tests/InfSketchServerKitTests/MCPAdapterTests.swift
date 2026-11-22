@@ -1363,6 +1363,97 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `placeBy` is device work under its own capability: an app without it would ignore the
+    /// key, place by the default point and answer success. The reply carries the box the device
+    /// laid out, for add and for edit.
+    @Test func placeByGoesToADeviceThatKnowsItAndTheReplyCarriesTheBox() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "tick", "canvasX": 10, "canvasY": 20,
+                        "placeBy": ["row": "top", "column": "center"]])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("placeBy"), "\(toolResultText(refused))")
+        await old.close()
+
+        let placed = Data(#"{"aaa001_thumbnailData":"","marker":"placed"}"#.utf8)
+        let meta = Data(#"{"id":"11111111-2222-3333-4444-555555555555","canvasBounds":"1.5, 20.0, 17.0, 21.0"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: placed, meta: meta), capabilities: ["authorText", "placeBy"])
+        defer { Task { await device.close() } }
+
+        let (added, addedError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "tick", "canvasX": 10, "canvasY": 20,
+                        "placeBy": ["row": "top", "column": "center"]])
+        #expect(addedError != true, "\(toolResultText(added))")
+        let addedText = toolResultText(added)
+        #expect(addedText.contains("id: 11111111-2222-3333-4444-555555555555"))
+        #expect(addedText.contains("canvasBounds: [1.5, 20.0, 17.0, 21.0]"))
+        let addRequest = try #require(await device.receivedRequests.last)
+        let addSpec = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
+        #expect(addSpec["op"] as? String == "addText")
+        #expect((addSpec["placeBy"] as? [String: String]) == ["row": "top", "column": "center"])
+
+        let (edited, editedError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": "11111111-2222-3333-4444-555555555555", "canvasX": 30,
+                        "placeBy": ["row": "middle", "column": "right"]])
+        #expect(editedError != true, "\(toolResultText(edited))")
+        #expect(toolResultText(edited).contains("canvasBounds: [1.5, 20.0, 17.0, 21.0]"))
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["op"] as? String == "editText")
+        #expect(editSpec["canvasX"] as? Double == 30)
+        #expect(editSpec["canvasY"] == nil)
+
+        await server.stop()
+    }
+
+    /// A position for a text that is turned or scaled is the device's to compute (its shown
+    /// corner depends on its laid-out size); a text that was only dragged is placed by the server.
+    @Test func aNewPositionForATurnedTextIsRelayedAndForADraggedOneIsNot() async throws {
+        func doc(transform: String) -> Data {
+            Data(#"{"aaa001_thumbnailData":"","placedTextsData":[{"id":"AAAAAAAA-0000-0000-0000-000000000001","text":["hi",{}],"rect":[[100,200],[1,1]],"transform":\#(transform),"opacity":1,"pinned":false,"wordWrapEnabled":false,"colorSchemeIsDark":false}]}"#.utf8)
+        }
+        let id = "AAAAAAAA-0000-0000-0000-000000000001"
+        let (server, port, task) = try await startServer(
+            seedDocId: "dragged", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":5,"ty":7}"#))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "turned", bytes: doc(transform: #"{"a":0,"b":1,"c":-1,"d":0,"tx":5,"ty":7}"#))
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"device"}"#.utf8)), capabilities: ["authorText"])
+        defer { Task { await device.close() } }
+
+        let (_, draggedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "dragged", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(draggedError != true)
+        #expect(await device.receivedRequests.isEmpty, "a dragged text is placed by the server")
+        let raw = try await client.readResource(uri: "infsketch://doc/dragged/raw")
+        let blob = try #require(raw[0].blob)
+        let stored = try #require(Data(base64Encoded: blob))
+        let object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        let entry = try #require((object["placedTextsData"] as? [[String: Any]])?.first)
+        #expect(((entry["rect"] as? [Any])?[0] as? [Double]) == [45, 53], "shown at (50, 60): origin + (5, 7)")
+
+        let (_, turnedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "turned", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(turnedError != true)
+        let request = try #require(await device.receivedRequests.last)
+        #expect(request.docId == "turned")
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "editText")
+
+        await server.stop()
+    }
+
     /// Pins `requestStrokeOp`'s `capability: "authorText"` argument actually
     /// gates selection: a device that advertises ONLY "authorStrokes" (every
     /// existing stroke-op device) must NOT be picked for a styled text op —

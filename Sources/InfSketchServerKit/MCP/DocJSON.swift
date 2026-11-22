@@ -50,6 +50,9 @@ public enum DocJSON {
         case invalidColor
         case arrowNotFound
         case formulaNotFound
+        /// A text that is turned or scaled cannot be placed without laying it out; the caller
+        /// routes such an edit to a device first, so this is only reached without one.
+        case textNeedsDeviceToPlace
         /// The document was written by an app whose file format is newer than the one these
         /// edits know (`knownFormatVersion`).
         case documentFormatNewer(file: Int)
@@ -183,7 +186,20 @@ public enum DocJSON {
         }
 
         if x != nil || y != nil {
-            entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
+            // `x` / `y` say where the text is SHOWN. A text the user dragged in the app carries
+            // that drag as a translation on its `transform`, and the origin written here is the
+            // point asked for less that translation — written as asked (until 2026-11-22), the
+            // text landed beside the place by exactly its drag. A text that is turned or scaled
+            // is not placed here at all: its shown corner depends on its laid-out size, which
+            // only a device has (`textPlacementNeedsDevice`, routed in `MCPAdapter.callEditText`).
+            switch transformKind(of: entry) {
+            case .identity:
+                entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
+            case .translation(let tx, let ty):
+                entry["rect"] = updatedRect(entry["rect"], x: x.map { $0 - tx }, y: y.map { $0 - ty })
+            case .other:
+                throw DocJSONError.textNeedsDeviceToPlace
+            }
         }
 
         if let inlineMath {
@@ -193,6 +209,33 @@ public enum DocJSON {
         elements[index] = entry
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
+    }
+
+    /// What a text entry's `transform` does to a position: nothing, a shift, or more.
+    enum TransformKind: Equatable {
+        case identity
+        case translation(tx: Double, ty: Double)
+        case other
+    }
+
+    static func transformKind(of entry: [String: Any]) -> TransformKind {
+        guard let t = entry["transform"] as? [String: Any] else { return .identity }
+        func value(_ key: String, default fallback: Double) -> Double { t[key].flatMap(doubleValue) ?? fallback }
+        let linear = [value("a", default: 1), value("b", default: 0), value("c", default: 0), value("d", default: 1)]
+        guard linear == [1, 0, 0, 1] else { return .other }
+        let tx = value("tx", default: 0), ty = value("ty", default: 0)
+        return tx == 0 && ty == 0 ? .identity : .translation(tx: tx, ty: ty)
+    }
+
+    /// Whether moving this text to a canvas position needs a device: it is turned, scaled or
+    /// skewed, so where its corner is shown depends on its laid-out size. False for an unknown id
+    /// (the edit itself answers `textNotFound`).
+    public static func textPlacementNeedsDevice(in bytes: Data, textId: String) -> Bool {
+        guard let doc = try? parseDocument(bytes) else { return false }
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              let entry = elements[index] as? [String: Any] else { return false }
+        return transformKind(of: entry) == .other
     }
 
     /// Sets one text's `inlineMath` (format 7) and nothing else — the device path of `add_text` /
@@ -559,6 +602,12 @@ public enum DocJSON {
               let y = doubleValue(origin[1])
         else { return nil }
         let pinned = (entry["pinned"] as? Bool) ?? false
+        // Where the text is SHOWN: a text the user dragged carries the drag on its transform, and
+        // the summary's position is the one `edit_text` takes back. (A turned or scaled text's
+        // shown corner needs its laid-out size; its stored origin is reported, as before.)
+        if case .translation(let tx, let ty) = transformKind(of: entry) {
+            return TextSummary(id: id, text: strings.joined(), x: x + tx, y: y + ty, pinned: pinned)
+        }
         return TextSummary(id: id, text: strings.joined(), x: x, y: y, pinned: pinned)
     }
 

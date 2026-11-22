@@ -79,8 +79,10 @@ import Testing
         let s = try DocJSON.summary(from: out)
         let edited = try #require(s.texts.first(where: { $0.id.hasSuffix("0002") }))
         #expect(edited.text == "Replaced")
+        // The fixture's text carries a drag of (-5, 6) on its transform; positions are where the
+        // text is SHOWN, in the edit and in the summary alike.
         #expect(edited.x == 7)
-        #expect(edited.y == 400)   // untouched axis preserved
+        #expect(edited.y == 406)   // untouched axis preserved: origin 400 + the drag's 6
         // The new characters keep the style of the text's FIRST run, copied as it is — the
         // attributes are UIKit-archived data this side cannot make, but it can keep them.
         // (Until 2026-11-19 a new string reset the runs to [string, {}].)
@@ -91,6 +93,54 @@ import Testing
         #expect(runs.count == 2)
         #expect(runs[0] as? String == "Replaced")
         #expect(runs[1] as? [String: String] == ["NSColor": "ZHVtbXk=", "NSFont": "ZHVtbXk="])
+    }
+
+    /// A text the user DRAGGED carries the drag as a translation on its transform. A position
+    /// says where the text is SHOWN, so the origin written is the point less that translation —
+    /// written as asked, the text landed beside the place by exactly its drag (2026-11-22).
+    @Test func editTextPlacesADraggedTextWhereAsked() throws {
+        var obj = try JSONSerialization.jsonObject(with: Self.fixture) as! [String: Any]
+        var texts = obj["placedTextsData"] as! [[String: Any]]
+        let index = try #require(texts.firstIndex { ($0["id"] as? String)?.hasSuffix("0002") == true })
+        texts[index]["transform"] = ["a": 1, "b": 0, "c": 0, "d": 1, "tx": 37.5, "ty": -12]
+        obj["placedTextsData"] = texts
+        let dragged = try JSONSerialization.data(withJSONObject: obj)
+
+        let out = try DocJSON.editText(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002",
+                                       newText: nil, x: 500, y: 250)
+        let after = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        let entry = (after["placedTextsData"] as! [[String: Any]])[index]
+        let origin = (entry["rect"] as! [Any])[0] as! [Double]
+        #expect(origin == [500 - 37.5, 250 + 12], "origin + translation is the point asked for")
+        #expect((entry["transform"] as! [String: Double])["tx"] == 37.5, "the transform is left alone")
+
+        // One axis alone: the other keeps its origin.
+        let onlyY = try DocJSON.editText(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002",
+                                         newText: nil, x: nil, y: 0)
+        let entryY = ((try JSONSerialization.jsonObject(with: onlyY) as! [String: Any])["placedTextsData"] as! [[String: Any]])[index]
+        let originY = (entryY["rect"] as! [Any])[0] as! [Double]
+        #expect(originY[1] == 12)
+        #expect(!DocJSON.textPlacementNeedsDevice(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002"))
+    }
+
+    /// A turned or scaled text is not placed here: its shown corner depends on its laid-out
+    /// size, which only a device has. Its characters can still be changed.
+    @Test func editTextDoesNotPlaceATurnedText() throws {
+        var obj = try JSONSerialization.jsonObject(with: Self.fixture) as! [String: Any]
+        var texts = obj["placedTextsData"] as! [[String: Any]]
+        let index = try #require(texts.firstIndex { ($0["id"] as? String)?.hasSuffix("0002") == true })
+        texts[index]["transform"] = ["a": 0, "b": 1, "c": -1, "d": 0, "tx": 10, "ty": 20]
+        obj["placedTextsData"] = texts
+        let turned = try JSONSerialization.data(withJSONObject: obj)
+        let id = "AAAAAAAA-0000-0000-0000-000000000002"
+
+        #expect(DocJSON.textPlacementNeedsDevice(in: turned, textId: id))
+        #expect(!DocJSON.textPlacementNeedsDevice(in: Self.fixture, textId: id))
+        #expect(!DocJSON.textPlacementNeedsDevice(in: turned, textId: "missing"))
+        #expect(throws: DocJSON.DocJSONError.textNeedsDeviceToPlace) {
+            _ = try DocJSON.editText(in: turned, textId: id, newText: nil, x: 1, y: 2)
+        }
+        _ = try DocJSON.editText(in: turned, textId: id, newText: "new words", x: nil, y: nil)
     }
 
     /// A text of several runs becomes one run in the FIRST run's style; a text without a style

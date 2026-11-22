@@ -494,6 +494,7 @@ public actor MCPAdapter {
         var parts = ["authorText"]
         if has("wordWrap") || has("wrapWidth") { parts.append("textWrap") }
         if has("layer") { parts.append("objectLayerWrites") }
+        if has("placeBy") { parts.append("placeBy") }
         return parts.joined(separator: "+")
     }
 
@@ -506,7 +507,7 @@ public actor MCPAdapter {
     /// document format, none of which the server-side `DocJSON` path writes — so a tagged or
     /// anchored call must take the device path or the argument would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        (styleArgKeys + ["tags", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"]).contains { key in
+        (styleArgKeys + ["tags", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
@@ -533,6 +534,29 @@ public actor MCPAdapter {
             least 24, rounded to a whole point. Needs a connected device.
             """]),
     ]
+
+    /// `placeBy` — which point of the box `canvasX` / `canvasY` name (texts and formulas). Device
+    /// work: only a device knows the box. Relayed under `…+placeBy`, since an app without it
+    /// would ignore the key and place by the default point with a success reply.
+    private static func placeByProperty(default defaultPoint: String) -> Value {
+        .object([
+            "type": "object",
+            "description": """
+                Which point of the box `canvasX` / `canvasY` name: {row: "top"|"middle"|"bottom"| \
+                "baseline", column: "left"|"center"|"right"} — {row: "top", column: "center"} \
+                centers the box under the point, {row: "middle", column: "right"} ends it there. \
+                `baseline` is the first line's baseline. Default: \(defaultPoint). The box is \
+                the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` \
+                capability.
+                """,
+            "properties": .object([
+                "row": .object(["type": "string", "enum": .array(["top", "middle", "bottom", "baseline"].map(Value.string))]),
+                "column": .object(["type": "string", "enum": .array(["left", "center", "right"].map(Value.string))]),
+            ]),
+            "required": .array(["row", "column"].map(Value.string)),
+            "additionalProperties": .bool(false),
+        ])
+    }
 
     /// A text's anchor — the point of its box that stays put as it grows — and what picking
     /// one does to the paragraphs' alignment; the Properties panel's anchor grid, as arguments.
@@ -768,7 +792,16 @@ public actor MCPAdapter {
                 strokes (both need a device). Formulas: write the LaTeX between `$…$` and set \
                 `inlineMath: true` (omitted, the new text takes the document's own default); the \
                 write does not report whether a formula typesets — render_sketch shows it. \
-                \(writeToolCaveats)
+                `placeBy` says which point of the box (canvasX, canvasY) names — its top center, \
+                its right middle, its baseline — so a centered or right-aligned label is ONE call \
+                (needs a device). `anchor` does NOT do that: it never moves the text.
+
+                REPLY: a line "added … at seq N" and a line `id: <the new text's id>`; when a \
+                device laid the text out (any call with a style, tags, an anchor, wrap, a layer \
+                or `placeBy`), also `canvasBounds: [left, top, width, height]`, the box as drawn. \
+                A plain call is written by the server alone, which cannot measure text: pass \
+                `placeBy` (e.g. {row: "top", column: "left"}, which is where it goes anyway) \
+                when you need the box. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -776,8 +809,8 @@ public actor MCPAdapter {
                     [
                         "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                         "text": .object(["type": "string", "description": "The text to place. Give `text` OR `spans`, exactly one of them."]),
-                        "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
-                        "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner (or of the point `placeBy` names)."]),
+                        "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner (or of the point `placeBy` names)."]),
                         "colorAppearance": colorAppearanceProperty,
                         "tags": .object([
                             "type": "array", "items": .object(["type": "string"]),
@@ -801,6 +834,7 @@ public actor MCPAdapter {
                         "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                           "description": "front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device."]),
                         "inlineMath": inlineMathProperty,
+                        "placeBy": placeByProperty(default: "the top-left corner"),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
@@ -833,7 +867,14 @@ public actor MCPAdapter {
                 keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word \
                 wrap on or off and set its width (needs a device). To move a text between layers \
                 use set_layer. `inlineMath` switches formulas on or off; omitted, the text keeps \
-                its setting. \(writeToolCaveats)
+                its setting. `canvasX` / `canvasY` say where the text is SHOWN — the top-left \
+                corner of its `canvasBounds`, or the point `placeBy` names — whatever transform it \
+                carries (a text the user dragged, turned or scaled in the app); either alone \
+                moves it along that axis. A turned or scaled text needs a device to be placed.
+
+                REPLY: a line "edited <id> at seq N"; when a device made the edit, also \
+                `canvasBounds: [left, top, width, height]`, the box as drawn after it. \
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -850,8 +891,8 @@ public actor MCPAdapter {
                                 replaces the characters with the new style instead.
                                 """,
                         ]),
-                        "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
-                        "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner as shown (or of the point `placeBy` names)."]),
+                        "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner as shown (or of the point `placeBy` names)."]),
                         "colorAppearance": colorAppearanceProperty,
                         "spans": .object([
                             "type": "array",
@@ -863,6 +904,7 @@ public actor MCPAdapter {
                             "items": textSpanItemSchema,
                         ]),
                         "inlineMath": inlineMathProperty,
+                        "placeBy": placeByProperty(default: "the top-left corner"),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
@@ -2143,7 +2185,9 @@ public actor MCPAdapter {
                 `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and \
                 `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same \
                 `canvasY` sit on one line, as text does. `fontSize` is the point size it is \
-                typeset at (1–2000); omitted, the user's text size, else 20. `color` is \
+                typeset at (1–2000); omitted, the user's text size, else 20. `placeBy` makes \
+                the coordinates name another point of the box — its center, its right end — so a \
+                centered formula is one call. `color` is \
                 light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a \
                 dark-authored hex); omitted, the user's text color, else Automatic — black on \
                 light paper, white on dark. A source that does not typeset is STORED and \
@@ -2163,8 +2207,9 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
-                    "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
-                    "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
+                    "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline (or of the point `placeBy` names)."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline (or of the point `placeBy` names)."]),
+                    "placeBy": placeByProperty(default: "the left end of the baseline"),
                     "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -2183,8 +2228,10 @@ public actor MCPAdapter {
             name: "edit_formula",
             description: """
                 Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` \
-                markers), `fontSize` (points, 1–2000) and `color` (light-canonical; \
-                `colorAppearance` only together with `color`) — give at least one. The LEFT END \
+                markers), `fontSize` (points, 1–2000), `color` (light-canonical; \
+                `colorAppearance` only together with `color`) and a new place (`canvasX` and/or \
+                `canvasY`, naming the left end of the baseline as shown or the point `placeBy` \
+                says, whatever transform the formula carries) — give at least one. Without a new place the LEFT END \
                 OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
                 or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset \
                 is stored and reported as on add_formula. formulaNotFound for an unknown id, \
@@ -2202,6 +2249,9 @@ public actor MCPAdapter {
                     "id": .object(["type": "string", "description": "The formula (list_formulas' or add_formula's `id`)."]),
                     "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
                     "fontSize": .object(["type": "number", "description": "The new point size, 1–2000."]),
+                    "canvasX": .object(["type": "number", "description": "A new canvas x-coordinate for the left end of the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
+                    "canvasY": .object(["type": "number", "description": "A new canvas y-coordinate for the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
+                    "placeBy": placeByProperty(default: "the left end of the baseline"),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light. Only with `color`."]),
@@ -4158,7 +4208,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4181,9 +4231,9 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            let newId = out.meta
-                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-                .flatMap { $0["id"] }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+            let newId = meta?["id"]
+            let bounds = meta?["canvasBounds"]
             // A said `inlineMath` is written by the server on the device's bytes (B2); an omitted
             // one is the device's: it gives a new text the document's default itself.
             var fullDoc = out.bytes
@@ -4203,6 +4253,8 @@ public actor MCPAdapter {
                 if let newId {
                     summary += "\nid: \(newId)"
                 }
+                // The box the device laid out (`TextAuthoring.replyMeta`), as add_image reports its own.
+                if let bounds { summary += "\ncanvasBounds: [\(bounds)]" }
                 return summary
             }
         } catch let error as ArgumentError {
@@ -4378,11 +4430,20 @@ public actor MCPAdapter {
         // put, which the server-side path cannot (it has no text layout).
         // The one read is handed to the server-side path, so its CAS token is the bytes this
         // decision was made on.
+        //
+        // A new POSITION for a text that is turned or scaled: where its corner is shown depends
+        // on its laid-out size, so the device places it too (`DocJSON.textPlacementNeedsDevice`;
+        // a text that was only dragged is placed here, its translation taken off).
         var prefetched: Data?
-        if let text = arguments?["text"], !text.isNull,
+        func given(_ key: String) -> Bool { arguments?[key].map { !$0.isNull } ?? false }
+        let replacesText = given("text"), moves = given("canvasX") || given("canvasY")
+        if replacesText || moves,
            case .string(let docId)? = arguments?["docId"], case .string(let textId)? = arguments?["textId"],
            let bytes = await manager.currentBytesOrFetch(docId: docId) {
-            if DocJSON.textHasAnchor(in: bytes, textId: textId) {
+            if replacesText, DocJSON.textHasAnchor(in: bytes, textId: textId) {
+                return await callEditTextStyled(arguments)
+            }
+            if moves, DocJSON.textPlacementNeedsDevice(in: bytes, textId: textId) {
                 return await callEditTextStyled(arguments)
             }
             prefetched = bytes
@@ -4440,7 +4501,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4473,10 +4534,11 @@ public actor MCPAdapter {
                 }
             }
 
+            let bounds = out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }?["canvasBounds"]
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
-                "edited \(textId) at seq \(seq)"
+                "edited \(textId) at seq \(seq)" + (bounds.map { "\ncanvasBounds: [\($0)]" } ?? "")
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4599,13 +4661,15 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
-            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags"] {
+            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
-            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+            // An app without `placeBy` would ignore the key and place by the baseline.
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
+                                           capability: envelope["placeBy"] == nil ? "formulas" : "formulas+placeBy")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -4627,13 +4691,17 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("editFormula")]
-            for key in ["id", "latex", "fontSize", "color", "colorAppearance"] {
+            for key in ["id", "latex", "fontSize", "color", "colorAppearance", "canvasX", "canvasY", "placeBy"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
-            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+            // A position is new with `placeBy`: an app without it would ignore all three keys
+            // and answer an edit that moved nothing.
+            let places = ["canvasX", "canvasY", "placeBy"].contains { envelope[$0] != nil }
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
+                                           capability: places ? "formulas+placeBy" : "formulas")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -4647,10 +4715,11 @@ public actor MCPAdapter {
     /// nothing with the request's own bytes: then nothing is written (a pointless write bumps
     /// `seq` for every subscriber and spends the agent's one `undo_last_edit`) and the reply says
     /// `unchanged: true`, without a `seq`.
-    private func relayFormulaWrite(docId: String, bytes: Data, spec: Data) async -> CallTool.Result {
+    private func relayFormulaWrite(docId: String, bytes: Data, spec: Data,
+                                   capability: String = "formulas") async -> CallTool.Result {
         let out: DeviceCommandBroker.StrokeOpReply
         do {
-            out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "formulas")
+            out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: capability)
         } catch let error as DeviceCommandBroker.DeviceCommandError {
             return Self.strokeOpErrorResult(error)
         } catch {
@@ -7664,6 +7733,7 @@ public actor MCPAdapter {
         case .invalidColor: return "invalidSpec"
         case .arrowNotFound: return "arrowNotFound"
         case .formulaNotFound: return "formulaNotFound"
+        case .textNeedsDeviceToPlace: return "invalidSpec: this text is turned or scaled; only a connected device can place it"
         case .documentFormatNewer(let file):
             // The app's own token for the same state, so an agent handles both alike.
             return "\(DeviceCommandBroker.formatRefusalPrefix): file \(file), this server edits up to \(DocJSON.knownFormatVersion) — "

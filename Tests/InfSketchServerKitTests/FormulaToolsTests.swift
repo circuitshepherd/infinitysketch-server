@@ -345,6 +345,46 @@ extension MCPAdapterTests {
         await server.stop()
     }
 
+    /// A formula's new place, and `placeBy`, are relayed only to a device that knows them
+    /// (`formulas+placeBy`): an app without it ignores the keys and answers an edit that moved
+    /// nothing. An edit or add without them still reaches a `formulas` device.
+    @Test func aFormulasPlaceGoesOnlyToADeviceThatPlaces() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                               capabilities: ["formulas"])
+        let (refused, refusedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "canvasX": 100])
+        #expect(refusedError == true)
+        #expect(text(refused).contains("placeBy"))
+        let (stillFine, stillFineError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "latex": "y"])
+        #expect(stillFineError != true, "\(text(stillFine))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                                  capabilities: ["formulas", "placeBy"])
+        defer { Task { await device.close() } }
+        let (moved, movedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "canvasX": 100, "canvasY": 200,
+            "placeBy": ["row": "middle", "column": "center"]])
+        #expect(movedError != true, "\(text(moved))")
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["canvasX"] as? Double == 100 && editSpec["canvasY"] as? Double == 200)
+        #expect((editSpec["placeBy"] as? [String: String]) == ["row": "middle", "column": "center"])
+
+        let (added, addedError) = try await client.callTool(name: "add_formula", arguments: [
+            "docId": "d", "latex": "x", "canvasX": 1, "canvasY": 2, "placeBy": ["row": "top", "column": "right"]])
+        #expect(addedError != true, "\(text(added))")
+        let addRequest = try #require(await device.receivedRequests.last)
+        let addSpec = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
+        #expect((addSpec["placeBy"] as? [String: String]) == ["row": "top", "column": "right"])
+        await server.stop()
+    }
+
     @Test func emptyAndTooLongAreRefusedBeforeTheDevice() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
