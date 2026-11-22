@@ -535,6 +535,20 @@ public actor MCPAdapter {
             """]),
     ]
 
+    /// `styleBase` — where the style fields a call leaves out come from (`add_arrow`,
+    /// `add_formula`, an ephemeral arrow of `render_sketch`). Relayed under `…+styleBase`: an app
+    /// without it would ignore the key and use the user's style with a success reply.
+    private static let styleBaseProperty: Value = .object([
+        "type": "string", "enum": .array(["user", "factory"].map(Value.string)),
+        "description": """
+            Where every style field you leave out comes from. user (default): the user's own \
+            current style — right when you draw beside the user. factory: the app's built-in \
+            style, the same on every device whatever the user has set — right for a script, which \
+            otherwise draws differently after the user changed their tool. Needs a device with \
+            the `styleBase` capability.
+            """,
+    ])
+
     /// `placeBy` — which point of the box `canvasX` / `canvasY` name (texts and formulas). Device
     /// work: only a device knows the box. Relayed under `…+placeBy`, since an app without it
     /// would ignore the key and place by the default point with a success reply.
@@ -1992,7 +2006,12 @@ public actor MCPAdapter {
                 points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front \
                 objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE \
                 (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
-                or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
+                or, with `preset`, that preset's style; the fields you pass override either. \
+                `styleBase: "factory"` takes the omitted fields from the app's built-in style \
+                instead (round start, filled head, the middle width, black — white on dark \
+                paper —, solid, front): \
+                pass it from a script, so the same script draws the same arrow whatever the user \
+                has set. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
                 the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) \
                 decides whether a later scale changes the arrow's width. REPLY: the seq and \
@@ -2028,6 +2047,7 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its shape is applied first (a preset holds no color — the arrow has the new-arrow color unless `color` is given), the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
+                    "styleBase": styleBaseProperty,
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
@@ -2210,6 +2230,7 @@ public actor MCPAdapter {
                     "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline (or of the point `placeBy` names)."]),
                     "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline (or of the point `placeBy` names)."]),
                     "placeBy": placeByProperty(default: "the left end of the baseline"),
+                    "styleBase": styleBaseProperty,
                     "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -4694,15 +4715,17 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
-            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy"] {
+            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy", "styleBase"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
-            // An app without `placeBy` would ignore the key and place by the baseline.
+            // An app without `placeBy` would ignore the key and place by the baseline; one
+            // without `styleBase` would take the user's text style.
             return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
-                                           capability: envelope["placeBy"] == nil ? "formulas" : "formulas+placeBy")
+                                           capability: "formulas" + (envelope["placeBy"] == nil ? "" : "+placeBy")
+                                               + (envelope["styleBase"] == nil ? "" : "+styleBase"))
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -5448,7 +5471,8 @@ public actor MCPAdapter {
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
-                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
+                   "styleBase"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
@@ -5464,8 +5488,10 @@ public actor MCPAdapter {
                 // An app without `arrowTags` decodes `tags` by IGNORING it and answers success, so a
                 // call that names tags goes only to a device that writes them.
                 let tagged: Bool = { if case .array(let t)? = envelope["tags"] { return !t.isEmpty }; return false }()
+                // The same for `styleBase`: ignored, the arrow would take the user's style.
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: tagged ? "arrows+arrowTags" : "arrows")
+                                                       capability: (tagged ? "arrows+arrowTags" : "arrows")
+                                                           + (envelope["styleBase"] == nil ? "" : "+styleBase"))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -6187,10 +6213,16 @@ public actor MCPAdapter {
                     if case .array(let ids)? = arguments?["formulaIds"] { return !ids.isEmpty }
                     return false
                 }()
+                // An ephemeral arrow that names its `styleBase`: an older app would ignore it and
+                // preview the arrow in the user's style.
+                let namesStyleBase: Bool = {
+                    guard case .array(let items)? = arguments?["arrows"] else { return false }
+                    return items.contains { if case .object(let fields) = $0 { return fields["styleBase"] != nil }; return false }
+                }()
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
-                                                           if: wantsFormulas))
+                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : ""))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

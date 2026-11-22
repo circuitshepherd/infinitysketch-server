@@ -1363,6 +1363,37 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `styleBase` rides in the spec and needs a device that knows it: an older app would ignore
+    /// it and draw the arrow in the user's style. An add without it still reaches an older app.
+    @Test func styleBaseGoesOnlyToADeviceThatKnowsIt() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reply = Data(#"{"aaa001_thumbnailData":"","marker":"arrow"}"#.utf8)
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]], "styleBase": "factory"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("styleBase"), "\(toolResultText(refused))")
+        let (plain, plainError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]]])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "styleBase"])
+        defer { Task { await device.close() } }
+        let (added, addedError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]], "styleBase": "factory"])
+        #expect(addedError != true, "\(toolResultText(added))")
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["styleBase"] as? String == "factory")
+
+        await server.stop()
+    }
+
     /// `placeBy` is device work under its own capability: an app without it would ignore the
     /// key, place by the default point and answer success. The reply carries the box the device
     /// laid out, for add and for edit.
