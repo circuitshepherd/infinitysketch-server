@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-73 tools, served over streamable HTTP at `/mcp`.
+74 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -149,12 +149,13 @@ These act on the LIVE rect-select session on a connected device, not on document
 
 ## Reading the canvas
 
-Read-only. `render_sketch` also renders ephemeral candidate strokes that are never written anywhere — synthesize, render, refine, then commit.
+Read-only. `render_sketch` also renders ephemeral candidate strokes that are never written anywhere — synthesize, render, refine, then commit. `diff_docs` says what differs from a copy you kept — what the user changed.
 
 | Tool | Summary |
 |---|---|
 | [`render_sketch`](#render_sketch) | Renders a region of a document, specific strokes, and/or ephemeral candidate strokes that are not written to the document — use it to preview a stroke before committing it with… |
 | [`get_tool`](#get_tool) | Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, and when true `inkType`, `toolWidth`, `pickerDialWidth` and `color` (#RRGGBBAA). |
+| [`diff_docs`](#diff_docs) | What differs between a document and a BASE copy of it, element by element — read-only. |
 
 
 ---
@@ -1312,4 +1313,18 @@ Report the tool picker's CURRENT tool on the connected device — `isInkingTool`
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | Any open document id on the device. |
+
+### `diff_docs`
+
+What differs between a document and a BASE copy of it, element by element — read-only. THE way to learn what the user changed: keep a copy when you finish (the bytes of the `infsketch://doc/<id>/raw` resource, saved to a file, or a second document), and when the user says "I adjusted it", diff against that copy before you touch anything, so their changes are taken over and not overwritten.
+
+It compares CONTENT, not bytes: a device that merely opens a document rewrites its thumbnail, viewport and appearance, and re-archives its strokes, so the raw bytes change when nobody edited anything. `equal: true` means the sync engine sees no change. Give exactly one base: `baseDocId` (another document on this server) or `basePath` (an ABSOLUTE path to a saved .infsketch copy on the machine the server runs on). REQUIRES a device with the `diffDocs` capability; baseNotFound for an unknown `baseDocId`, baseUndecodable when the base is not a document.
+
+REPLY: one JSON object `{equal, bytesEqual, added, removed, changed, changes, retagged, reordered, docFields}`. `added`, `removed` and `changed` are each `{strokeIds, textIds, imageIds, arrowIds, formulaIds}` (every key present) — ids of this document for added and changed, of the base for removed. `changes` maps each changed id to what differs: "geometry" (where it is, its transform, an arrow's points, a wrap width), "content" (a text's characters, a formula's source, an image's pixels), "style" (everything else). `retagged` lists elements whose tags differ, `reordered` is true when the stacking of what both have differs, and `docFields` names the document's own fields that differ (grids, paper, export settings).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document as it is now (its id, or its name when no other document has that name). |
+| `baseDocId` | string | no | The base: another document on this server (id, or unambiguous name). |
+| `basePath` | string | no | The base: an absolute path to a .infsketch file on the machine the server runs on. |
 

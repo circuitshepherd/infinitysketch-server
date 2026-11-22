@@ -3565,6 +3565,45 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "diff_docs",
+            description: """
+                What differs between a document and a BASE copy of it, element by element — \
+                read-only. THE way to learn what the user changed: keep a copy when you finish \
+                (the bytes of the `infsketch://doc/<id>/raw` resource, saved to a file, or a \
+                second document), and when the user says "I adjusted it", diff against that copy \
+                before you touch anything, so their changes are taken over and not overwritten.
+
+                It compares CONTENT, not bytes: a device that merely opens a document rewrites \
+                its thumbnail, viewport and appearance, and re-archives its strokes, so the raw \
+                bytes change when nobody edited anything. `equal: true` means the sync engine \
+                sees no change. Give exactly one base: `baseDocId` (another document on this \
+                server) or `basePath` (an ABSOLUTE path to a saved .infsketch copy on the machine \
+                the server runs on). REQUIRES a device with the `diffDocs` capability; \
+                baseNotFound for an unknown `baseDocId`, baseUndecodable when the base is not a \
+                document.
+
+                REPLY: one JSON object `{equal, bytesEqual, added, removed, changed, changes, \
+                retagged, reordered, docFields}`. `added`, `removed` and `changed` are each \
+                `{strokeIds, textIds, imageIds, arrowIds, formulaIds}` (every key present) — \
+                ids of this document for added and changed, of the base for removed. `changes` \
+                maps each changed id to what differs: "geometry" (where it is, its transform, an \
+                arrow's points, a wrap width), "content" (a text's characters, a formula's \
+                source, an image's pixels), "style" (everything else). `retagged` lists elements \
+                whose tags differ, `reordered` is true when the stacking of what both have \
+                differs, and `docFields` names the document's own fields that differ (grids, \
+                paper, export settings).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document as it is now (its id, or its name when no other document has that name)."]),
+                    "baseDocId": .object(["type": "string", "description": "The base: another document on this server (id, or unambiguous name)."]),
+                    "basePath": .object(["type": "string", "description": "The base: an absolute path to a .infsketch file on the machine the server runs on."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "copy_elements",
             description: """
                 Copies named strokes/texts/images/arrows/formulas from document `source` INTO document \
@@ -3816,7 +3855,7 @@ public actor MCPAdapter {
 
     /// Every argument that names an EXISTING document. (`merge_docs`' `into` is not one: it names
     /// a document that does not exist yet, so it is a name and nothing resolves it.)
-    static let docIdArgumentNames = ["docId", "source", "target"]
+    static let docIdArgumentNames = ["docId", "source", "target", "baseDocId"]
 
     /// Every argument that names a document, resolved to the document's id — an id, or a name no
     /// other document carries (spec 2026-09-28 §4). Done once HERE so no tool can miss it.
@@ -4186,6 +4225,7 @@ public actor MCPAdapter {
         case "duplicate_selection": return await callDuplicateSelection(arguments)
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
+        case "diff_docs": return await callDiffDocs(arguments, unresolvedKeys: unresolvedKeys)
         case "reorder_elements": return await callReorderElements(arguments)
         case "set_layer": return await callSetLayer(arguments)
         case "fetch_doc": return await callFetchDoc(arguments)
@@ -7450,6 +7490,80 @@ public actor MCPAdapter {
     // `docBytes`, which is always `target`'s); the device's cloned reply is
     // written back to `target` under the standard byte-CAS every other write
     // tool uses. `source` is read but never written.
+
+    // MARK: - diff_docs
+    //
+    // Read-only: the device compares the document (`docBytes`) with a base copy carried as a
+    // bundle part, by content (`DocDiff`, app repo). No submit, no seq, nothing to retry.
+
+    private func callDiffDocs(_ arguments: [String: Value]?, unresolvedKeys: Set<String>) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let baseDocId = try Self.optionalStringArg(arguments, "baseDocId")
+            let basePath = try Self.optionalStringArg(arguments, "basePath")
+            guard (baseDocId == nil) != (basePath == nil) else {
+                return Self.errorResult("invalidArguments: give exactly one of baseDocId and basePath")
+            }
+            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let baseBytes: Data
+            if let baseDocId {
+                guard !unresolvedKeys.contains("baseDocId"),
+                      let bytes = await manager.currentBytesOrFetch(docId: baseDocId) else {
+                    return Self.errorResult("baseNotFound: no document \"\(baseDocId)\"")
+                }
+                baseBytes = bytes
+            } else {
+                switch Self.readDocumentFile(at: basePath ?? "") {
+                case .bytes(let data): baseBytes = data
+                case .refusal(let reason): return Self.errorResult(reason)
+                }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string("diffDocs")])) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                // The base is a WHOLE DOCUMENT and travels as a bundle part (see `OpSpecBundle`).
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: "diffDocs", specParts: [.base: baseBytes])
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return Self.textResult(String(decoding: out.bytes, as: UTF8.self))
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Reads the file `diff_docs`' `basePath` names. A relative path is refused, as
+    /// `add_image`'s is: the caller cannot see the server's working directory.
+    static func readDocumentFile(at rawPath: String) -> ImageFileRead {
+        let path = NSString(string: rawPath).expandingTildeInPath
+        guard isAbsolutePath(path) else { return .refusal("basePathNotAbsolute: \(rawPath)") }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return .refusal("baseFileNotFound: \(path)")
+        }
+        guard !isDirectory.boolValue else { return .refusal("baseFileUnreadable: \(path) is a directory") }
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int,
+           size > maxDocumentFileBytes {
+            return .refusal("baseTooLarge: \(path) is \(size / 1_000_000) MB, limit \(maxDocumentFileBytes / 1_000_000) MB")
+        }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return .refusal("baseFileUnreadable: \(path)")
+        }
+        guard !data.isEmpty else { return .refusal("baseUndecodable: \(path) is empty") }
+        return .bytes(data)
+    }
+
+    /// As large as a document a device may push (`SessionConfig.maxTransferBytes`).
+    static let maxDocumentFileBytes = 512 * 1_000_000
 
     /// `copy_elements`' arguments that act on the clones (the device's `CopyElements.Spec`).
     static let copyPlacementKeys = ["scale", "rotate", "canvasAnchor", "canvasTranslate", "scaleWidths", "tags"]

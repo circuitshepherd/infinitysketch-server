@@ -806,8 +806,9 @@ actor FakeStrokeOpDevice {
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
     /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
     /// `listToolsContainsAllFiftyNineTools`. The formula tools (2026-11-19) added four, renaming
-    /// this from `listToolsContainsAllSixtySixTools`.
-    @Test func listToolsContainsAllSeventyTools() async throws {
+    /// this from `listToolsContainsAllSixtySixTools`. `diff_docs` (2026-11-22) added one,
+    /// renaming this from `listToolsContainsAllSeventyTools`.
+    @Test func listToolsContainsAllSeventyOneTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -827,7 +828,7 @@ actor FakeStrokeOpDevice {
             "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements",
+            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements", "diff_docs",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
@@ -1360,6 +1361,68 @@ actor FakeStrokeOpDevice {
         #expect(isError != true)
         #expect(await device.receivedRequests.isEmpty, "plain edit_text must not relay to any device")
 
+        await server.stop()
+    }
+
+    /// `diff_docs` relays the document with the BASE as a bundle part and passes the device's
+    /// JSON through; the base is another document or a file, exactly one of them.
+    @Test func diffDocsRelaysTheBaseAndPassesTheReplyThrough() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let baseBytes = Data(#"{"aaa001_thumbnailData":"","marker":"base"}"#.utf8)
+        try await seedDocDirectly(server, docId: "copy", bytes: baseBytes)
+        let answer = Data(#"{"equal":true}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(answer), capabilities: ["diffDocs"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "diff_docs", arguments: ["docId": "d", "baseDocId": "copy"])
+        #expect(isError != true, "\(toolResultText(content))")
+        #expect(toolResultText(content) == #"{"equal":true}"#)
+        let request = try #require(await device.receivedRequests.last)
+        #expect(request.docId == "d" && request.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "diffDocs")
+        let carried = try #require(spec["base"] as? String)
+        #expect(Data(base64Encoded: carried) == baseBytes)
+
+        // The same base from a file.
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("diff-base-\(UUID().uuidString).infsketch")
+        try baseBytes.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (fromFile, fromFileError) = try await client.callTool(
+            name: "diff_docs", arguments: ["docId": "d", "basePath": .string(file.path)])
+        #expect(fromFileError != true, "\(toolResultText(fromFile))")
+        let fileRequest = try #require(await device.receivedRequests.last)
+        let fileSpec = try #require(JSONSerialization.jsonObject(with: fileRequest.spec) as? [String: Any])
+        let fileCarried = try #require(fileSpec["base"] as? String)
+        #expect(Data(base64Encoded: fileCarried) == baseBytes)
+
+        // The document itself was not written.
+        let raw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let blob = try #require(raw[0].blob)
+        #expect(Data(base64Encoded: blob) == Fixtures.docBytes)
+
+        await server.stop()
+    }
+
+    @Test func diffDocsRefusesABaseItCannotReadByName() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        func refusal(_ arguments: [String: Value]) async throws -> String {
+            let (content, isError) = try await client.callTool(name: "diff_docs", arguments: arguments)
+            #expect(isError == true)
+            return toolResultText(content)
+        }
+        #expect(try await refusal(["docId": "d"]).hasPrefix("invalidArguments: give exactly one"))
+        #expect(try await refusal(["docId": "d", "baseDocId": "d", "basePath": "/tmp/x"]).hasPrefix("invalidArguments: give exactly one"))
+        #expect(try await refusal(["docId": "d", "baseDocId": "nothing-here"]).hasPrefix("baseNotFound"))
+        #expect(try await refusal(["docId": "d", "basePath": "relative/copy.infsketch"]).hasPrefix("basePathNotAbsolute"))
+        #expect(try await refusal(["docId": "d", "basePath": "/nonexistent/copy.infsketch"]).hasPrefix("baseFileNotFound"))
         await server.stop()
     }
 

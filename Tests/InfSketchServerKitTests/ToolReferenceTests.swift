@@ -101,8 +101,9 @@ enum ToolReference {
                       "delete_selection"]),
         Group(title: "Reading the canvas",
               blurb: "Read-only. `render_sketch` also renders ephemeral candidate strokes that are "
-                   + "never written anywhere — synthesize, render, refine, then commit.",
-              tools: ["render_sketch", "get_tool"]),
+                   + "never written anywhere — synthesize, render, refine, then commit. `diff_docs` "
+                   + "says what differs from a copy you kept — what the user changed.",
+              tools: ["render_sketch", "get_tool", "diff_docs"]),
     ]
 
     // MARK: - Emitting
