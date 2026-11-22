@@ -775,7 +775,7 @@ public actor MCPAdapter {
                 "properties": .object(
                     [
                         "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
-                        "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
+                        "text": .object(["type": "string", "description": "The text to place. Give `text` OR `spans`, exactly one of them."]),
                         "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
                         "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
                         "colorAppearance": colorAppearanceProperty,
@@ -805,7 +805,11 @@ public actor MCPAdapter {
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
                 ),
-                "required": .array(["docId", "text", "canvasX", "canvasY"].map(Value.string)),
+                // `text` is NOT required: a call gives `text` OR `spans`. Listed as required, a
+                // client that checks its arguments against the schema could not send `spans` at
+                // all (the device refuses both together). The either-or is not written as a
+                // top-level `oneOf`: several clients refuse a tool whose schema has one.
+                "required": .array(["docId", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -909,22 +913,30 @@ public actor MCPAdapter {
             name: "find_elements",
             description: """
                 Resolve TAGS to element ids, so you can act on them with any tool that takes \
-                ids. Read-only and cheap: no document payload comes back, just \
-                `{tag: [ids]}` for the tags that resolve.
+                ids. Read-only and cheap: no document payload comes back, just ids.
 
                 Ids come back in DOCUMENT order — strokes in drawing order, then texts, then \
-                images, then arrows — so a tagged series is returned in a stable, meaningful \
-                sequence.
+                images, then arrows, then formulas — so a tagged series is returned in a stable, \
+                meaningful sequence.
+
+                `match: "all"` keeps only the elements that carry EVERY tag you name — a section \
+                is "everything tagged `sheet` and `loop`". `groupBy: "kind"` answers by kind, \
+                under the argument names the tools that act on elements take, so the reply can be \
+                handed on to transform_elements, select_elements or copy_elements as it is. \
+                Either needs a device with the `tagQueries` capability.
 
                 A tag whose elements no longer exist is simply ABSENT from the reply rather than \
                 a dangling id, so an empty answer means "those elements are gone", not "the \
                 lookup failed". Tags are set with tag_elements, or at creation time by \
-                draw_strokes / add_text / add_image / add_arrow / fill_region / draw_dots. Use list_tags to \
-                see what a document already has.
+                draw_strokes / add_text / add_image / add_arrow / add_formula / fill_region / \
+                draw_dots. Use list_tags to see what a document already has.
 
-                REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. \
-                `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object \
-                rather than present-and-empty, so check for the key before indexing it.
+                REPLY: by default an OBJECT mapping each tag you asked for to an ARRAY of element \
+                ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from \
+                the object rather than present-and-empty, so check for the key before indexing \
+                it. With `groupBy: "kind"` the object is `{"strokeIds": [], "textIds": [], \
+                "imageIds": [], "arrowIds": [], "formulaIds": []}` — every key present, each \
+                holding the matching elements of that kind.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -933,6 +945,14 @@ public actor MCPAdapter {
                     "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "The tags to resolve.",
+                    ]),
+                    "match": .object([
+                        "type": "string", "enum": .array([.string("any"), .string("all")]),
+                        "description": "any (default): an element carrying at least one of `tags`. all: only elements carrying every one of them.",
+                    ]),
+                    "groupBy": .object([
+                        "type": "string", "enum": .array([.string("tag"), .string("kind")]),
+                        "description": "tag (default): `{tag: [ids]}`. kind: `{strokeIds, textIds, imageIds, arrowIds, formulaIds}`.",
                     ]),
                 ]),
                 "required": .array(["docId", "tags"].map(Value.string)),
@@ -2461,7 +2481,10 @@ public actor MCPAdapter {
                 absolute path on the machine the server runs on) and `renderUrl` (a path RELATIVE \
                 to this server, e.g. /api/renders/<name>.png — join it to the address you reached \
                 this server on and download it, which is what to do when you are NOT on the \
-                server's machine).
+                server's machine). The metadata's `renderedBy` names the kind of device that made \
+                the image ("mac", "ipad", "iphone"): devices lay text out a little differently \
+                (up to about 4 % in width, and a wrapped line can break at another word), so \
+                compare an image only with one from the same kind.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2583,8 +2606,10 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": """
                             Pixel budget. Defaults to 1000000, hard ceiling 4000000. An \
-                            over-large request is downscaled, not rejected, and the \
-                            metadata reports the scale actually used.
+                            over-large request — a larger budget, or a `scale` whose image \
+                            would pass the ceiling — is downscaled to the ceiling, not rejected: \
+                            the metadata reports the `scale` actually used, and \
+                            `requestedScale` when an explicit scale was reduced.
                             """,
                     ]),
                     "appearance": .object([
@@ -3476,7 +3501,9 @@ public actor MCPAdapter {
                 merge_docs, elements are never deduped by identity, so copying the same \
                 source element twice yields two distinct clones. `source` is left \
                 untouched; `target` gains the copies, texts, images, arrows and formulas keeping \
-                the order they had among each other. At least one of `strokeIds`/ \
+                the order they had among each other. `source` and `target` MAY BE THE SAME \
+                document: the clones then lie exactly on their originals, so move them \
+                (transform_elements) or change them next. At least one of `strokeIds`/ \
                 `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a \
                 device with the `formulas` capability). \
                 REQUIRES a connected device with the copyElements capability — fails with \
@@ -3659,7 +3686,7 @@ public actor MCPAdapter {
            let docId = arguments?["docId"]?.stringValue {
             await history.recordLiveSelectionChange(docId: docId)
         }
-        return await enrichedError(result, arguments: arguments)
+        return await enrichedError(result, tool: name, arguments: arguments)
     }
 
     /// Whether a live-selection write may have landed on the device. A success did; so may an op
@@ -3848,12 +3875,16 @@ public actor MCPAdapter {
     /// place to keep correct, and it also catches the device-relayed `deviceFailed:
     /// noSelectionActive` string, which no call-site edit could reach. Anything else — every
     /// other error, and every success — passes through untouched.
-    private func enrichedError(_ result: CallTool.Result,
+    private func enrichedError(_ result: CallTool.Result, tool: String,
                                arguments: [String: Value]?) async -> CallTool.Result {
         guard result.isError == true,
               let first = result.content.first,
               case .text(let text, _, _) = first
         else { return result }
+
+        if text == "deviceTimeout" || text == "deviceDisconnected" {
+            return Self.errorResult("\(text) — \(Self.deviceLostClause(tool: tool))")
+        }
 
         if text == "unknownDoc" {
             // A content tool says `unknownDoc` when `currentBytesOrFetch` comes back empty, which
@@ -3935,6 +3966,39 @@ public actor MCPAdapter {
 
         return result
     }
+
+    /// What a call whose device went quiet or away has, and has not, done — the one thing the
+    /// caller needs before deciding to send it again, and could not know: a drawing script lost
+    /// its device in the middle of an `add_formula` and the bare `deviceDisconnected` did not
+    /// say whether the formula was in the document (2026-11-21).
+    ///
+    /// For every tool that works on a document's BYTES the answer is certain: the device only
+    /// computes, and the server writes after it has answered — no answer, no write. The tools
+    /// that act on the device's own state are the exception: the request may still be carried
+    /// out there until it expires.
+    static func deviceLostClause(tool: String) -> String {
+        if liveSelectionWriteTools.contains(tool) || liveSelectionStateTools.contains(tool) {
+            return "the device may still apply this to its live selection (a request expires a few seconds "
+                + "after its timeout): read the state with get_selection before sending it again"
+        }
+        if deviceSettingWriteTools.contains(tool) {
+            return "the device may still have changed this setting: read it back before sending the call again"
+        }
+        return "NOTHING WAS WRITTEN by this call: a document is written only after the device has answered, "
+            + "so sending it again cannot apply it twice"
+    }
+
+    /// Tools that change the device's selection state without writing the document.
+    static let liveSelectionStateTools: Set<String> = [
+        "select_all", "select_elements", "set_reference_point", "clear_selection",
+    ]
+
+    /// Tools that write a DEVICE setting (the arrow presets, the new-arrow style), on its main
+    /// actor, through the store its own UI uses.
+    static let deviceSettingWriteTools: Set<String> = [
+        "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
+        "restore_arrow_presets", "set_new_arrow_style",
+    ]
 
     /// "Documents: "a" (id), "b" (id)" — capped, because a store with dozens of documents should
     /// not answer a mistyped name with a wall of text. `listed` is already rendered.
@@ -4043,6 +4107,9 @@ public actor MCPAdapter {
     private func callAddTextServerSide(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
+            guard arguments?["text"] != nil else {
+                return Self.errorResult("missingArgument: text — add_text takes `text` or `spans`")
+            }
             let text = try Self.stringArg(arguments, "text")
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
@@ -5876,7 +5943,26 @@ public actor MCPAdapter {
 
     /// `find_elements` — resolve tags to ids. Read-only: no submit, no seq, nothing to retry.
     private func callFindElements(_ arguments: [String: Value]?) async -> CallTool.Result {
-        await relayTagRead(arguments, op: "findElements", listKey: "tags")
+        do {
+            // `match` / `groupBy` go only to a device that knows them (`tagQueries`): an older app
+            // decodes the spec ignoring both and would answer the default lookup as if it were
+            // the one asked for. A call without them still reaches an older app.
+            var extra: [String: Value] = [:]
+            if let match = try Self.optionalStringArg(arguments, "match") {
+                guard ["any", "all"].contains(match) else { return Self.errorResult("invalidArguments: match must be any or all") }
+                extra["match"] = .string(match)
+            }
+            if let groupBy = try Self.optionalStringArg(arguments, "groupBy") {
+                guard ["tag", "kind"].contains(groupBy) else { return Self.errorResult("invalidArguments: groupBy must be tag or kind") }
+                extra["groupBy"] = .string(groupBy)
+            }
+            return await relayTagRead(arguments, op: "findElements", listKey: "tags", extra: extra,
+                                      capability: extra.isEmpty ? "tagElements" : "tagElements+tagQueries")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
     }
 
     /// `list_tags` — what tags this document has, and how many elements carry each. Read-only.
@@ -5887,10 +5973,12 @@ public actor MCPAdapter {
     /// The shared body of the two read-only tag relays: the device answers in `meta`, which is
     /// passed straight through as the tool's text.
     private func relayTagRead(_ arguments: [String: Value]?, op: String,
-                              listKey: String?) async -> CallTool.Result {
+                              listKey: String?, extra: [String: Value] = [:],
+                              capability: String = "tagElements") async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             var fields: [String: Value] = ["op": .string(op)]
+            fields.merge(extra) { current, _ in current }
             if let listKey {
                 fields[listKey] = .array(try Self.nonEmptyStringArrayArg(arguments, listKey).map(Value.string))
             }
@@ -5901,7 +5989,7 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "tagElements")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: capability)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -7238,8 +7326,12 @@ public actor MCPAdapter {
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
-            guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            // `source` may BE `target`: the clones then land in the document they came from, on
+            // top of their originals — how a variant of an element starts. (It was refused with a
+            // bare `invalidArguments` until 2026-11-22; the device's op never needed the refusal.)
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else {
+                return Self.errorResult("invalidArguments: name at least one of strokeIds, textIds, imageIds, arrowIds, formulaIds")
+            }
 
             guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
             guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }

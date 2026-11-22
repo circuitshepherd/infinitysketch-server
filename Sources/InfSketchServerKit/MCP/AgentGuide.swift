@@ -243,6 +243,7 @@ enum AgentGuide {
     - **The user can undo you** — one step per tool call — so an id you obtained earlier may be \
       gone. Re-read rather than caching.
     - **Errors carry the answer.** `unknownDoc` lists the documents that exist; \
-      `noSelectionActive` names what IS open. Read the whole message before retrying.
+      `noSelectionActive` names what IS open; `deviceTimeout` and `deviceDisconnected` say \
+      whether the call can have changed anything. Read the whole message before retrying.
     """
 }

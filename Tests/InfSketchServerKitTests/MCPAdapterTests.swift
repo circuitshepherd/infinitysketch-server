@@ -2099,7 +2099,7 @@ actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "create_doc", arguments: ["name": "SlowDoc"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "deviceTimeout")
+        #expect(toolResultText(content).hasPrefix("deviceTimeout — NOTHING WAS WRITTEN"))
 
         await server.stop()
     }
@@ -5344,6 +5344,59 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A call that lost its device says whether it can have changed anything: a bytes op cannot
+    /// (the server writes only after the device has answered), a live-selection op can.
+    @Test func aLostDeviceSaysWhetherTheCallCanHaveChangedAnything() {
+        #expect(MCPAdapter.deviceLostClause(tool: "add_formula").hasPrefix("NOTHING WAS WRITTEN"))
+        #expect(MCPAdapter.deviceLostClause(tool: "render_sketch").hasPrefix("NOTHING WAS WRITTEN"))
+        #expect(MCPAdapter.deviceLostClause(tool: "transform_selection").contains("may still apply"))
+        #expect(MCPAdapter.deviceLostClause(tool: "select_elements").contains("may still apply"))
+        #expect(MCPAdapter.deviceLostClause(tool: "set_new_arrow_style").contains("may still have changed"))
+    }
+
+    /// `find_elements` with `match` or `groupBy` goes only to a device that knows them, and the
+    /// two keys ride in the spec; without them the call is the one an older app answers.
+    @Test func findElementsRelaysItsOptionsUnderTheirOwnCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"roof":["a"]}"#.utf8)),
+            capabilities: ["tagElements"])
+        let (plain, plainError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"]])
+        #expect(plainError != true)
+        #expect(toolResultText(plain) == #"{"roof":["a"]}"#)
+
+        let (refused, refusedError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"], "groupBy": "kind"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("tagQueries"))
+        await old.close()
+
+        let new = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"strokeIds":["a"]}"#.utf8)),
+            capabilities: ["tagElements", "tagQueries"])
+        defer { Task { await new.close() } }
+        let (grouped, groupedError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof", "sheet"], "match": "all", "groupBy": "kind"])
+        #expect(groupedError != true, "\(toolResultText(grouped))")
+        let request = try #require(await new.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["match"] as? String == "all")
+        #expect(spec["groupBy"] as? String == "kind")
+        #expect(spec["tags"] as? [String] == ["roof", "sheet"])
+
+        let (bad, badError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"], "match": "most"])
+        #expect(badError == true)
+        #expect(toolResultText(bad).hasPrefix("invalidArguments: match"))
+
+        await server.stop()
+    }
+
     /// `source` absent -> "sourceNotFound", checked before any device is
     /// contacted (mirrors `unknownDoc`'s pre-device-round-trip convenience —
     /// see `callCreateDoc`'s `docExists` pre-check).
@@ -5630,19 +5683,35 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// `source == target` -> "invalidArguments", checked before either doc's
-    /// bytes are even read.
-    @Test func copyElementsSameDocErrors() async throws {
+    /// `source == target` is a copy WITHIN one document: relayed like any other, the document's
+    /// own bytes riding both as the source part and as `docBytes`. It was refused with a bare
+    /// `invalidArguments` until 2026-11-22 (an agent deriving one symbol from another in a
+    /// library sketch had to read every arrow and add it again).
+    @Test func copyElementsWithinOneDocumentIsRelayed() async throws {
         let (server, port, task) = try await startServer()  // seeds "d"
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
 
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["copyElements"])
+        defer { Task { await device.close() } }
+
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
             arguments: ["source": "d", "target": "d", "strokeIds": ["k1"]])
-        #expect(isError == true)
-        #expect(toolResultText(content) == "invalidArguments")
+        #expect(isError != true, "\(toolResultText(content))")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let encodedSource = try #require(spec["source"] as? String)
+        #expect(Data(base64Encoded: encodedSource) == Fixtures.docBytes)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modified)
 
         await server.stop()
     }
@@ -5659,7 +5728,7 @@ actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "copy_elements", arguments: ["source": "a", "target": "b"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "invalidArguments")
+        #expect(toolResultText(content).hasPrefix("invalidArguments: name at least one of"))
 
         await server.stop()
     }
