@@ -1364,6 +1364,16 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A solid fill thinner than 3 points is told that it will stripe in a small image; a wider
+    /// one, a hatch, and a fill at the user's own pen width are not.
+    @Test func aThinSolidFillIsToldItWillStripe() {
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 1, spacingRatio: nil)?.contains("stripes") == true)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 2.9, spacingRatio: 0.2) != nil)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 3, spacingRatio: nil) == nil)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 1, spacingRatio: 3) == nil, "a hatch is meant to show its lines")
+        #expect(MCPAdapter.thinFillNote(drawnWidth: nil, spacingRatio: nil) == nil)
+    }
+
     // MARK: - device kinds
 
     /// A device says its kind with a hello word (`kind:mac`). `list_open_docs` counts the kinds

@@ -1271,6 +1271,17 @@ public actor MCPAdapter {
                 is construction, keep the border and cover that edge, or draw the edges you want \
                 yourself with draw_strokes.
 
+                A THIN FILL SHOWS STRIPES IN A SMALL IMAGE. The passes are ink, and ink thinner \
+                than about 3 points is not rendered flat below about 2 pixels per canvas point — \
+                a zoomed-out canvas, an export of a whole sheet. Measured on a 140 × 120 fill: \
+                `drawnWidth: 1` is ruled with stripes at 1.5 to 2 px/pt and a fifth too faint at 1 \
+                px/pt, however dense its passes (`spacingRatio` does not help); `drawnWidth: 3` \
+                is flat from 1.5 px/pt up, and at every scale looked at from 3 px/pt both are. So \
+                fill a face with `drawnWidth` 3 or more — and count on the ink reaching HALF ITS \
+                WIDTH past the outline you give, since the border is centred on it: draw the \
+                outline that much smaller where the edge has to be exact. The reply says so when \
+                a solid fill is thinner.
+
                 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
                 genuinely large — the reply tells you how many were made, and past 4 000 passes \
                 the call fails and names the spacing that would fit rather than handing back a \
@@ -6435,6 +6446,19 @@ public actor MCPAdapter {
         }
     }
 
+    /// What a SOLID fill thinner than 3 points is told in its reply: such ink is not rendered
+    /// flat in a small image, whatever the pass spacing. Measured 2026-11-22 on a 140 × 120 pen
+    /// fill (row brightness, of 255, mean ± half the spread): `drawnWidth: 1` 68.3 ± 3.5 at 1.5
+    /// px/pt, 72.6 ± 4.2 at 1.9, 59.7 at 1.0 (of 76 when flat) — unchanged at three times the
+    /// passes; `drawnWidth: 2` 74.8 ± 2.5 at 1.5; `drawnWidth: 3` 76.0 ± 0 from 1.5 up. An agent
+    /// filled the faces of a 3D body with 1 pt passes for a clean edge and got ruled faces in the
+    /// export. Nil for a hatch (a ratio above 1) and when the width is the user's pen's.
+    static func thinFillNote(drawnWidth: Double?, spacingRatio: Double?) -> String? {
+        guard let drawnWidth, drawnWidth < 3, (spacingRatio ?? 0.4) <= 1 else { return nil }
+        return "a solid fill this thin shows stripes in a small image (below about 2 pixels per canvas point), "
+            + "whatever its spacingRatio; drawnWidth 3 or more renders flat, and reaches half its width past the outline"
+    }
+
     /// The first text of a result — a tool's reply or its error reason.
     private static func text(of result: CallTool.Result) -> String {
         for content in result.content {
@@ -8451,6 +8475,8 @@ public actor MCPAdapter {
             }
             let fillMeta = out.meta.flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }
             let created = fillMeta?.keys?.count
+            let thinFillNote = Self.thinFillNote(drawnWidth: try Self.optionalDoubleArg(arguments, "drawnWidth"),
+                                                 spacingRatio: try Self.optionalDoubleArg(arguments, "spacingRatio"))
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
@@ -8459,6 +8485,7 @@ public actor MCPAdapter {
                 if let stored = fillMeta?.storedColors, !stored.isEmpty {
                     reply += "\nstoredColors: " + stored.joined(separator: ", ")
                 }
+                if let note = thinFillNote { reply += "\nnote: " + note }
                 return reply
             }
         } catch let error as ArgumentError {
