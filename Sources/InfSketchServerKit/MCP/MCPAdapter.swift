@@ -3553,7 +3553,16 @@ public actor MCPAdapter {
                 untouched; `target` gains the copies, texts, images, arrows and formulas keeping \
                 the order they had among each other. `source` and `target` MAY BE THE SAME \
                 document: the clones then lie exactly on their originals, so move them \
-                (transform_elements) or change them next. At least one of `strokeIds`/ \
+                (transform_elements) or change them next.
+
+                PLACE THE CLONES IN THE SAME CALL: `scale`, `rotate` (both about `canvasAnchor`) \
+                and `canvasTranslate` are transform_elements' operations, applied to the clones \
+                only; `tags` names them; `scaleWidths: true` lets the arrows' line widths follow \
+                the scale. To put a symbol's pin on a point P: `canvasAnchor` = the pin's place in \
+                the source, `canvasTranslate` = P minus that place. These need a device with the \
+                `copyTransform` capability.
+
+                At least one of `strokeIds`/ \
                 `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a \
                 device with the `formulas` capability). \
                 REQUIRES a connected device with the copyElements capability — fails with \
@@ -3595,6 +3604,30 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": "Formula ids to clone, from list_formulas.",
                         "items": .object(["type": "string"]),
+                    ]),
+                    "scale": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[sx, sy] applied to the CLONES about `canvasAnchor`; non-zero. A negative factor mirrors.",
+                    ]),
+                    "rotate": .object([
+                        "type": "number",
+                        "description": "Degrees the clones are turned about `canvasAnchor`, after the scale; positive = clockwise on screen.",
+                    ]),
+                    "canvasAnchor": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[x, y], the fixed point of `scale` and `rotate`, in the SOURCE's coordinates (where the clones lie before they move). Defaults to the centre of the clones' bounding box.",
+                    ]),
+                    "canvasTranslate": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[dx, dy] the clones are moved by, last. Without it they lie at their sources' coordinates.",
+                    ]),
+                    "scaleWidths": .object([
+                        "type": "boolean",
+                        "description": "true: the cloned arrows' line widths follow `scale` (heads and dashes are in widths and follow too), whatever their keepsWidth — which is left as it was. Default false: each arrow follows its own keepsWidth. A stroke's ink always scales with it.",
+                    ]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Tags every clone gets, on top of the ones it inherits from its source.",
                     ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
@@ -7386,6 +7419,9 @@ public actor MCPAdapter {
     // written back to `target` under the standard byte-CAS every other write
     // tool uses. `source` is read but never written.
 
+    /// `copy_elements`' arguments that act on the clones (the device's `CopyElements.Spec`).
+    static let copyPlacementKeys = ["scale", "rotate", "canvasAnchor", "canvasTranslate", "scaleWidths", "tags"]
+
     private func callCopyElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let source = try Self.nonEmptyStringArg(arguments, "source")
@@ -7414,6 +7450,12 @@ public actor MCPAdapter {
             ]
             if !arrowIds.isEmpty { copyEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             if !formulaIds.isEmpty { copyEnvelope["formulaIds"] = .array(formulaIds.map(Value.string)) }
+            // What is done to the clones in the same call. An app without `copyTransform` would
+            // ignore these keys and answer a copy that was neither moved nor tagged.
+            var placesClones = false
+            for key in Self.copyPlacementKeys {
+                if let value = arguments?[key], !value.isNull { copyEnvelope[key] = value; placesClones = true }
+            }
             let spec: Data
             do {
                 // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
@@ -7426,7 +7468,7 @@ public actor MCPAdapter {
                 out = try await broker.requestStrokeOp(
                     docId: target, docBytes: targetBytes, spec: spec,
                     capability: Self.joiningFormulas(arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
-                                                     if: !formulaIds.isEmpty),
+                                                     if: !formulaIds.isEmpty) + (placesClones ? "+copyTransform" : ""),
                     specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)

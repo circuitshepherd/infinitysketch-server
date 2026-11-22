@@ -5711,6 +5711,48 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// What is done to the clones in the same call — a transform, tags, the width switch — rides
+    /// in the spec and needs a device that knows it (`copyTransform`): an older app ignores the
+    /// keys and answers a copy that was neither moved nor tagged. A plain copy still reaches it.
+    @Test func copyElementsRelaysWhatIsDoneToTheClonesUnderItsOwnCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["copyElements"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "d", "strokeIds": ["k1"], "canvasTranslate": [10, 20]])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("copyTransform"), "\(toolResultText(refused))")
+        let (plain, plainError) = try await client.callTool(
+            name: "copy_elements", arguments: ["source": "d", "target": "d", "strokeIds": ["k1"]])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modified), capabilities: ["copyElements", "copyTransform"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "d", "strokeIds": ["k1"],
+                        "scale": [0.5, 0.5], "rotate": 90, "canvasAnchor": [100, 200], "canvasTranslate": [10, 20],
+                        "scaleWidths": true, "tags": ["circuit"]])
+        #expect(isError != true, "\(toolResultText(content))")
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["scale"] as? [Double] == [0.5, 0.5])
+        #expect(spec["rotate"] as? Double == 90)
+        #expect(spec["canvasAnchor"] as? [Double] == [100, 200])
+        #expect(spec["canvasTranslate"] as? [Double] == [10, 20])
+        #expect(spec["scaleWidths"] as? Bool == true)
+        #expect(spec["tags"] as? [String] == ["circuit"])
+
+        await server.stop()
+    }
+
     /// `out.meta`'s created ids (`CopyElements.perform`'s app-side
     /// `{"createdStrokeKeys": […], "createdTextIds": […], "createdImageIds": […]}`
     /// shape) are surfaced in the result text the same way draw_strokes

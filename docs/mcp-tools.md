@@ -1100,7 +1100,11 @@ Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas
 
 ### `copy_elements`
 
-Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images, arrows and formulas keeping the order they had among each other. `source` and `target` MAY BE THE SAME document: the clones then lie exactly on their originals, so move them (transform_elements) or change them next. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a device with the `formulas` capability). REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images, arrows and formulas keeping the order they had among each other. `source` and `target` MAY BE THE SAME document: the clones then lie exactly on their originals, so move them (transform_elements) or change them next.
+
+PLACE THE CLONES IN THE SAME CALL: `scale`, `rotate` (both about `canvasAnchor`) and `canvasTranslate` are transform_elements' operations, applied to the clones only; `tags` names them; `scaleWidths: true` lets the arrows' line widths follow the scale. To put a symbol's pin on a point P: `canvasAnchor` = the pin's place in the source, `canvasTranslate` = P minus that place. These need a device with the `copyTransform` capability.
+
+At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a device with the `formulas` capability). REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds`, `createdArrowIds` and `createdFormulaIds` — deliberately not `strokeIds`/`textIds`/`imageIds`/`arrowIds`/`formulaIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
 
@@ -1109,9 +1113,15 @@ REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdIma
 | `source` | string | yes | The document to copy FROM (left unchanged). |
 | `target` | string | yes | The document to copy INTO (gains the clones). |
 | `arrowIds` | array | no | Arrow ids to clone, from list_arrows. |
+| `canvasAnchor` | array | no | [x, y], the fixed point of `scale` and `rotate`, in the SOURCE's coordinates (where the clones lie before they move). Defaults to the centre of the clones' bounding box. |
+| `canvasTranslate` | array | no | [dx, dy] the clones are moved by, last. Without it they lie at their sources' coordinates. |
 | `formulaIds` | array | no | Formula ids to clone, from list_formulas. |
 | `imageIds` | array | no | Placed-image ids to clone, from list_images. |
+| `rotate` | number | no | Degrees the clones are turned about `canvasAnchor`, after the scale; positive = clockwise on screen. |
+| `scale` | array | no | [sx, sy] applied to the CLONES about `canvasAnchor`; non-zero. A negative factor mirrors. |
+| `scaleWidths` | boolean | no | true: the cloned arrows' line widths follow `scale` (heads and dashes are in widths and follow too), whatever their keepsWidth — which is left as it was. Default false: each arrow follows its own keepsWidth. A stroke's ink always scales with it. |
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
+| `tags` | array | no | Tags every clone gets, on top of the ones it inherits from its source. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
 
 ---
