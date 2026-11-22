@@ -19,7 +19,7 @@ A `docId` is the document's id — stable across renames; `list_docs` reports it
 
 | Tool | Summary |
 |---|---|
-| [`list_docs`](#list_docs) | Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. |
+| [`list_docs`](#list_docs) | Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, hasContent, open}`, newest-modified first. |
 | [`list_open_docs`](#list_open_docs) | What is OPEN right now, and on what. |
 | [`create_doc`](#create_doc) | Creates a new document containing the InfinitySketch app's empty default content, authored by a connected InfinitySketch device. |
 | [`fetch_doc`](#fetch_doc) | Ensures a document's content is available on the server, pulling it from a device that holds it if the server has only its metadata (a "content on another device" doc — see the… |
@@ -165,11 +165,11 @@ Read-only. `render_sketch` also renders ephemeral candidate strokes that are nev
 
 ### `list_docs`
 
-Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are. `id` is the document; `name` is its label, which two documents may share. Every tool accepts the id, or the name when no other document has it.
+Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are. `id` is the document; `name` is its label, which two documents may share. Every tool accepts the id, or the name when no other document has it.
 
-`open` means a device has it on screen right now, so your writes land live on the user's canvas; use list_open_docs when you want the device and capability detail as well. `hasContent: false` means the bytes live on a device rather than here — every content tool fetches those for you automatically, or call fetch_doc to pull one explicitly. An empty list means the server holds no documents at all.
+`open` means a device has it on screen right now, so your writes land live on the user's canvas; use list_open_docs when you want the device and capability detail as well. `hasContent: false` means the bytes live on a device rather than here — every content tool fetches those for you automatically, or call fetch_doc to pull one explicitly. An empty list means the server holds no documents at all. `createdAt` is when this server first stored the document — its creation, for one made through this server; it is ABSENT for a document the server held before it kept that record, and for one whose bytes live on a device. `modifiedAt` moves when a device merely opens the document (thumbnail, viewport): to learn whether its content changed, use diff_docs.
 
-REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest first.
+REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, createdAt?, hasContent, open}`, newest first.
 
 Takes no arguments.
 

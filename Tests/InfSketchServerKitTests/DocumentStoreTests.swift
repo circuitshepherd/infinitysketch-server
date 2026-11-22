@@ -44,6 +44,34 @@ private func makeTempStore() throws -> (DirectoryDocumentStore, URL) {
 
     /// …and a save through a different spelling updates THAT document rather than creating a
     /// second one beside it — which is what a case-sensitive filesystem would otherwise do.
+    /// The file system cannot say when a document was created (every save is an atomic replace),
+    /// so the store records it: at the first save of an id, kept through later saves and across a
+    /// restart, gone with the document.
+    @Test func theStoreRecordsWhenADocumentWasFirstStored() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("births-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = DirectoryDocumentStore(directory: dir)
+        #expect(store.creationDates().isEmpty)
+
+        let before = Date()
+        try store.save(docId: "a", bytes: Data("one".utf8))
+        let born = try #require(store.creationDates()["a"])
+        #expect(born >= before.addingTimeInterval(-1) && born <= Date().addingTimeInterval(1))
+
+        try store.save(docId: "a", bytes: Data("two, later".utf8))
+        #expect(store.creationDates()["a"] == born, "a later save is not a creation")
+
+        // Another store on the same folder (a restart) reads the record.
+        #expect(DirectoryDocumentStore(directory: dir).creationDates()["a"] == born)
+        // The record is no document.
+        #expect(try store.list().map(\.docId) == ["a"])
+
+        try store.delete(docId: "a")
+        #expect(store.creationDates()["a"] == nil)
+        try store.save(docId: "a", bytes: Data("again".utf8))
+        #expect(try #require(store.creationDates()["a"]) >= born, "created again after a delete: a new time")
+    }
+
     @Test func savingUnderADifferentCaseUpdatesTheSameDocument() throws {
         let (store, _) = try makeTempStore()
         try store.save(docId: "Rainfall", bytes: Fixtures.docBytes)

@@ -1355,8 +1355,8 @@ public actor MCPAdapter {
         Tool(
             name: "list_docs",
             description: """
-                Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, \
-                open}`, newest-modified first. START HERE when you do not already have a docId — \
+                Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, \
+                hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — \
                 every other tool takes one, and this is the tool that tells you what they are. \
                 `id` is the document; `name` is its label, which two documents may share. Every \
                 tool accepts the id, or the name when no other document has it.
@@ -1365,10 +1365,15 @@ public actor MCPAdapter {
                 user's canvas; use list_open_docs when you want the device and capability detail \
                 as well. `hasContent: false` means the bytes live on a device rather than here — \
                 every content tool fetches those for you automatically, or call fetch_doc to pull \
-                one explicitly. An empty list means the server holds no documents at all.
+                one explicitly. An empty list means the server holds no documents at all. \
+                `createdAt` is when this server first stored the document — its creation, for one \
+                made through this server; it is ABSENT for a document the server held before it \
+                kept that record, and for one whose bytes live on a device. `modifiedAt` moves \
+                when a device merely opens the document (thumbnail, viewport): to learn whether \
+                its content changed, use diff_docs.
 
-                REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest \
-                first.
+                REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, createdAt?, hasContent, \
+                open}`, newest first.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -8520,17 +8525,22 @@ public actor MCPAdapter {
         // Which of them a device actually has on screen — the first thing you want to know after
         // "what is there", and free here (the same in-memory read `list_open_docs` does).
         let live = await manager.liveInfo()
+        let created = await manager.creationDates()
+        let formatter = ISO8601DateFormatter()
         let payload = entries
             .sorted { $0.modifiedAt > $1.modifiedAt }
             .map { entry -> [String: Any] in
-                [
+                var row: [String: Any] = [
                     "id": entry.id,
                     "name": entry.name,
                     "sizeBytes": entry.sizeBytes,
-                    "modifiedAt": ISO8601DateFormatter().string(from: entry.modifiedAt),
+                    "modifiedAt": formatter.string(from: entry.modifiedAt),
                     "hasContent": entry.hasContent,
                     "open": (live[entry.id]?.subscriberCount ?? 0) > 0,
                 ]
+                // Absent when unknown — a document held since before the record was kept.
+                if let date = created[entry.id] { row["createdAt"] = formatter.string(from: date) }
+                return row
             }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {

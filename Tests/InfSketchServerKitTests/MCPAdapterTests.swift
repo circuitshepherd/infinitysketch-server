@@ -1374,6 +1374,25 @@ actor FakeStrokeOpDevice {
         #expect(MCPAdapter.thinFillNote(drawnWidth: nil, spacingRatio: nil) == nil)
     }
 
+    /// `list_docs` says when the server first stored a document — and leaves the field out when
+    /// it does not know, never guessing from the modification date.
+    @Test func listDocsSaysWhenADocumentWasFirstStored() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d" through a store: its creation
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "list_docs", arguments: [:])
+        #expect(isError != true)
+        let rows = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [[String: Any]])
+        let row = try #require(rows.first { $0["id"] as? String == "d" })
+        let createdAt = try #require(row["createdAt"] as? String)
+        let date = try #require(ISO8601DateFormatter().date(from: createdAt))
+        #expect(abs(date.timeIntervalSinceNow) < 60)
+
+        await server.stop()
+    }
+
     // MARK: - one shape for every write's result
 
     /// A write's text is as it was; beside it `structuredContent` says the same in ONE shape:

@@ -860,6 +860,10 @@ public actor SessionManager {
     /// The WS twin of the REST listing: store contents + live session info, plus the live
     /// index's metadata-only documents. Content ALWAYS beats metadata — a docId with real
     /// bytes is reported hasContent:true and is never duplicated by an advertisement.
+    /// When each stored document was first stored here, by id (`DocumentStore.creationDates`).
+    /// Beside the listing, not in it: `DocListEntry` is a wire type, and this is the agent's.
+    public func creationDates() -> [String: Date] { store.creationDates() }
+
     public func listDocuments() async throws -> [DocListEntry] {
         let live = await liveInfo()
         var entries = try store.list().map { info in
