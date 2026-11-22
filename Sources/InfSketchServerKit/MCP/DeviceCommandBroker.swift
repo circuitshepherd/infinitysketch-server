@@ -384,6 +384,20 @@ public actor DeviceCommandBroker {
         (connections.count, connections.reduce(into: Set<String>()) { $0.formUnion($1.capabilities) })
     }
 
+    /// The hello word a device says its KIND with: `kind:mac`, `kind:ipad`, `kind:iphone` (app
+    /// 2.6 and later). Among the capabilities so that a request can ask for a kind by joining it
+    /// (`authorStrokes+kind:mac`), but it is not an ability and is listed apart from them.
+    public static let kindPrefix = "kind:"
+
+    /// The kind of each connected device, by connection — "unknown" for an app that does not say.
+    public func deviceKinds() -> [UUID: String] {
+        Dictionary(uniqueKeysWithValues: connections.map { connection in
+            let kind = connection.capabilities.first { $0.hasPrefix(Self.kindPrefix) }
+                .map { String($0.dropFirst(Self.kindPrefix.count)) }
+            return (connection.id, kind ?? "unknown")
+        })
+    }
+
     /// WSAdapter calls on connection close. Fails that connection's pending
     /// requests immediately with .deviceDisconnected.
     public func unregister(connectionId: UUID) {

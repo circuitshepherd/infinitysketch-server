@@ -1368,8 +1368,12 @@ public actor MCPAdapter {
             name: "list_open_docs",
             description: """
                 What is OPEN right now, and on what. Read-only, no device round trip, no docId \
-                needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, name, seq, \
-                subscribers}]}` — `docId` is the document's id, `name` its label.
+                needed. Returns `{devices: {count, capabilities, kinds}, openDocs: [{docId, name, \
+                seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. \
+                `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" \
+                for an app that does not say) and `openOn` lists the kinds that have that \
+                document open. The SERVER picks the device for a call — one that has the document \
+                open is preferred; only render_sketch lets you ask for a kind (`device`).
 
                 CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human \
                 says may be shared by several documents (a shared name is refused \
@@ -2689,6 +2693,17 @@ public actor MCPAdapter {
                         "description": "Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each.",
                     ]),
                     "colorAppearance": colorAppearanceProperty,
+                    "device": .object([
+                        "type": "string", "enum": .array(["mac", "ipad", "iphone"].map(Value.string)),
+                        "description": """
+                            Render on a device of this kind, or fail with noDeviceAvailable when \
+                            none is connected. Omitted, the server picks (a device that has the \
+                            document open is preferred). Devices lay text out a little \
+                            differently, so an image that must not change from one export to the \
+                            next — one meant for publishing — should always name the same kind. \
+                            list_open_docs shows the kinds connected.
+                            """,
+                    ]),
                     "writeToFile": .object([
                         "type": "boolean",
                         "description": """
@@ -6518,10 +6533,19 @@ public actor MCPAdapter {
                     guard case .array(let items)? = arguments?["arrows"] else { return false }
                     return items.contains { if case .object(let fields) = $0 { return fields["styleBase"] != nil }; return false }
                 }()
+                // `device` is read HERE and never relayed (it says WHICH device, not what to
+                // render): a kind is a hello word, so asking for one is one more part to offer.
+                var kind = ""
+                if let device = try Self.optionalStringArg(arguments, "device") {
+                    guard ["mac", "ipad", "iphone"].contains(device) else {
+                        return Self.errorResult("invalidArguments: device must be mac, ipad or iphone")
+                    }
+                    kind = "+" + DeviceCommandBroker.kindPrefix + device
+                }
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
-                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : ""))
+                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "") + kind)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -7958,6 +7982,12 @@ public actor MCPAdapter {
     /// the capability this tool needs (offered: …)" without naming the capability — with an older
     /// app connected that looked like a contradiction, since the device plainly was there.
     static func capabilityMissingReason(needs: [String], missing: [String], devices: Int) -> String {
+        // A KIND that is not connected is not an old app: say which kind was asked for.
+        if let kind = missing.first(where: { $0.hasPrefix(DeviceCommandBroker.kindPrefix) }) {
+            return "noDeviceAvailable — \(devices) device(s) connected, none of them a "
+                + "\(kind.dropFirst(DeviceCommandBroker.kindPrefix.count)) that can do this (asked for with `device`). "
+                + "list_open_docs shows the kinds connected; an app older than 2.6 does not say its kind."
+        }
         let all = needs.map { "`\($0)`" }.joined(separator: " + ")
         let lacking = missing.isEmpty
             ? "no single one offers all of \(all)"
@@ -8472,19 +8502,26 @@ public actor MCPAdapter {
     }
 
     private func callListOpenDocs() async -> CallTool.Result {
-        let (deviceCount, capabilities) = await broker.connectionSummary()
+        let (deviceCount, allWords) = await broker.connectionSummary()
+        // A device's KIND is a hello word too, but not an ability: listed apart.
+        let capabilities = allWords.filter { !$0.hasPrefix(DeviceCommandBroker.kindPrefix) }
+        let kindOf = await broker.deviceKinds()
+        var kinds: [String: Int] = [:]
+        for kind in kindOf.values { kinds[kind, default: 0] += 1 }
         let names = Dictionary(((try? await manager.listDocuments()) ?? []).map { ($0.id, $0.name) },
                                uniquingKeysWith: { first, _ in first })
-        let open = await manager.liveInfo()
-            .filter { $0.value.subscriberCount > 0 }
-            .map { (docId, info) in
-                ["docId": docId, "name": names[docId] ?? docId, "seq": info.seq,
-                 "subscribers": info.subscriberCount] as [String: Any]
-            }
-            .sorted { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
+        var open: [[String: Any]] = []
+        for (docId, info) in await manager.liveInfo() where info.subscriberCount > 0 {
+            // Which kinds of device have it open — the browser's viewer page subscribes too and is
+            // no device, so this can be shorter than `subscribers`.
+            let openOn = await manager.subscribedConnections(docId: docId).compactMap { kindOf[$0] }.sorted()
+            open.append(["docId": docId, "name": names[docId] ?? docId, "seq": info.seq,
+                         "subscribers": info.subscriberCount, "openOn": openOn])
+        }
+        open.sort { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
 
         let payload: [String: Any] = [
-            "devices": ["count": deviceCount, "capabilities": capabilities.sorted()],
+            "devices": ["count": deviceCount, "capabilities": capabilities.sorted(), "kinds": kinds],
             "openDocs": open,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),

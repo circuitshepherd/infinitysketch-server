@@ -1364,6 +1364,48 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    // MARK: - device kinds
+
+    /// A device says its kind with a hello word (`kind:mac`). `list_open_docs` counts the kinds
+    /// apart from the abilities, and `render_sketch`'s `device` asks for one — read by the server,
+    /// never relayed.
+    @Test func aRenderCanAskForAKindOfDeviceAndTheKindsAreListed() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let mac = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{"renderedBy":"mac"}"#.utf8)),
+            capabilities: ["authorStrokes", "kind:mac"])
+        defer { Task { await mac.close() } }
+
+        let (listed, _) = try await client.callTool(name: "list_open_docs", arguments: [:])
+        let listing = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(listed).utf8)) as? [String: Any])
+        let devices = try #require(listing["devices"] as? [String: Any])
+        #expect(devices["kinds"] as? [String: Int] == ["mac": 1])
+        #expect(devices["capabilities"] as? [String] == ["authorStrokes"], "a kind is not an ability")
+
+        let (refused, refusedError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "ipad"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("none of them a ipad"), "\(toolResultText(refused))")
+        #expect(await mac.receivedRequests.isEmpty)
+
+        let (_, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "mac"])
+        #expect(isError != true)
+        let request = try #require(await mac.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["device"] == nil, "which device is the server's business, not the renderer's")
+
+        let (bad, badError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "watch"])
+        #expect(badError == true)
+        #expect(toolResultText(bad).hasPrefix("invalidArguments: device"))
+
+        await server.stop()
+    }
+
     // MARK: - batch
 
     /// The document's texts, read back through the summary resource's own parser.
