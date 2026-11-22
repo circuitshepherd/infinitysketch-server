@@ -3805,9 +3805,11 @@ public actor MCPAdapter {
                 document by itself; if it changes again, docChangedDuringOp and nothing is written.
 
                 REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in \
-                order: the op's own reply, as a JSON value when the tool answers in JSON and as \
-                its text otherwise. A batch whose ops changed nothing has `unchanged: true` and \
-                no `seq`. \(writeToolCaveats)
+                order. A WRITE's entry is an object: `message` (its reply's first line), `seq`, \
+                and the fields its reply names — `id` for the element it made (always `id`, also \
+                for an arrow), `canvasBounds`, `ids`, `createdArrowIds` and so on, `notes` for \
+                anything it has to tell you. A read's entry is its listing. A batch whose ops \
+                changed nothing has `unchanged: true` and no `seq`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -6400,25 +6402,32 @@ public actor MCPAdapter {
                     replies.append((Self.text(of: result), context.pendingReply))
                 }
 
-                func reply(seq: Int?) -> String {
-                    var object: [String: Any] = ["results": replies.map { entry -> Any in
-                        // An op that wrote, in a batch that as a whole changed nothing (an add
-                        // and its removal): there is no seq to quote in its reply.
-                        let text = entry.pending.map { pending in
-                            seq.map(pending) ?? "applied — the batch as a whole changed nothing"
-                        } ?? entry.text
-                        // A tool that answers in JSON is embedded as JSON, not as a string of it.
-                        if let data = text.data(using: .utf8),
-                           let json = try? JSONSerialization.jsonObject(with: data),
-                           json is [String: Any] || json is [Any] { return json }
-                        return text
-                    }]
-                    if let seq { object["seq"] = seq } else { object["unchanged"] = true }
-                    return Self.jsonText(object)
+                func reply(seq: Int?) -> CallTool.Result {
+                    var object: [String: Value] = ["results": .array(replies.map { entry -> Value in
+                        if let pending = entry.pending {
+                            // A WRITE: its structured reply, the shape a call of its own returns
+                            // beside its text (`structuredReply`). In a batch that as a whole
+                            // changed nothing (an add and its removal) there is no seq to quote.
+                            let text = seq.map(pending) ?? "applied — the batch as a whole changed nothing"
+                            return Self.structuredReply(text, seq: seq) ?? .string(text)
+                        }
+                        // A read: a tool that answers in JSON is embedded as JSON, not as a string.
+                        if let data = entry.text.data(using: .utf8),
+                           let json = try? JSONDecoder().decode(Value.self, from: data),
+                           json.objectValue != nil || json.arrayValue != nil { return json }
+                        return .string(entry.text)
+                    })]
+                    if let seq { object["seq"] = .int(seq) } else { object["unchanged"] = .bool(true) }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    let text = (try? encoder.encode(Value.object(object)))
+                        .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                    return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)],
+                                           structuredContent: .object(object))
                 }
 
                 guard context.wrote, context.bytes != original else {
-                    return Self.textResult(reply(seq: nil))
+                    return reply(seq: nil)
                 }
                 let payload = OpPayload(type: "fullDoc", data: context.bytes)
                 switch await manager.submitOpeningSession(
@@ -6428,7 +6437,7 @@ public actor MCPAdapter {
                 case .accepted(let seq):
                     // ONE entry: `undo_last_edit` takes the whole batch back, as the user's undo does.
                     await history.record(docId: docId, before: original, after: context.bytes)
-                    return Self.textResult(reply(seq: seq))
+                    return reply(seq: seq)
                 case .rejected(let message):
                     guard case .reject(_, _, let reason, _) = message else {
                         return Self.errorResult("unexpectedServerResponse")
@@ -8107,7 +8116,7 @@ public actor MCPAdapter {
             if recordForUndo, case .matchBytes(let before) = expectation {
                 await history.record(docId: docId, before: before, after: bytes)
             }
-            return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
+            return Self.writeResult(successText(seq), seq: seq)
         case .rejected(let message):
             guard case .reject(_, _, let reason, _) = message else {
                 return Self.errorResult("unexpectedServerResponse")
@@ -8482,6 +8491,8 @@ public actor MCPAdapter {
             ) { seq in
                 var reply = created.map { "filled the region in \(docId) with \($0) stroke(s) at seq \(seq)" }
                     ?? "filled the region in \(docId) at seq \(seq)"
+                // The strokes it made, so the fill can be removed or restyled without a listing.
+                if let keys = fillMeta?.keys, !keys.isEmpty { reply += "\nids: " + keys.joined(separator: ", ") }
                 if let stored = fillMeta?.storedColors, !stored.isEmpty {
                     reply += "\nstoredColors: " + stored.joined(separator: ", ")
                 }
@@ -8567,6 +8578,67 @@ public actor MCPAdapter {
     /// `fetch_doc` is the first handler simple enough to want a named helper for it.
     private static func textResult(_ text: String) -> CallTool.Result {
         CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    }
+
+    /// A WRITE's result: its text, as always, and the same facts as `structuredContent` — ONE
+    /// shape for every write (improvement note S3, 2026-11-22: `add_formula` answered in JSON,
+    /// `add_arrow` with a sentence and a line `arrowId: …`, `add_text` with a line `id: …`,
+    /// `copy_elements` with lines of comma-separated ids, and a script needed a pattern per
+    /// tool). The text is unchanged, so nothing that reads it breaks; a script reads the object.
+    static func writeResult(_ text: String, seq: Int?) -> CallTool.Result {
+        CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)],
+                        structuredContent: structuredReply(text, seq: seq))
+    }
+
+    /// The structured form of a write's reply text. A reply that IS a JSON object (the formula
+    /// tools') is that object. Otherwise: `message` (the first line), `seq`, and one field per
+    /// `key: value` line under the line's own key — a `[…]` value as the array it is, an id list
+    /// (`ids`, `created…Ids`, `storedColors`) as an array of strings, a number as a number — with
+    /// every other line, and every `note:`, in `notes`. The new element's id is ALWAYS also `id`
+    /// (`add_arrow` says `arrowId`), so one key finds it whatever the tool.
+    static func structuredReply(_ text: String, seq: Int?) -> Value? {
+        if let data = text.data(using: .utf8),
+           let object = try? JSONDecoder().decode([String: Value].self, from: data) {
+            return .object(object)
+        }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard !lines.isEmpty else { return nil }
+        var fields: [String: Value] = ["message": .string(lines.removeFirst())]
+        if let seq { fields["seq"] = .int(seq) }
+        var notes: [Value] = []
+        for line in lines {
+            guard let colon = line.range(of: ": "),
+                  !line[..<colon.lowerBound].isEmpty,
+                  line[..<colon.lowerBound].allSatisfy({ $0.isLetter || $0.isNumber }) else {
+                notes.append(.string(line)); continue
+            }
+            let key = String(line[..<colon.lowerBound]), raw = String(line[colon.upperBound...])
+            if key == "note" { notes.append(.string(raw)); continue }
+            fields[key] = structuredValue(key: key, raw: raw)
+        }
+        if !notes.isEmpty { fields["notes"] = .array(notes) }
+        if fields["id"] == nil, let arrow = fields["arrowId"] { fields["id"] = arrow }
+        // A reply that names its element only in its sentence ("added <id> at seq 3", "edited
+        // <id> …", "removed arrow <id> …"): the TEXT stays as it is — a caller may be taking its
+        // last word for the seq, as this repo's own tests did — and the id is read out of it.
+        if fields["id"] == nil, case .string(let message)? = fields["message"],
+           let id = message.split(separator: " ").first(where: { UUID(uuidString: String($0)) != nil }) {
+            fields["id"] = .string(String(id))
+        }
+        return .object(fields)
+    }
+
+    private static func structuredValue(key: String, raw: String) -> Value {
+        if raw.hasPrefix("["), let data = raw.data(using: .utf8),
+           let array = try? JSONDecoder().decode([Value].self, from: data) {
+            return .array(array)
+        }
+        if key == "ids" || key.hasSuffix("Ids") || key.hasSuffix("Colors") {
+            return .array(raw.split(separator: ",").map { .string($0.trimmingCharacters(in: .whitespaces)) })
+        }
+        if let int = Int(raw) { return .int(int) }
+        if let double = Double(raw) { return .double(double) }
+        return .string(raw)
     }
 
     // MARK: - Tool argument extraction

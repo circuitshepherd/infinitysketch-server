@@ -245,6 +245,10 @@ enum AgentGuide {
     - **Many elements, one edit: `batch`.** A chart or a circuit is dozens of tool calls; sent \
       one by one each is its own undo step for the user and its own change on the canvas they \
       are watching. `batch` runs them on one working copy and writes once — all or nothing.
+    - **A write answers twice: a text, and the same as `structuredContent`.** The text differs \
+      from tool to tool; the object has one shape — `message`, `seq`, `id` for the element made \
+      or touched (always `id`), and whatever else the reply names (`canvasBounds`, `ids`, \
+      `createdArrowIds`, `notes`). A script should read the object.
     - **Bytes are not content.** A device that only opens a document rewrites its thumbnail, \
       viewport and appearance, so the raw bytes change when nobody edited anything. To learn \
       whether — and what — a user changed, keep a copy when you finish and call `diff_docs` \

@@ -1374,6 +1374,71 @@ actor FakeStrokeOpDevice {
         #expect(MCPAdapter.thinFillNote(drawnWidth: nil, spacingRatio: nil) == nil)
     }
 
+    // MARK: - one shape for every write's result
+
+    /// A write's text is as it was; beside it `structuredContent` says the same in ONE shape:
+    /// `message`, `seq`, a field per `key: value` line, `notes`, and the new element's id as `id`
+    /// whatever the tool calls it.
+    @Test func aWritesReplyHasOneStructuredShape() throws {
+        func fields(_ text: String, seq: Int? = 7) throws -> [String: Value] {
+            try #require(MCPAdapter.structuredReply(text, seq: seq)?.objectValue)
+        }
+        let arrow = try fields("added arrow to D at seq 7\narrowId: A1")
+        #expect(arrow["message"] == .string("added arrow to D at seq 7"))
+        #expect(arrow["seq"] == .int(7))
+        #expect(arrow["arrowId"] == .string("A1") && arrow["id"] == .string("A1"))
+
+        let text = try fields("added styled text at seq 7\nid: T1\ncanvasBounds: [1.5, 20.0, 17.0, 21.0]")
+        #expect(text["id"] == .string("T1"))
+        let bounds = try #require(text["canvasBounds"]?.arrayValue)
+        #expect(bounds.compactMap { Double($0, strict: false) } == [1.5, 20, 17, 21], "an array of numbers, not a string")
+
+        // The plain add_text names its element only in its sentence, and its last word is the seq:
+        // that text stays, and the id is read out of it.
+        let plain = try fields("added 11111111-2222-3333-4444-555555555555 at seq 7")
+        #expect(plain["id"] == .string("11111111-2222-3333-4444-555555555555"))
+        let removed = try fields("removed arrow 11111111-2222-3333-4444-555555555555 at seq 7")
+        #expect(removed["id"] == .string("11111111-2222-3333-4444-555555555555"))
+
+        let copy = try fields("copied 2 element(s) from S into T at seq 7\ncreatedArrowIds: a, b\ncreatedTextIds: c")
+        #expect(copy["createdArrowIds"] == .array([.string("a"), .string("b")]))
+        #expect(copy["createdTextIds"] == .array([.string("c")]))
+
+        let fill = try fields("filled the region in D with 1 stroke(s) at seq 7\nids: k1\nstoredColors: #AFAFB5FF\nnote: a solid fill this thin shows stripes")
+        #expect(fill["ids"] == .array([.string("k1")]))
+        #expect(fill["storedColors"] == .array([.string("#AFAFB5FF")]))
+        #expect(fill["notes"] == .array([.string("a solid fill this thin shows stripes")]))
+
+        let drawn = try fields("drew 1 stroke(s) at seq 7\nids: k1\ninherited from the user's tool: color, width")
+        #expect(drawn["notes"] == .array([.string("inherited from the user's tool: color, width")]),
+                "a line that is not `key: value` is kept, as a note")
+
+        // A reply that is JSON already (the formula tools') is its own structure.
+        let formula = try fields(#"{"id":"F1","seq":9,"typeset":true,"canvasBounds":[1,2,3,4]}"#)
+        #expect(formula["id"] == .string("F1") && formula["seq"] == .int(9) && formula["message"] == nil)
+    }
+
+    /// The structure rides on the real result of a write, and the text beside it is unchanged.
+    @Test func aWriteReturnsItsStructureBesideItsText() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let context = try await client.send(CallTool.request(.init(
+            name: "add_text", arguments: ["docId": "d", "text": "label", "canvasX": 1, "canvasY": 2])))
+        let result = try await context.value
+        let text = toolResultText(result.content)
+        #expect(text.hasPrefix("added ") && text.contains(" at seq "))
+        let structured = try #require(result.structuredContent?.objectValue)
+        let id = try #require(structured["id"]?.stringValue)
+        #expect(text == "added \(id) at seq \(structured["seq"]?.intValue ?? -1)", "the text is what it always was")
+        #expect(try await texts(of: client, "d").first?.id == id)
+
+        await server.stop()
+    }
+
     // MARK: - device kinds
 
     /// A device says its kind with a hello word (`kind:mac`). `list_open_docs` counts the kinds
@@ -1450,16 +1515,17 @@ actor FakeStrokeOpDevice {
         #expect(isError != true, "\(toolResultText(content))")
         let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
         #expect(reply["seq"] as? Int == seqBefore + 1, "three ops, ONE write")
-        let results = try #require(reply["results"] as? [String])
+        let results = try #require(reply["results"] as? [[String: Any]])
         #expect(results.count == 3)
-        #expect(results[0].hasPrefix("added ") && results[0].hasSuffix("at seq \(seqBefore + 1)"))
-        #expect(results[2].contains("set paper"))
+        #expect((results[0]["message"] as? String)?.hasPrefix("added ") == true)
+        #expect(results[0]["seq"] as? Int == seqBefore + 1)
+        #expect((results[2]["message"] as? String)?.contains("set paper") == true)
 
         let after = try await texts(of: client, "d")
         #expect(after.map(\.text) == ["before", "one", "two"])
         // The reply's ids are the ones in the document.
-        let idOfOne = String(results[0].split(separator: " ")[1])
-        #expect(after[1].id == idOfOne)
+        #expect(results[0]["id"] as? String == after[1].id)
+        #expect(results[1]["id"] as? String == after[2].id)
 
         let (undone, undoError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
         #expect(undoError != true, "\(toolResultText(undone))")
@@ -1561,8 +1627,9 @@ actor FakeStrokeOpDevice {
         #expect(try DocJSON.summary(from: stored).texts.map(\.text) == ["after"])
 
         let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
-        let results = try #require(reply["results"] as? [String])
-        #expect(results[1].contains("arrowId: A1"))
+        let results = try #require(reply["results"] as? [[String: Any]])
+        #expect(results[1]["arrowId"] as? String == "A1")
+        #expect(results[1]["id"] as? String == "A1", "the new element's id is always also `id`")
 
         await server.stop()
     }
