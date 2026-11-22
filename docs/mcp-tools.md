@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-74 tools, served over streamable HTTP at `/mcp`.
+75 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -115,7 +115,7 @@ One LaTeX formula per object, written without `$` markers; mathematics inside a 
 
 ## Elements
 
-Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
+Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools. `batch` applies many tool calls to one document as one edit.
 
 | Tool | Summary |
 |---|---|
@@ -128,6 +128,7 @@ Strokes, texts, images, arrows and formulas addressed by id, whatever their kind
 | [`set_layer`](#set_layer) | Moves placed texts, images, arrows and formulas into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas of a document. `ids` may mix their ids (as returned by… |
 | [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by… |
+| [`batch`](#batch) | Several writes to ONE document as ONE edit: each op is an ordinary tool call (`{tool, arguments}`), run in order on a working copy of the document, and the result is written once. |
 
 ## Selection
 
@@ -1126,6 +1127,28 @@ REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdIma
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
 | `tags` | array | no | Tags every clone gets, on top of the ones it inherits from its source. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
+
+### `batch`
+
+Several writes to ONE document as ONE edit: each op is an ordinary tool call (`{tool, arguments}`), run in order on a working copy of the document, and the result is written once. The user's canvas changes once, the user gets ONE undo step for the lot (as does undo_last_edit), and there is one `seq`. Use it for anything made of many elements — a chart, a circuit, clearing a section and drawing it again — instead of hundreds of single calls.
+
+ATOMIC: if any op fails, NOTHING is written and the error names the op. An op sees what the ops before it did, so you can add a text and list_texts after it, or tag what an earlier op created (by an id you gave it a tag for; replies arrive only at the end). Each op's `arguments` are the tool's own; leave `docId` out (it is this batch's document; `target` for copy_elements, whose `source` may be any document). Tools a batch takes: add_arrow, add_formula, add_grid, add_image, add_text, copy_elements, delete_strokes, draw_dots, draw_strokes, edit_formula, edit_text, fill_region, find_elements, get_strokes, list_arrows, list_formulas, list_grids, list_images, list_strokes, list_tags, list_texts, remove_arrow, remove_formula, remove_grid, remove_image, remove_text, reorder_elements, reorder_grids, reset_element_transforms, reshape_arrow, reshape_strokes, restore_stroke_widths, restyle_arrows, restyle_strokes, set_grid_origin, set_layer, set_paper, set_pinned, snap_points, tag_elements, transform_elements, transform_strokes, update_grid. Not the live-selection tools, not render_sketch, and nothing that creates, replaces or deletes a document.
+
+A batch is ONE request: it has to finish within your client's timeout. An op that needs a device costs a round trip (roughly a tenth of a second), so keep a batch to a few hundred ops at most (limit 400). If the document changes while the batch runs — the user draws — the batch is run once more on the new document by itself; if it changes again, docChangedDuringOp and nothing is written.
+
+REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in order: the op's own reply, as a JSON value when the tool answers in JSON and as its text otherwise. A batch whose ops changed nothing has `unchanged: true` and no `seq`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) every op works on. |
+| `ops` | array | yes | The tool calls, in the order they are applied. |
+
+Each item of `ops`:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tool` | string | yes | A tool name, e.g. add_arrow. |
+| `arguments` | object | no | That tool's arguments, without docId. |
 
 ---
 

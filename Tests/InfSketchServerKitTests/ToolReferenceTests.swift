@@ -88,10 +88,11 @@ enum ToolReference {
                       "set_grid_origin", "snap_points"]),
         Group(title: "Elements",
               blurb: "Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a "
-                   + "tag to ids with `find_elements`, then act with the id-taking tools.",
+                   + "tag to ids with `find_elements`, then act with the id-taking tools. `batch` "
+                   + "applies many tool calls to one document as one edit.",
               tools: ["tag_elements", "find_elements", "list_tags", "transform_elements",
                       "reset_element_transforms",
-                      "reorder_elements", "set_layer", "set_pinned", "copy_elements"]),
+                      "reorder_elements", "set_layer", "set_pinned", "copy_elements", "batch"]),
         Group(title: "Selection",
               blurb: "These act on the LIVE rect-select session on a connected device, not on "
                    + "document bytes, and land as one undo step each.",
@@ -393,7 +394,7 @@ struct ToolReferenceTests {
     /// `everyColourTakingToolAdvertisesColorAppearance`.
     @Test func theToolsWithItemSchemasRenderTheirFields() throws {
         let expected: Set<String> = ["draw_strokes", "draw_dots", "reshape_strokes", "add_text",
-                                     "edit_text", "transform_selection", "render_sketch", "add_arrow", "reshape_arrow"]
+                                     "edit_text", "transform_selection", "render_sketch", "add_arrow", "reshape_arrow", "batch"]
         let rendering = Set(MCPAdapter.toolDefinitions
             .filter { ToolReference.section(for: $0).contains("Each item of") }
             .map(\.name))

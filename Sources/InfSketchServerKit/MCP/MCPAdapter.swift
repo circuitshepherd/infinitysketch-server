@@ -356,7 +356,7 @@ public actor MCPAdapter {
             ])
 
         case .docSummary(let docId):
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             let summary: DocJSON.DocSummary
@@ -372,7 +372,7 @@ public actor MCPAdapter {
             ])
 
         case .docRaw(let docId):
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             return ReadResource.Result(contents: [
@@ -385,7 +385,7 @@ public actor MCPAdapter {
                     .binary(frame.png, uri: uri, mimeType: "image/png")
                 ])
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId),
+            guard let bytes = await documentBytes(docId: docId),
                   let thumbnail = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
             else {
                 throw MCPError.invalidParams("No frame or thumbnail available for document: \(docId)")
@@ -3754,6 +3754,58 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "batch",
+            description: """
+                Several writes to ONE document as ONE edit: each op is an ordinary tool call \
+                (`{tool, arguments}`), run in order on a working copy of the document, and the \
+                result is written once. The user's canvas changes once, the user gets ONE undo \
+                step for the lot (as does undo_last_edit), and there is one `seq`. Use it for \
+                anything made of many elements — a chart, a circuit, clearing a section and \
+                drawing it again — instead of hundreds of single calls.
+
+                ATOMIC: if any op fails, NOTHING is written and the error names the op. An op \
+                sees what the ops before it did, so you can add a text and list_texts after it, or \
+                tag what an earlier op created (by an id you gave it a tag for; replies arrive \
+                only at the end). Each op's `arguments` are the tool's own; leave `docId` out (it \
+                is this batch's document; `target` for copy_elements, whose `source` may be any \
+                document). Tools a batch takes: \(batchableTools.sorted().joined(separator: ", ")). \
+                Not the live-selection tools, not render_sketch, and nothing that creates, \
+                replaces or deletes a document.
+
+                A batch is ONE request: it has to finish within your client's timeout. An op that \
+                needs a device costs a round trip (roughly a tenth of a second), so keep a batch \
+                to a few hundred ops at most (limit \(maxBatchOps)). If the document changes \
+                while the batch runs — the user draws — the batch is run once more on the new \
+                document by itself; if it changes again, docChangedDuringOp and nothing is written.
+
+                REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in \
+                order: the op's own reply, as a JSON value when the tool answers in JSON and as \
+                its text otherwise. A batch whose ops changed nothing has `unchanged: true` and \
+                no `seq`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) every op works on."]),
+                    "ops": .object([
+                        "type": "array",
+                        "description": "The tool calls, in the order they are applied.",
+                        "minItems": 1,
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "tool": .object(["type": "string", "description": "A tool name, e.g. add_arrow."]),
+                                "arguments": .object(["type": "object", "description": "That tool's arguments, without docId."]),
+                            ]),
+                            "required": .array(["tool"].map(Value.string)),
+                            "additionalProperties": .bool(false),
+                        ]),
+                    ]),
+                ]),
+                "required": .array(["docId", "ops"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "fetch_doc",
             description: """
                 Ensures a document's content is available on the server, pulling it from a device \
@@ -4229,6 +4281,7 @@ public actor MCPAdapter {
         case "reorder_elements": return await callReorderElements(arguments)
         case "set_layer": return await callSetLayer(arguments)
         case "fetch_doc": return await callFetchDoc(arguments)
+        case "batch": return await callBatch(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -4260,7 +4313,7 @@ public actor MCPAdapter {
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let newId = UUID()
@@ -4297,7 +4350,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4446,7 +4499,7 @@ public actor MCPAdapter {
             let height = try Self.optionalDoubleArg(arguments, "canvasHeight")
             let opacity = try Self.optionalDoubleArg(arguments, "opacity")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4533,7 +4586,7 @@ public actor MCPAdapter {
         let replacesText = given("text"), moves = given("canvasX") || given("canvasY")
         if replacesText || moves,
            case .string(let docId)? = arguments?["docId"], case .string(let textId)? = arguments?["textId"],
-           let bytes = await manager.currentBytesOrFetch(docId: docId) {
+           let bytes = await documentBytes(docId: docId) {
             if replacesText, DocJSON.textHasAnchor(in: bytes, textId: textId) {
                 return await callEditTextStyled(arguments)
             }
@@ -4557,7 +4610,7 @@ public actor MCPAdapter {
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             var read = prefetched
-            if read == nil { read = await manager.currentBytesOrFetch(docId: docId) }
+            if read == nil { read = await documentBytes(docId: docId) }
             guard let bytes = read else {
                 return Self.errorResult("unknownDoc")
             }
@@ -4590,7 +4643,7 @@ public actor MCPAdapter {
             let textId = try Self.stringArg(arguments, "textId")
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4649,7 +4702,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4686,7 +4739,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4712,7 +4765,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let arrowId = try Self.nonEmptyStringArg(arguments, "arrowId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4751,7 +4804,7 @@ public actor MCPAdapter {
             _ = try Self.doubleArg(arguments, "canvasX")
             _ = try Self.doubleArg(arguments, "canvasY")
             if let refusal = Self.formulaSourceRefusal(latex) { return Self.errorResult(refusal) }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
@@ -4783,7 +4836,7 @@ public actor MCPAdapter {
                let refusal = Self.formulaSourceRefusal(latex) {
                 return Self.errorResult(refusal)
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("editFormula")]
@@ -4843,7 +4896,7 @@ public actor MCPAdapter {
     private func callListFormulas(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let spec: Data
@@ -4870,7 +4923,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let formulaId = try Self.nonEmptyStringArg(arguments, "id")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4928,7 +4981,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let imageId = try Self.stringArg(arguments, "imageId")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4959,7 +5012,7 @@ public actor MCPAdapter {
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
             let pinned = try Self.requiredBoolArg(arguments, "pinned")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4994,7 +5047,7 @@ public actor MCPAdapter {
             guard light != nil || dark != nil || transparent != nil else {
                 return Self.errorResult("invalidArguments")
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -5161,7 +5214,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let strokes = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5281,7 +5334,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5324,7 +5377,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5370,7 +5423,7 @@ public actor MCPAdapter {
     private func callListArrows(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let spec: Data
@@ -5400,7 +5453,7 @@ public actor MCPAdapter {
     private func callArrowPresetOp(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
@@ -5503,7 +5556,7 @@ public actor MCPAdapter {
     private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
@@ -5561,7 +5614,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5603,7 +5656,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5652,7 +5705,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5694,7 +5747,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5749,7 +5802,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5799,7 +5852,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5843,7 +5896,7 @@ public actor MCPAdapter {
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5898,7 +5951,7 @@ public actor MCPAdapter {
                 return Self.errorResult("missingArgument: orderedIds")
             }
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5956,7 +6009,7 @@ public actor MCPAdapter {
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
             guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var reorderEnvelope: [String: Value] = [
                 "op": .string("reorderElements"),
@@ -6008,7 +6061,7 @@ public actor MCPAdapter {
             let layer = try Self.stringArg(arguments, "layer")
             guard !ids.isEmpty else { return Self.errorResult("invalidArguments: ids must name at least one element") }
             guard layer == "front" || layer == "back" else { return Self.errorResult("invalidArguments: layer must be front or back") }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
@@ -6073,7 +6126,7 @@ public actor MCPAdapter {
             // caller mistake worth naming rather than a silent no-op.
             if tags.isEmpty && mode != "replace" { return Self.errorResult("invalidArgument: tags") }
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
@@ -6150,7 +6203,7 @@ public actor MCPAdapter {
             if let listKey {
                 fields[listKey] = .array(try Self.nonEmptyStringArrayArg(arguments, listKey).map(Value.string))
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(fields)) }
             catch { return Self.errorResult("invalidArguments") }
@@ -6174,6 +6227,212 @@ public actor MCPAdapter {
         }
     }
 
+    // MARK: - batch
+    //
+    // Several tool calls on ONE working copy, written once (improvement note S1, 2026-11-22: a
+    // sheet was hundreds of single calls, each its own undo step and its own change on the canvas
+    // the user was watching). It reuses every tool's own handler: a handler reads the document
+    // through `documentBytes` and writes through `submitAndRespond`, and while `activeBatch` is
+    // set both go to the batch's working copy instead of the session. No device op and no wire
+    // message knows about batches.
+    //
+    // (Placed here, between two handlers that relay nothing after it: `scripts/audit-tool-arguments`
+    // reads every `Self.<list>` that follows an op's envelope as keys that op sends.)
+
+    /// The document a running `batch` is building. Read and written only by the batch's own task
+    /// (`@TaskLocal`), on this actor.
+    final class BatchContext: @unchecked Sendable {
+        let docId: String
+        /// The working copy: the document as the ops so far have left it.
+        var bytes: Data
+        /// The reply of the op that just ran, waiting for the batch's seq; nil when it wrote nothing.
+        var pendingReply: ((Int) -> String)?
+        var wrote = false
+
+        init(docId: String, bytes: Data) {
+            self.docId = docId
+            self.bytes = bytes
+        }
+
+        func take(docId: String, bytes: Data, expectation: WriteExpectation,
+                  successText: @escaping (Int) -> String) -> CallTool.Result {
+            guard docId == self.docId else {
+                return MCPAdapter.errorResult("invalidArguments: a batch writes only its own document (\(self.docId)), not \(docId)")
+            }
+            // Every batchable tool guards its write by the bytes it read, and it read this copy.
+            guard case .matchBytes(let expected) = expectation, expected == self.bytes else {
+                return MCPAdapter.errorResult("internalError: a batched op did not write the copy it read")
+            }
+            self.bytes = bytes
+            pendingReply = successText
+            wrote = true
+            return MCPAdapter.textResult("")
+        }
+    }
+
+    @TaskLocal private static var activeBatch: BatchContext?
+
+    /// The bytes a tool works on: the document's current ones — or, inside a `batch` on that
+    /// document, the batch's working copy. EVERY tool handler reads through here.
+    private func documentBytes(docId: String) async -> Data? {
+        if let batch = Self.activeBatch, batch.docId == docId { return batch.bytes }
+        return await manager.currentBytesOrFetch(docId: docId)
+    }
+
+    static let maxBatchOps = 400
+
+    /// What may run inside a batch: the tools that work on a document's BYTES — every write of
+    /// that kind, and the reads an op sequence needs between them. A tool is batchable only if it
+    /// reads through `documentBytes` and writes through `submitAndRespond`, which every tool
+    /// below does; the live-selection tools act on a device's own session instead, and the
+    /// document-level tools (create, replace, delete, merge, undo) are not edits of one copy.
+    static let batchableTools: Set<String> = [
+        "add_text", "edit_text", "remove_text", "add_image", "remove_image",
+        "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
+        "add_formula", "edit_formula", "remove_formula",
+        "draw_strokes", "draw_dots", "fill_region", "delete_strokes",
+        "transform_strokes", "restyle_strokes", "reshape_strokes", "restore_stroke_widths",
+        "transform_elements", "reset_element_transforms", "reorder_elements", "set_layer", "set_pinned",
+        "tag_elements", "copy_elements",
+        "add_grid", "update_grid", "remove_grid", "reorder_grids", "set_grid_origin", "set_paper",
+        // reads
+        "list_strokes", "get_strokes", "list_texts", "list_images", "list_arrows", "list_formulas",
+        "list_grids", "find_elements", "list_tags", "snap_points",
+    ]
+
+    private struct BatchOp {
+        let tool: String
+        var arguments: [String: Value]
+    }
+
+    private func callBatch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let rawOps = arguments?["ops"] else { throw ArgumentError.missing("ops") }
+            guard case .array(let items) = rawOps, !items.isEmpty else {
+                return Self.errorResult("invalidArgument: ops must be a non-empty array of {tool, arguments}")
+            }
+            guard items.count <= Self.maxBatchOps else {
+                return Self.errorResult("invalidArgument: ops has \(items.count) entries, a batch takes at most \(Self.maxBatchOps) — split it")
+            }
+
+            // Every op's SHAPE is checked before any runs: a misspelt argument in op 180 should
+            // not cost 179 device round trips.
+            var ops: [BatchOp] = []
+            for (index, item) in items.enumerated() {
+                guard case .object(let fields) = item, case .string(let tool)? = fields["tool"] else {
+                    return Self.errorResult("invalidArgument: ops[\(index)] must be {tool, arguments}")
+                }
+                if let extra = fields.keys.sorted().first(where: { $0 != "tool" && $0 != "arguments" }) {
+                    return Self.errorResult("invalidArgument: ops[\(index)].\(extra) — an op is {tool, arguments}")
+                }
+                guard Self.batchableTools.contains(tool) else {
+                    return Self.errorResult("invalidArgument: ops[\(index)].tool \"\(tool)\" cannot run in a batch — a batch takes "
+                                            + Self.batchableTools.sorted().joined(separator: ", "))
+                }
+                var opArguments: [String: Value] = [:]
+                switch fields["arguments"] {
+                case nil, .null?: break
+                case .object(let given)?: opArguments = given
+                default: return Self.errorResult("invalidArgument: ops[\(index)].arguments must be an object")
+                }
+                // The document is the batch's. One an op names itself must be the same one.
+                let documentKey = tool == "copy_elements" ? "target" : "docId"
+                if case .string(let given)? = opArguments[documentKey] {
+                    guard case .id(docId) = await manager.resolveDocRef(given) else {
+                        return Self.errorResult("invalidArgument: ops[\(index)].\(documentKey) names another document — "
+                                                + "every op of a batch works on the batch's docId; leave it out")
+                    }
+                }
+                opArguments[documentKey] = .string(docId)
+                if let refusal = Self.enforceKnownArguments(name: tool, arguments: opArguments) {
+                    return Self.errorResult("ops[\(index)]: " + Self.text(of: refusal))
+                }
+                ops.append(BatchOp(tool: tool, arguments: opArguments))
+            }
+
+            // Run, write once. A document that changed meanwhile (the user drew) refuses the
+            // write; the ops are then run ONCE more on the new document — they are functions of
+            // the bytes they are given, and nothing of the first run was written or reported.
+            for attempt in 0..<2 {
+                guard let original = await manager.currentBytesOrFetch(docId: docId) else {
+                    return Self.errorResult("unknownDoc")
+                }
+                let context = BatchContext(docId: docId, bytes: original)
+                var replies: [(text: String, pending: ((Int) -> String)?)] = []
+                for (index, op) in ops.enumerated() {
+                    let (resolved, unresolved, refusal) = await resolvingDocRefs(op.arguments)
+                    if let refusal { return Self.batchFailure(index, op.tool, refusal) }
+                    context.pendingReply = nil
+                    let result = try await Self.$activeBatch.withValue(context) {
+                        try await dispatchCallTool(name: op.tool, arguments: resolved, unresolvedKeys: unresolved)
+                    }
+                    if result.isError == true {
+                        let explained = await enrichedError(result, tool: op.tool, arguments: resolved)
+                        return Self.batchFailure(index, op.tool, explained)
+                    }
+                    replies.append((Self.text(of: result), context.pendingReply))
+                }
+
+                func reply(seq: Int?) -> String {
+                    var object: [String: Any] = ["results": replies.map { entry -> Any in
+                        // An op that wrote, in a batch that as a whole changed nothing (an add
+                        // and its removal): there is no seq to quote in its reply.
+                        let text = entry.pending.map { pending in
+                            seq.map(pending) ?? "applied — the batch as a whole changed nothing"
+                        } ?? entry.text
+                        // A tool that answers in JSON is embedded as JSON, not as a string of it.
+                        if let data = text.data(using: .utf8),
+                           let json = try? JSONSerialization.jsonObject(with: data),
+                           json is [String: Any] || json is [Any] { return json }
+                        return text
+                    }]
+                    if let seq { object["seq"] = seq } else { object["unchanged"] = true }
+                    return Self.jsonText(object)
+                }
+
+                guard context.wrote, context.bytes != original else {
+                    return Self.textResult(reply(seq: nil))
+                }
+                let payload = OpPayload(type: "fullDoc", data: context.bytes)
+                switch await manager.submitOpeningSession(
+                    docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)", payload: payload,
+                    expectation: .matchBytes(original)
+                ) {
+                case .accepted(let seq):
+                    // ONE entry: `undo_last_edit` takes the whole batch back, as the user's undo does.
+                    await history.record(docId: docId, before: original, after: context.bytes)
+                    return Self.textResult(reply(seq: seq))
+                case .rejected(let message):
+                    guard case .reject(_, _, let reason, _) = message else {
+                        return Self.errorResult("unexpectedServerResponse")
+                    }
+                    if reason == "docChangedDuringOp", attempt == 0 { continue }
+                    return Self.errorResult("\(reason) — the batch wrote NOTHING"
+                                            + (reason == "docChangedDuringOp" ? " (the document changed twice while it ran); send it again" : ""))
+                }
+            }
+            return Self.errorResult("docChangedDuringOp — the batch wrote NOTHING; send it again")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// The first text of a result — a tool's reply or its error reason.
+    private static func text(of result: CallTool.Result) -> String {
+        for content in result.content {
+            if case .text(let text, _, _) = content { return text }
+        }
+        return ""
+    }
+
+    /// A batch that stopped at op `index`: which op, its own reason, and that nothing was written.
+    private static func batchFailure(_ index: Int, _ tool: String, _ result: CallTool.Result) -> CallTool.Result {
+        errorResult("batchFailed: ops[\(index)] (\(tool)) — \(text(of: result)) — the batch wrote NOTHING")
+    }
+
     /// M2c-3: the explicit counterpart to every content tool's transparent
     /// `currentBytesOrFetch` auto-fetch — this tool exists ONLY so an agent
     /// can distinguish and control the outcome the transparent tools don't
@@ -6186,7 +6445,7 @@ public actor MCPAdapter {
             if let resident = await manager.currentBytes(docId: docId) {
                 return Self.textResult("already available (\(resident.count) bytes): \(docId)")
             }
-            if let bytes = await manager.currentBytesOrFetch(docId: docId) {
+            if let bytes = await documentBytes(docId: docId) {
                 return Self.textResult("fetched \(docId) (\(bytes.count) bytes)")
             }
             // Nothing resident and the fetch returned nil: known-but-unreachable vs truly unknown.
@@ -6219,7 +6478,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let writeToFile = try Self.boolArg(arguments, "writeToFile", default: false)
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6423,7 +6682,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6479,7 +6738,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6532,7 +6791,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6650,7 +6909,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6714,7 +6973,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6821,7 +7080,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let items = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6896,7 +7155,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6939,7 +7198,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6984,7 +7243,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7084,7 +7343,7 @@ public actor MCPAdapter {
     /// Shared relay for the live-selection ops: encode the envelope, hand it to the device's
     /// `controlSelection` bridge, and pass its selection descriptor straight back.
     private func callSelectionOp(docId: String, envelope: [String: Value]) async -> CallTool.Result {
-        guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+        guard let docBytes = await documentBytes(docId: docId) else {
             return Self.errorResult("unknownDoc")
         }
         let spec: Data
@@ -7115,7 +7374,7 @@ public actor MCPAdapter {
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds")
             let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7184,7 +7443,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments: x and y are required")
             }
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7221,7 +7480,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7271,7 +7530,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let include = try Self.optionalStringArg(arguments, "include")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7332,7 +7591,7 @@ public actor MCPAdapter {
             let ops = try Self.optionalValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7412,10 +7671,10 @@ public actor MCPAdapter {
             }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
 
-            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else {
+            guard let sourceBytes = await documentBytes(docId: source) else {
                 return Self.errorResult("sourceNotFound")
             }
-            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else {
+            guard let targetBytes = await documentBytes(docId: target) else {
                 return Self.errorResult("targetNotFound")
             }
             if let into {
@@ -7504,13 +7763,13 @@ public actor MCPAdapter {
             guard (baseDocId == nil) != (basePath == nil) else {
                 return Self.errorResult("invalidArguments: give exactly one of baseDocId and basePath")
             }
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let baseBytes: Data
             if let baseDocId {
                 guard !unresolvedKeys.contains("baseDocId"),
-                      let bytes = await manager.currentBytesOrFetch(docId: baseDocId) else {
+                      let bytes = await documentBytes(docId: baseDocId) else {
                     return Self.errorResult("baseNotFound: no document \"\(baseDocId)\"")
                 }
                 baseBytes = bytes
@@ -7584,8 +7843,8 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments: name at least one of strokeIds, textIds, imageIds, arrowIds, formulaIds")
             }
 
-            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
-            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
+            guard let sourceBytes = await documentBytes(docId: source) else { return Self.errorResult("sourceNotFound") }
+            guard let targetBytes = await documentBytes(docId: target) else { return Self.errorResult("targetNotFound") }
 
             let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var copyEnvelope: [String: Value] = [
@@ -7751,7 +8010,7 @@ public actor MCPAdapter {
     /// (Task 3) — see `callCreateDoc`/`callReplaceDoc` above.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectedBytes: Data?, successText: (Int) -> String
+        expectedBytes: Data?, successText: @escaping (Int) -> String
     ) async -> CallTool.Result {
         await submitAndRespond(
             docId: docId, createIfMissing: createIfMissing, fullDoc: bytes,
@@ -7773,8 +8032,13 @@ public actor MCPAdapter {
     /// free. It does, at the cost of the primary behaviour, so it does not.)
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectation: WriteExpectation, recordForUndo: Bool = true, successText: (Int) -> String
+        expectation: WriteExpectation, recordForUndo: Bool = true, successText: @escaping (Int) -> String
     ) async -> CallTool.Result {
+        // Inside a `batch` nothing is written here: the op's result becomes the batch's working
+        // copy, and its reply is made when the batch's ONE write has its seq.
+        if let batch = Self.activeBatch {
+            return batch.take(docId: docId, bytes: bytes, expectation: expectation, successText: successText)
+        }
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
         switch await manager.submitOpeningSession(
@@ -7804,7 +8068,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let steps = try Self.optionalIntArg(arguments, "steps") ?? 1
             guard steps >= 1 else { return Self.errorResult("invalidArguments") }
-            guard await manager.currentBytesOrFetch(docId: docId) != nil else {
+            guard await documentBytes(docId: docId) != nil else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7831,7 +8095,7 @@ public actor MCPAdapter {
                 guard !entry.isLiveSelectionChange else {
                     return failed(Self.errorResult(Self.lastEditWasLiveSelectionReason))
                 }
-                guard let current = await manager.currentBytesOrFetch(docId: docId) else {
+                guard let current = await documentBytes(docId: docId) else {
                     return failed(Self.errorResult("unknownDoc"))
                 }
 
@@ -7946,7 +8210,7 @@ public actor MCPAdapter {
     private func callTransformElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
@@ -8001,7 +8265,7 @@ public actor MCPAdapter {
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
             guard !textIds.isEmpty || !imageIds.isEmpty || !formulaIds.isEmpty else { return Self.errorResult("missingArgument") }
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var resetEnvelope: [String: Value] = [
@@ -8062,7 +8326,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let dots = try Self.nonEmptyValueArrayArg(arguments, "dots")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("drawDots"), "dots": .array(dots)]
@@ -8122,7 +8386,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = [

@@ -806,9 +806,9 @@ actor FakeStrokeOpDevice {
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
     /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
     /// `listToolsContainsAllFiftyNineTools`. The formula tools (2026-11-19) added four, renaming
-    /// this from `listToolsContainsAllSixtySixTools`. `diff_docs` (2026-11-22) added one,
-    /// renaming this from `listToolsContainsAllSeventyTools`.
-    @Test func listToolsContainsAllSeventyOneTools() async throws {
+    /// this from `listToolsContainsAllSixtySixTools`. `diff_docs` and `batch` (2026-11-22) added
+    /// two, renaming this from `listToolsContainsAllSeventyTools`.
+    @Test func listToolsContainsAllSeventyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -828,7 +828,7 @@ actor FakeStrokeOpDevice {
             "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements", "diff_docs",
+            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements", "diff_docs", "batch",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
             "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
@@ -1360,6 +1360,157 @@ actor FakeStrokeOpDevice {
             arguments: ["docId": "d", "textId": .string(id), "text": "after"])
         #expect(isError != true)
         #expect(await device.receivedRequests.isEmpty, "plain edit_text must not relay to any device")
+
+        await server.stop()
+    }
+
+    // MARK: - batch
+
+    /// The document's texts, read back through the summary resource's own parser.
+    private func texts(of client: Client, _ docId: String) async throws -> [DocJSON.TextSummary] {
+        let raw = try await client.readResource(uri: "infsketch://doc/\(docId)/raw")
+        let blob = try #require(raw[0].blob)
+        let bytes = try #require(Data(base64Encoded: blob))
+        return try DocJSON.summary(from: bytes).texts
+    }
+
+    /// Several writes land as ONE write: one seq, every op's reply in order, and one
+    /// `undo_last_edit` takes the whole batch back.
+    @Test func aBatchWritesOnceAndIsOneUndoStep() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // One ordinary write first, to know what a single write's seq is.
+        let (first, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "before", "canvasX": 0, "canvasY": 0])
+        let seqBefore = try #require(Int(toolResultText(first).components(separatedBy: "at seq ").last ?? ""))
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "one", "canvasX": 10, "canvasY": 20]],
+                ["tool": "add_text", "arguments": ["text": "two", "canvasX": 30, "canvasY": 40]],
+                ["tool": "set_paper", "arguments": ["light": "#FFEEDD"]],
+            ]])
+        #expect(isError != true, "\(toolResultText(content))")
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        #expect(reply["seq"] as? Int == seqBefore + 1, "three ops, ONE write")
+        let results = try #require(reply["results"] as? [String])
+        #expect(results.count == 3)
+        #expect(results[0].hasPrefix("added ") && results[0].hasSuffix("at seq \(seqBefore + 1)"))
+        #expect(results[2].contains("set paper"))
+
+        let after = try await texts(of: client, "d")
+        #expect(after.map(\.text) == ["before", "one", "two"])
+        // The reply's ids are the ones in the document.
+        let idOfOne = String(results[0].split(separator: " ")[1])
+        #expect(after[1].id == idOfOne)
+
+        let (undone, undoError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(undoError != true, "\(toolResultText(undone))")
+        #expect(try await texts(of: client, "d").map(\.text) == ["before"], "one undo takes the whole batch back")
+
+        await server.stop()
+    }
+
+    /// An op that fails stops the batch and NOTHING is written — not even the ops before it.
+    @Test func aFailingOpWritesNothingAndIsNamed() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "one", "canvasX": 10, "canvasY": 20]],
+                ["tool": "edit_text", "arguments": ["textId": "no-such-text", "text": "x"]],
+                ["tool": "add_text", "arguments": ["text": "three", "canvasX": 10, "canvasY": 20]],
+            ]])
+        #expect(isError == true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("batchFailed: ops[1] (edit_text) — textNotFound"), "\(text)")
+        #expect(text.contains("wrote NOTHING"))
+        #expect(try await texts(of: client, "d").isEmpty)
+
+        await server.stop()
+    }
+
+    /// What a batch refuses before any op runs: a tool that does not work on bytes, an op aimed at
+    /// another document, an argument its tool does not know, and a malformed op.
+    @Test func aBatchChecksEveryOpBeforeAnyRuns() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "other", bytes: Fixtures.docBytes)
+        let good: Value = ["tool": "add_text", "arguments": ["text": "one", "canvasX": 1, "canvasY": 2]]
+
+        func refusal(_ ops: [Value]) async throws -> String {
+            let (content, isError) = try await client.callTool(name: "batch", arguments: ["docId": "d", "ops": .array(ops)])
+            #expect(isError == true)
+            return toolResultText(content)
+        }
+        #expect(try await refusal([good, ["tool": "delete_doc", "arguments": [:]]]).hasPrefix(#"invalidArgument: ops[1].tool "delete_doc" cannot run in a batch"#))
+        #expect(try await refusal([good, ["tool": "transform_selection", "arguments": [:]]]).contains("cannot run in a batch"))
+        #expect(try await refusal([good, ["tool": "add_text", "arguments": ["docId": "other", "text": "x", "canvasX": 1, "canvasY": 2]]])
+            .hasPrefix("invalidArgument: ops[1].docId names another document"))
+        #expect(try await refusal([good, ["tool": "add_text", "arguments": ["text": "x", "canvasX": 1, "canvasY": 2, "colour": "#FF0000"]]])
+            .hasPrefix("ops[1]: invalidArgument: colour"))
+        #expect(try await refusal([good, ["arguments": [:]]]).hasPrefix("invalidArgument: ops[1] must be"))
+        #expect(try await refusal([]).hasPrefix("invalidArgument: ops must be a non-empty array"))
+        #expect(try await texts(of: client, "d").isEmpty, "none of the refused batches wrote its first op")
+
+        // An op may name the batch's own document; it is the same document.
+        let (same, sameError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d", "ops": [["tool": "add_text", "arguments": ["docId": "d", "text": "x", "canvasX": 1, "canvasY": 2]]]])
+        #expect(sameError != true, "\(toolResultText(same))")
+
+        await server.stop()
+    }
+
+    /// An op that needs a device is handed the batch's WORKING copy — what the ops before it left
+    /// — and what the device returns is what the next op and the one write build on.
+    @Test func aDeviceOpInABatchWorksOnWhatTheOpsBeforeItLeft() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let fromDevice = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"device"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: fromDevice, meta: Data(#"{"arrowId":"A1"}"#.utf8)), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "label", "canvasX": 10, "canvasY": 20]],
+                ["tool": "add_arrow", "arguments": ["canvasPoints": [[0, 0], [10, 0]]]],
+                ["tool": "add_text", "arguments": ["text": "after", "canvasX": 1, "canvasY": 2]],
+            ]])
+        #expect(isError != true, "\(toolResultText(content))")
+
+        let request = try #require(await device.receivedRequests.first)
+        #expect(try DocJSON.summary(from: request.docBytes).texts.map(\.text) == ["label"],
+                "the device was handed the copy with op 0 applied, which is not yet on the server")
+        #expect(await device.receivedRequests.count == 1)
+
+        let raw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let blob = try #require(raw[0].blob)
+        let stored = try #require(Data(base64Encoded: blob))
+        let object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["marker"] as? String == "device", "op 2 built on what the device returned")
+        #expect(try DocJSON.summary(from: stored).texts.map(\.text) == ["after"])
+
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let results = try #require(reply["results"] as? [String])
+        #expect(results[1].contains("arrowId: A1"))
 
         await server.stop()
     }

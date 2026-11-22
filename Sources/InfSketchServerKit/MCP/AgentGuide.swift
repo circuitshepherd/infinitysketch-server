@@ -242,6 +242,9 @@ enum AgentGuide {
       Reading `candidates[0]` puts your work between the drawn lines.
     - **The user can undo you** — one step per tool call — so an id you obtained earlier may be \
       gone. Re-read rather than caching.
+    - **Many elements, one edit: `batch`.** A chart or a circuit is dozens of tool calls; sent \
+      one by one each is its own undo step for the user and its own change on the canvas they \
+      are watching. `batch` runs them on one working copy and writes once — all or nothing.
     - **Bytes are not content.** A device that only opens a document rewrites its thumbnail, \
       viewport and appearance, so the raw bytes change when nobody edited anything. To learn \
       whether — and what — a user changed, keep a copy when you finish and call `diff_docs` \
