@@ -559,9 +559,9 @@ public actor MCPAdapter {
                 Which point of the box `canvasX` / `canvasY` name: {row: "top"|"middle"|"bottom"| \
                 "baseline", column: "left"|"center"|"right"} — {row: "top", column: "center"} \
                 centers the box under the point, {row: "middle", column: "right"} ends it there. \
-                `baseline` is the first line's baseline. Default: \(defaultPoint). The box is \
-                the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` \
-                capability.
+                `baseline` is a point ON the first line's baseline (its left end, middle or \
+                right end). Default: \(defaultPoint). The box is the one the listing reports as \
+                `canvasBounds`. Needs a device with the `placeBy` capability.
                 """,
             "properties": .object([
                 "row": .object(["type": "string", "enum": .array(["top", "middle", "bottom", "baseline"].map(Value.string))]),
@@ -3807,7 +3807,8 @@ public actor MCPAdapter {
                 needs a device costs a round trip (roughly a tenth of a second), so keep a batch \
                 to a few hundred ops at most (limit \(maxBatchOps)). If the document changes \
                 while the batch runs — the user draws — the batch is run once more on the new \
-                document by itself; if it changes again, docChangedDuringOp and nothing is written.
+                document by itself; if it changes again, docChangedDuringOp and nothing is written. \
+                A batch you cancel stops at its next op and writes nothing.
 
                 REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in \
                 order. A WRITE's entry is an object: `message` (its reply's first line), `seq`, \
@@ -4393,6 +4394,9 @@ public actor MCPAdapter {
                     envelope[key] = value
                 }
             }
+            // Beside `placeBy` the device is told a said `inlineMath` too, so that it places the
+            // box the text will be SHOWN with (see `callEditTextStyled`).
+            if envelope["placeBy"] != nil, let inlineMath { envelope["inlineMath"] = .bool(inlineMath) }
 
             let spec: Data
             do {
@@ -4413,7 +4417,6 @@ public actor MCPAdapter {
 
             let meta = out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
             let newId = meta?["id"]
-            let bounds = meta?["canvasBounds"]
             // A said `inlineMath` is written by the server on the device's bytes (B2); an omitted
             // one is the device's: it gives a new text the document's default itself.
             var fullDoc = out.bytes
@@ -4426,6 +4429,9 @@ public actor MCPAdapter {
                 }
             }
 
+            // The box the device measured — unless the server then switched formulas on or off,
+            // which gives the text another box than the one that was measured.
+            let bounds = fullDoc == out.bytes ? meta?["canvasBounds"] : nil
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
@@ -4686,6 +4692,18 @@ public actor MCPAdapter {
                     envelope[key] = value
                 }
             }
+            // A position for a text that carries a transform means "where it is SHOWN" only to an
+            // app that has `placeBy`; an older one writes the origin under the transform and
+            // answers success. So such an edit asks for that app, whether or not it names a point.
+            let moves = envelope["canvasX"] != nil || envelope["canvasY"] != nil
+            var capability = Self.textWriteCapability(arguments)
+            if moves, envelope["placeBy"] == nil, DocJSON.textIsTransformed(in: docBytes, textId: textId) {
+                capability += "+placeBy"
+            }
+            // Beside `placeBy` the device is told a said `inlineMath` too, so that it places the
+            // box the text will be SHOWN with (an app with `placeBy` reads the key; no other is
+            // ever sent it).
+            if envelope["placeBy"] != nil, let inlineMath { envelope["inlineMath"] = .bool(inlineMath) }
 
             let spec: Data
             do {
@@ -4697,7 +4715,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: Self.textWriteCapability(arguments))
+                    docId: docId, docBytes: docBytes, spec: spec, capability: capability)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -4714,7 +4732,10 @@ public actor MCPAdapter {
                 }
             }
 
-            let bounds = out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }?["canvasBounds"]
+            // The box the device measured — unless the server then switched formulas on or off,
+            // which gives the text another box than the one that was measured.
+            let bounds = fullDoc == out.bytes
+                ? out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }?["canvasBounds"] : nil
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
@@ -6394,6 +6415,10 @@ public actor MCPAdapter {
                 let context = BatchContext(docId: docId, bytes: original)
                 var replies: [(text: String, pending: ((Int) -> String)?)] = []
                 for (index, op) in ops.enumerated() {
+                    // The caller gave up (its timeout, a cancel): stop here. A device op does not
+                    // notice a cancel by itself, and a batch that ran on and wrote would be drawn
+                    // a second time by the caller that was told nothing.
+                    if Task.isCancelled { return Self.errorResult("cancelled — the batch wrote NOTHING") }
                     let (resolved, unresolved, refusal) = await resolvingDocRefs(op.arguments)
                     if let refusal { return Self.batchFailure(index, op.tool, refusal) }
                     context.pendingReply = nil
@@ -6434,6 +6459,7 @@ public actor MCPAdapter {
                 guard context.wrote, context.bytes != original else {
                     return reply(seq: nil)
                 }
+                if Task.isCancelled { return Self.errorResult("cancelled — the batch wrote NOTHING") }
                 let payload = OpPayload(type: "fullDoc", data: context.bytes)
                 switch await manager.submitOpeningSession(
                     docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)", payload: payload,
@@ -6459,6 +6485,8 @@ public actor MCPAdapter {
             return Self.errorResult("invalidArguments")
         }
     }
+
+    static let maxFillIdsReported = 16
 
     /// What a SOLID fill thinner than 3 points is told in its reply: such ink is not rendered
     /// flat in a small image, whatever the pass spacing. Measured 2026-11-22 on a 140 × 120 pen
@@ -8499,8 +8527,12 @@ public actor MCPAdapter {
             ) { seq in
                 var reply = created.map { "filled the region in \(docId) with \($0) stroke(s) at seq \(seq)" }
                     ?? "filled the region in \(docId) at seq \(seq)"
-                // The strokes it made, so the fill can be removed or restyled without a listing.
-                if let keys = fillMeta?.keys, !keys.isEmpty { reply += "\nids: " + keys.joined(separator: ", ") }
+                // The strokes it made, so the fill can be removed or restyled without a listing —
+                // while they are few: a solid fill is one stroke (a few for a concave shape), a
+                // hatch is one per line, up to thousands, and is found by its tags instead.
+                if let keys = fillMeta?.keys, !keys.isEmpty, keys.count <= Self.maxFillIdsReported {
+                    reply += "\nids: " + keys.joined(separator: ", ")
+                }
                 if let stored = fillMeta?.storedColors, !stored.isEmpty {
                     reply += "\nstoredColors: " + stored.joined(separator: ", ")
                 }
@@ -8634,12 +8666,23 @@ public actor MCPAdapter {
         // A reply that names its element only in its sentence ("added <id> at seq 3", "edited
         // <id> …", "removed arrow <id> …"): the TEXT stays as it is — a caller may be taking its
         // last word for the seq, as this repo's own tests did — and the id is read out of it.
+        // ONLY right after one of these verbs: a document's id is a UUID too, and most replies
+        // name the document ("set paper on <doc>", "added arrow to <doc>", "copied … from <doc>").
         if fields["id"] == nil, case .string(let message)? = fields["message"],
-           let id = message.split(separator: " ").first(where: { UUID(uuidString: String($0)) != nil }) {
-            fields["id"] = .string(String(id))
+           let verb = Self.elementNamingVerbs.first(where: { message.hasPrefix($0) }),
+           let word = message.dropFirst(verb.count).split(separator: " ").first,
+           UUID(uuidString: String(word)) != nil {
+            fields["id"] = .string(String(word))
         }
         return .object(fields)
     }
+
+    /// How a reply's sentence begins when the word after it is the ELEMENT it made or touched
+    /// (longest first: "removed arrow " before "removed ").
+    static let elementNamingVerbs = [
+        "removed arrow ", "removed formula ", "removed grid ", "updated grid ", "set origin of grid ",
+        "added ", "edited ", "removed ",
+    ]
 
     private static func structuredValue(key: String, raw: String) -> Value {
         if raw.hasPrefix("["), let data = raw.data(using: .utf8),

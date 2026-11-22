@@ -1419,6 +1419,18 @@ actor FakeStrokeOpDevice {
         let removed = try fields("removed arrow 11111111-2222-3333-4444-555555555555 at seq 7")
         #expect(removed["id"] == .string("11111111-2222-3333-4444-555555555555"))
 
+        // A DOCUMENT's id is a UUID too, and most replies name the document: that is never `id`.
+        // (The review found a dozen tools answering `id: <the document>`; the fixtures' documents
+        // are called "d", which is why no test saw it.)
+        let doc = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        for sentence in ["set paper on \(doc) at seq 7", "set pinned=true on 2 element(s) in \(doc) at seq 7",
+                         "transformed elements in \(doc) at seq 7", "filled the region in \(doc) with 1 stroke(s) at seq 7",
+                         "copied 2 element(s) from \(doc) into \(doc) at seq 7", "restyled arrows in \(doc) at seq 7",
+                         "added image to \(doc) at seq 7", "merged \(doc) into \(doc) at seq 7"] {
+            #expect(try fields(sentence)["id"] == nil, "\(sentence)")
+        }
+        #expect(try fields("added arrow to \(doc) at seq 7\narrowId: A1")["id"] == .string("A1"))
+
         let copy = try fields("copied 2 element(s) from S into T at seq 7\ncreatedArrowIds: a, b\ncreatedTextIds: c")
         #expect(copy["createdArrowIds"] == .array([.string("a"), .string("b")]))
         #expect(copy["createdTextIds"] == .array([.string("c")]))
@@ -1782,6 +1794,23 @@ actor FakeStrokeOpDevice {
         let addSpec = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
         #expect(addSpec["op"] as? String == "addText")
         #expect((addSpec["placeBy"] as? [String: String]) == ["row": "top", "column": "center"])
+        #expect(addSpec["inlineMath"] == nil, "not said, not sent")
+
+        // A said `inlineMath` goes to the device BESIDE `placeBy`, so that it places the box the
+        // text will be shown with; without `placeBy` it is the server's alone, as before.
+        _ = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 10, "canvasY": 20, "inlineMath": true,
+                        "placeBy": ["row": "top", "column": "center"]])
+        let mathRequest = try #require(await device.receivedRequests.last)
+        let mathSpec = try #require(JSONSerialization.jsonObject(with: mathRequest.spec) as? [String: Any])
+        #expect(mathSpec["inlineMath"] as? Bool == true)
+        _ = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 10, "canvasY": 20, "inlineMath": true, "color": "#FF0000"])
+        let styledRequest = try #require(await device.receivedRequests.last)
+        let styledSpec = try #require(JSONSerialization.jsonObject(with: styledRequest.spec) as? [String: Any])
+        #expect(styledSpec["inlineMath"] == nil)
 
         let (edited, editedError) = try await client.callTool(
             name: "edit_text",
@@ -1794,6 +1823,43 @@ actor FakeStrokeOpDevice {
         #expect(editSpec["op"] as? String == "editText")
         #expect(editSpec["canvasX"] as? Double == 30)
         #expect(editSpec["canvasY"] == nil)
+
+        await server.stop()
+    }
+
+    /// A position for a text that carries a transform means "where it is shown" only to an app
+    /// with `placeBy`: an older one writes the origin under the transform and answers success.
+    /// So a device-path edit that moves such a text asks for that app, also without `placeBy`.
+    @Test func aPositionForATransformedTextOnTheDevicePathNeedsAnAppThatPlaces() async throws {
+        func doc(transform: String) -> Data {
+            Data(#"{"aaa001_thumbnailData":"","placedTextsData":[{"id":"AAAAAAAA-0000-0000-0000-000000000001","text":["hi",{}],"rect":[[100,200],[1,1]],"transform":\#(transform),"opacity":1,"pinned":false,"wordWrapEnabled":false,"colorSchemeIsDark":false}]}"#.utf8)
+        }
+        let id = "AAAAAAAA-0000-0000-0000-000000000001"
+        let (server, port, task) = try await startServer(
+            seedDocId: "turned", bytes: doc(transform: #"{"a":0,"b":1,"c":-1,"d":0,"tx":5,"ty":7}"#))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "plain", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":0,"ty":0}"#))
+        try await seedDocDirectly(server, docId: "dragged", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":5,"ty":7}"#))
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        // Turned: refused for the older app, by the name of what it lacks.
+        let (turned, turnedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "turned", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(turnedError == true)
+        #expect(toolResultText(turned).contains("placeBy"), "\(toolResultText(turned))")
+        // A styled edit that also moves a DRAGGED text: the same.
+        let (dragged, draggedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "dragged", "textId": .string(id), "canvasX": 50, "canvasY": 60, "color": "#FF0000"])
+        #expect(draggedError == true)
+        #expect(toolResultText(dragged).contains("placeBy"))
+        #expect(await old.receivedRequests.isEmpty)
+        // An untransformed text is moved by the older app as it always was.
+        let (plain, plainError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "plain", "textId": .string(id), "canvasX": 50, "canvasY": 60, "color": "#FF0000"])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
 
         await server.stop()
     }
@@ -1812,7 +1878,7 @@ actor FakeStrokeOpDevice {
         defer { Task { await client.disconnect() } }
         try await seedDocDirectly(server, docId: "turned", bytes: doc(transform: #"{"a":0,"b":1,"c":-1,"d":0,"tx":5,"ty":7}"#))
         let device = try await FakeStrokeOpDevice(
-            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"device"}"#.utf8)), capabilities: ["authorText"])
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"device"}"#.utf8)), capabilities: ["authorText", "placeBy"])
         defer { Task { await device.close() } }
 
         let (_, draggedError) = try await client.callTool(

@@ -227,6 +227,17 @@ public enum DocJSON {
         return tx == 0 && ty == 0 ? .identity : .translation(tx: tx, ty: ty)
     }
 
+    /// Whether this text carries a transform at all — a drag's translation included. A position
+    /// for such a text is only placed where it is SHOWN by an app that has `placeBy`; an older
+    /// one writes the origin under the transform and answers success.
+    public static func textIsTransformed(in bytes: Data, textId: String) -> Bool {
+        guard let doc = try? parseDocument(bytes) else { return false }
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              let entry = elements[index] as? [String: Any] else { return false }
+        return transformKind(of: entry) != .identity
+    }
+
     /// Whether moving this text to a canvas position needs a device: it is turned, scaled or
     /// skewed, so where its corner is shown depends on its laid-out size. False for an unknown id
     /// (the edit itself answers `textNotFound`).
