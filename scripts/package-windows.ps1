@@ -93,7 +93,8 @@ $env:GIT_CONFIG_VALUE_0 = "false"
 
 if (-not $SkipBuild) {
     Write-Step "Building release"
-    swift build -c release --product infsketch-server
+    # See windows.yml: MSVC 14.52's STL refuses the toolchain's Clang 21 without this define.
+    swift build -c release --product infsketch-server -Xcc -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -Xcxx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
     if ($LASTEXITCODE -ne 0) { Fail "swift build failed" }
 } else {
     Write-Step "Skipping build (-SkipBuild)"
