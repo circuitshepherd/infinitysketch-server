@@ -76,8 +76,8 @@ import MCP
         }
         // A newer document is refused, as by every edit.
         let newer = Data(String(decoding: Self.document, as: UTF8.self)
-            .replacingOccurrences(of: "\"formatVersion\": 7", with: "\"formatVersion\": 8").utf8)
-        #expect(throws: DocJSON.DocJSONError.documentFormatNewer(file: 8)) {
+            .replacingOccurrences(of: "\"formatVersion\": 7", with: "\"formatVersion\": \(DocJSON.knownFormatVersion + 1)").utf8)
+        #expect(throws: DocJSON.DocJSONError.documentFormatNewer(file: DocJSON.knownFormatVersion + 1)) {
             _ = try DocJSON.removeFormula(from: newer, formulaId: Self.formula)
         }
     }
@@ -106,8 +106,10 @@ import MCP
         #expect(DocJSON.elementIds(.formula, in: Data("not json".utf8)).isEmpty)
     }
 
-    @Test func theFormatVersionStaysSeven() throws {
-        #expect(DocJSON.knownFormatVersion == 7)
+    /// An edit here never changes the version the document says (8 is the newest these edits
+    /// know: closed paths and filled shapes, 2026-11-23).
+    @Test func anEditKeepsTheDocumentsFormatVersion() throws {
+        #expect(DocJSON.knownFormatVersion == 8)
         let out = try DocJSON.removeFormula(from: Self.document, formulaId: Self.formula)
         #expect((try Self.object(out)["formatVersion"] as? NSNumber)?.intValue == 7)
     }
@@ -342,6 +344,46 @@ extension MCPAdapterTests {
         #expect(reply["unchanged"] as? Bool == true)
         #expect(reply["seq"] == nil, "nothing was written, so there is no seq to quote")
         #expect(try await raw(client, "d") == D.document)
+        await server.stop()
+    }
+
+    /// A formula's new place, and `placeBy`, are relayed only to a device that knows them
+    /// (`formulas+placeBy`): an app without it ignores the keys and answers an edit that moved
+    /// nothing. An edit or add without them still reaches a `formulas` device.
+    @Test func aFormulasPlaceGoesOnlyToADeviceThatPlaces() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                               capabilities: ["formulas"])
+        let (refused, refusedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "canvasX": 100])
+        #expect(refusedError == true)
+        #expect(text(refused).contains("placeBy"))
+        let (stillFine, stillFineError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "latex": "y"])
+        #expect(stillFineError != true, "\(text(stillFine))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                                  capabilities: ["formulas", "placeBy"])
+        defer { Task { await device.close() } }
+        let (moved, movedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "canvasX": 100, "canvasY": 200,
+            "placeBy": ["row": "middle", "column": "center"]])
+        #expect(movedError != true, "\(text(moved))")
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["canvasX"] as? Double == 100 && editSpec["canvasY"] as? Double == 200)
+        #expect((editSpec["placeBy"] as? [String: String]) == ["row": "middle", "column": "center"])
+
+        let (added, addedError) = try await client.callTool(name: "add_formula", arguments: [
+            "docId": "d", "latex": "x", "canvasX": 1, "canvasY": 2, "placeBy": ["row": "top", "column": "right"]])
+        #expect(addedError != true, "\(text(added))")
+        let addRequest = try #require(await device.receivedRequests.last)
+        let addSpec = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
+        #expect((addSpec["placeBy"] as? [String: String]) == ["row": "top", "column": "right"])
         await server.stop()
     }
 

@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-73 tools, served over streamable HTTP at `/mcp`.
+77 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -19,7 +19,7 @@ A `docId` is the document's id — stable across renames; `list_docs` reports it
 
 | Tool | Summary |
 |---|---|
-| [`list_docs`](#list_docs) | Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. |
+| [`list_docs`](#list_docs) | Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, hasContent, open}`, newest-modified first. |
 | [`list_open_docs`](#list_open_docs) | What is OPEN right now, and on what. |
 | [`create_doc`](#create_doc) | Creates a new document containing the InfinitySketch app's empty default content, authored by a connected InfinitySketch device. |
 | [`fetch_doc`](#fetch_doc) | Ensures a document's content is available on the server, pulling it from a device that holds it if the server has only its metadata (a "content on another device" doc — see the… |
@@ -77,6 +77,7 @@ Arrows have no transform: their `canvasPoints` are where they are, and moving on
 | [`list_arrows`](#list_arrows) | Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). |
 | [`list_arrow_presets`](#list_arrow_presets) | Lists the user's arrow style presets — app-wide on the connected device, in the order the user keeps them (built-ins: Line, Dashed line, Arrow, Double arrow, Open chevron,… |
 | [`add_arrow`](#add_arrow) | Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points —… |
+| [`add_shape`](#add_shape) | Places a closed shape as ONE object: a `rectangle` or `ellipse` (`canvasRect`), a `circle` (`canvasX`, `canvasY`, `radius`), a `polygon` (`canvasPoints`) or a solid `dot`… |
 | [`reshape_arrow`](#reshape_arrow) | Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. |
 | [`restyle_arrows`](#restyle_arrows) | Changes the style of named arrows — a `preset`, and/or any of `startHead`, `endHead`, `startAnchor`, `endAnchor`, `drawnWidth`, `headLength`, `headAngle`, `endHeadLength`,… |
 | [`remove_arrow`](#remove_arrow) | Removes an arrow from a document by id (from list_arrows). |
@@ -96,7 +97,7 @@ One LaTeX formula per object, written without `$` markers; mathematics inside a 
 |---|---|
 | [`list_formulas`](#list_formulas) | Lists a document's formula objects, one per formula — measured by a connected InfinitySketch device with the `formulas` capability, which typesets each one (noDeviceAvailable if… |
 | [`add_formula`](#add_formula) | Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. |
-| [`edit_formula`](#edit_formula) | Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together… |
+| [`edit_formula`](#edit_formula) | Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000), `color` (light-canonical; `colorAppearance` only together with… |
 | [`remove_formula`](#remove_formula) | Removes a formula object from a document by id (from list_formulas or add_formula). |
 
 ## Grids
@@ -115,7 +116,7 @@ One LaTeX formula per object, written without `$` markers; mathematics inside a 
 
 ## Elements
 
-Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools.
+Strokes, texts, images, arrows and formulas addressed by id, whatever their kind. Resolve a tag to ids with `find_elements`, then act with the id-taking tools. `batch` applies many tool calls to one document as one edit.
 
 | Tool | Summary |
 |---|---|
@@ -128,6 +129,7 @@ Strokes, texts, images, arrows and formulas addressed by id, whatever their kind
 | [`set_layer`](#set_layer) | Moves placed texts, images, arrows and formulas into the front object layer (above the strokes) or the back one (behind strokes and grids) — the app's Layer card. |
 | [`set_pinned`](#set_pinned) | Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas of a document. `ids` may mix their ids (as returned by… |
 | [`copy_elements`](#copy_elements) | Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by… |
+| [`batch`](#batch) | Several writes to ONE document as ONE edit: each op is an ordinary tool call (`{tool, arguments}`), run in order on a working copy of the document, and the result is written once. |
 
 ## Selection
 
@@ -149,12 +151,14 @@ These act on the LIVE rect-select session on a connected device, not on document
 
 ## Reading the canvas
 
-Read-only. `render_sketch` also renders ephemeral candidate strokes that are never written anywhere — synthesize, render, refine, then commit.
+Read-only. `render_sketch` also renders ephemeral candidate strokes that are never written anywhere — synthesize, render, refine, then commit. `diff_docs` says what differs from a copy you kept — what the user changed.
 
 | Tool | Summary |
 |---|---|
 | [`render_sketch`](#render_sketch) | Renders a region of a document, specific strokes, and/or ephemeral candidate strokes that are not written to the document — use it to preview a stroke before committing it with… |
+| [`export_sketch`](#export_sketch) | Renders a document for PUBLISHING and writes the PNG to a file: the paper without the grid, in the appearance you name, the content with a narrow margin. |
 | [`get_tool`](#get_tool) | Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, and when true `inkType`, `toolWidth`, `pickerDialWidth` and `color` (#RRGGBBAA). |
+| [`diff_docs`](#diff_docs) | What differs between a document and a BASE copy of it, element by element — read-only. |
 
 
 ---
@@ -163,17 +167,17 @@ Read-only. `render_sketch` also renders ephemeral candidate strokes that are nev
 
 ### `list_docs`
 
-Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are. `id` is the document; `name` is its label, which two documents may share. Every tool accepts the id, or the name when no other document has it.
+Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — every other tool takes one, and this is the tool that tells you what they are. `id` is the document; `name` is its label, which two documents may share. Every tool accepts the id, or the name when no other document has it.
 
-`open` means a device has it on screen right now, so your writes land live on the user's canvas; use list_open_docs when you want the device and capability detail as well. `hasContent: false` means the bytes live on a device rather than here — every content tool fetches those for you automatically, or call fetch_doc to pull one explicitly. An empty list means the server holds no documents at all.
+`open` means a device has it on screen right now, so your writes land live on the user's canvas; use list_open_docs when you want the device and capability detail as well. `hasContent: false` means the bytes live on a device rather than here — every content tool fetches those for you automatically, or call fetch_doc to pull one explicitly. An empty list means the server holds no documents at all. `createdAt` is when this server first stored the document — its creation, for one made through this server; it is ABSENT for a document the server held before it kept that record, and for one whose bytes live on a device. `modifiedAt` moves when a device merely opens the document (thumbnail, viewport): to learn whether its content changed, use diff_docs.
 
-REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest first.
+REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, createdAt?, hasContent, open}`, newest first.
 
 Takes no arguments.
 
 ### `list_open_docs`
 
-What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, name, seq, subscribers}]}` — `docId` is the document's id, `name` its label.
+What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities, kinds, preferredKind?}, openDocs: [{docId, name, seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" for an app that does not say) and `openOn` lists the kinds that have that document open. The SERVER picks the device for a call — one that has the document open is preferred, and `preferredKind`, present when the server was started with `--prefer-device`, names the kind that is given the work first; only render_sketch and export_sketch let you ask for a kind yourself (`device`). A write's structured reply says which kind did it (`device`).
 
 CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human says may be shared by several documents (a shared name is refused ambiguousName), or may be an older name the document no longer carries. `openDocs` is the truth: those are the documents on a user's screen, and their `docId`s are what the selection tools, and every write to an open document, will accept.
 
@@ -303,13 +307,15 @@ Each item of `dots`:
 
 ### `fill_region`
 
-Fill a closed path with a solid area — one call instead of the hundreds of closely spaced strokes you would otherwise compute yourself. The strokes are generated on the device and are ORDINARY strokes: the user can erase part of the fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, exactly like anything they drew.
+Fill a closed path with a solid area — one call instead of the hundreds of closely spaced strokes you would otherwise compute yourself. The strokes are generated on the device and are ORDINARY strokes: the user can erase part of the fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, exactly like anything they drew. Being strokes, a fill lies BELOW every arrow, text and formula: for a face that must cover a line, or one flat color at any size with an exact edge, place an object instead (add_shape, or add_arrow with `closed` and `filled`).
 
 `canvasPoints` is the boundary in canvas coordinates, closed by repeating the first point (an unclosed path is closed for you). Concave shapes fill correctly, and a path that returns through itself leaves a hole rather than blocking it out.
 
 `inkType` defaults to **pen** on purpose: marker is TRANSLUCENT and builds up where passes overlap, so a fill made from it shows the paper through. `spacingRatio` at or below 1 makes a SOLID fill (default 0.4, which overlaps by more than mere coverage so the fill stays even when the canvas is zoomed out or exported small); above 1 you get visible hatching, the distance between hatch lines being spacingRatio × drawnWidth, and `angleDeg` turns the hatch.
 
 A SOLID fill is ONE stroke: the passes are joined into a serpentine, so you can select, name, restyle or move the filled area as a single thing. It also traces its own boundary, centred, at the same `drawnWidth` — that border is what you see at the edge. Pass `border: false` when part of your outline is construction rather than a real edge (a silhouette closed along a base line does not want that line drawn) — but note it is ALL OR NOTHING: with it off, EVERY edge shows the scalloping the round pass-ends leave, not just the construction one. Measured: a plain rectangle drawn with border:false has visibly wavy sides. If only one edge is construction, keep the border and cover that edge, or draw the edges you want yourself with draw_strokes.
+
+A THIN FILL SHOWS STRIPES IN A SMALL IMAGE. The passes are ink, and ink thinner than about 3 points is not rendered flat below about 2 pixels per canvas point — a zoomed-out canvas, an export of a whole sheet. Measured on a 140 × 120 fill: `drawnWidth: 1` is ruled with stripes at 1.5 to 2 px/pt and a fifth too faint at 1 px/pt, however dense its passes (`spacingRatio` does not help); `drawnWidth: 3` is flat from 1.5 px/pt up, and at every scale looked at from 3 px/pt both are. So fill a face with `drawnWidth` 3 or more — and count on the ink reaching HALF ITS WIDTH past the outline you give, since the border is centred on it: draw the outline that much smaller where the edge has to be exact. The reply says so when a solid fill is thinner.
 
 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is genuinely large — the reply tells you how many were made, and past 4 000 passes the call fails and names the spacing that would fit rather than handing back a half-filled shape. And a fill does not RESHAPE: move, scale, rotate and restyle all take the fill and its border together, because they are one stroke, but changing the boundary to a different SHAPE does not re-fill it. You hold the outline, so give the fill a `name` and reshape it by deleting it and filling the new outline under that same name. `color` is light-canonical; pass colorAppearance: "dark" if you picked it for the dark canvas — the reply's storedColors array (one entry per pass/border stroke, present only when the dark door was used) reports what was actually stored. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
@@ -322,6 +328,7 @@ TWO HONEST LIMITS. The document still carries every stroke, so a large fill is g
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 | `drawnWidth` | number | no | How wide each pass and the border DRAW, in canvas points (the Properties panel's Drawn width). Omit to inherit the user's pen. A hatch's spacing is spacingRatio × this. |
+| `edge` | string — `centered`, `inside` | no | Where the ink ends. "centered" (default): border and pass ends are centred on canvasPoints, so the ink reaches half a drawnWidth past it. "inside": the region is first shrunk by half a drawnWidth, so the ink ends ON canvasPoints — a face filled with wide passes (drawnWidth 3 or more renders flat at any scale) then stays inside its outline. Its OUTWARD corners come out rounded by half the width, since a round pen cannot reach into a corner (a sharp-cornered face is add_shape's). A region narrower than drawnWidth has nothing left inside and is refused. |
 | `inkType` | string — `pen`, `pencil`, `marker`, `monoline`, `fountainPen`, `watercolor`, `crayon` | no | Defaults to pen, which is opaque and even. A constant-width pen IS a monoline and lists as `monoline` (the app derives the name from the uniform sizes; PencilKit's archive records it as pen), so a fill lists as `monoline` whichever of the two you ask for. |
 | `spacingRatio` | number | no | At or below 1 a solid fill (default 0.4; lower is denser); above 1 hatching, lines spacingRatio × drawnWidth apart. |
 | `tags` | array | no | Durable tags for the filled area, so you can find it again with find_elements after this call's ids are gone — which is how you reshape a fill: delete it and fill the new outline under the same tag. A hatched fill gets them too: it is several strokes, and a tag is a set. |
@@ -422,27 +429,30 @@ Deletes one or more strokes from a document by their composite stroke keys (as r
 
 ### `add_text`
 
-Appends a placed-text entry to a document: a new id, the document's current colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text box's top-left corner. Give color/fontSize/bold/italic/family to style the WHOLE label, or a `spans` array to style parts of it independently (e.g. a subscript). A whole-field style is the base each span overrides. Styling needs a connected device; plain text does not. Returns the new text's id so you can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts — call it before setting a `family`. `anchor` picks the point of the box that stays put as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the strokes (both need a device). Formulas: write the LaTeX between `$…$` and set `inlineMath: true` (omitted, the new text takes the document's own default); the write does not report whether a formula typesets — render_sketch shows it. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Appends a placed-text entry to a document: a new id, the document's current colour scheme, and an identity transform/opacity. (canvasX, canvasY) is the text box's top-left corner. Give color/fontSize/bold/italic/family to style the WHOLE label, or a `spans` array to style parts of it independently (e.g. a subscript). A whole-field style is the base each span overrides. Styling needs a connected device; plain text does not. Returns the new text's id so you can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts — call it before setting a `family`; without one the text is in Inter, the font the app bundles, at 17 pt unless `fontSize` says otherwise, and is the same on every device. `anchor` picks the point of the box that stays put as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the strokes (both need a device). Formulas: write the LaTeX between `$…$` and set `inlineMath: true` (omitted, the new text takes the document's own default); the write does not report whether a formula typesets — render_sketch shows it. `placeBy` says which point of the box (canvasX, canvasY) names — its top center, its right middle, its baseline — so a centered or right-aligned label is ONE call (needs a device). `anchor` does NOT do that: it never moves the text.
+
+REPLY: a line "added … at seq N" and a line `id: <the new text's id>`; when a device laid the text out (any call with a style, tags, an anchor, wrap, a layer or `placeBy`), also `canvasBounds: [left, top, width, height]`, the box as drawn. A plain call is written by the server alone, which cannot measure text: pass `placeBy` (e.g. {row: "top", column: "left"}, which is where it goes anyway) when you need the box. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `canvasX` | number | yes | Canvas-space x of the text box's top-left corner. |
-| `canvasY` | number | yes | Canvas-space y of the text box's top-left corner. |
+| `canvasX` | number | yes | Canvas-space x of the text box's top-left corner (or of the point `placeBy` names). |
+| `canvasY` | number | yes | Canvas-space y of the text box's top-left corner (or of the point `placeBy` names). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
-| `text` | string | yes | The text to place. Omit if using `spans`. |
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
 | `bold` | boolean | no |  |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
-| `family` | string | no | A font family name from list_fonts. An unknown family fails with unknownFont. |
-| `fontSize` | number | no | Point size, 1–512. |
+| `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
+| `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `inlineMath` | boolean | no | true: every $…$ in this text is shown as a typeset formula ($$…$$ for the large form, \$ for a dollar sign); false: $ is a normal character. |
 | `italic` | boolean | no |  |
 | `layer` | string — `front`, `back` | no | front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device. |
 | `pinned` | boolean | no | Excludes the text from selection transforms. Defaults to false. |
+| `placeBy` | object | no | Which point of the box `canvasX` / `canvasY` name: {row: "top"\|"middle"\|"bottom"\| "baseline", column: "left"\|"center"\|"right"} — {row: "top", column: "center"} centers the box under the point, {row: "middle", column: "right"} ends it there. `baseline` is a point ON the first line's baseline (its left end, middle or right end). Default: the top-left corner. The box is the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` capability. |
 | `spans` | array | no | Style parts of the text independently instead of a single `text` string. Each span is {text, color?, fontSize?, bold?, italic?, family?}; any whole-field color/fontSize/bold/italic/ family above is the base a span's own value overrides. Supply `text` OR `spans`, not both. Requires a connected device. |
 | `tags` | array | no | Durable tags for this text, so find_elements can reach it later. |
+| `text` | string | no | The text to place. Give `text` OR `spans`, exactly one of them. |
 | `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
 | `wrapWidth` | number | no | Wrap at this box width (turns wordWrap on), in the text's own points before its transform — the space fontSize is in, so canvas points for an unscaled text. At least 24, rounded to a whole point. Needs a connected device. |
 
@@ -453,13 +463,15 @@ Each item of `spans`:
 | `text` | string | yes | This span's text. |
 | `bold` | boolean | no |  |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
-| `family` | string | no | A font family name from list_fonts. An unknown family fails with unknownFont. |
-| `fontSize` | number | no | Point size, 1–512. |
+| `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
+| `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `italic` | boolean | no |  |
 
 ### `edit_text`
 
-Mutates an existing placed text by id: replace its string and/or move it, or restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` array (parts of it independently — a whole-field style is the base each span overrides). New characters given as `text` KEEP THE STYLE OF THE TEXT'S FIRST CHARACTER (font, size, color); a text of several styles becomes one run in that style, and style fields given beside `text` are set on top of it. `spans` say every run's style themselves. A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles the EXISTING characters (or the new ones, if `text`/`spans` is given) and needs a connected device — plain edits do not. Position-only edits (canvasX and/or canvasY with no text/style) do not touch formatting. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts. `anchor` sets or clears ("automatic") the point of the box that stays put as the text grows (needs a device); an anchored text keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word wrap on or off and set its width (needs a device). To move a text between layers use set_layer. `inlineMath` switches formulas on or off; omitted, the text keeps its setting. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Mutates an existing placed text by id: replace its string and/or move it, or restyle it with color/fontSize/bold/italic/family (whole-field) or a `spans` array (parts of it independently — a whole-field style is the base each span overrides). New characters given as `text` KEEP THE STYLE OF THE TEXT'S FIRST CHARACTER (font, size, color); a text of several styles becomes one run in that style, and style fields given beside `text` are set on top of it. `spans` say every run's style themselves. A STYLED edit (any of color/fontSize/bold/italic/family/spans present) restyles the EXISTING characters (or the new ones, if `text`/`spans` is given) and needs a connected device — plain edits do not. Position-only edits (canvasX and/or canvasY with no text/style) do not touch formatting. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to author for the dark canvas). Font families come from list_fonts. `anchor` sets or clears ("automatic") the point of the box that stays put as the text grows (needs a device); an anchored text keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word wrap on or off and set its width (needs a device). To move a text between layers use set_layer. `inlineMath` switches formulas on or off; omitted, the text keeps its setting. `canvasX` / `canvasY` say where the text is SHOWN — the top-left corner of its `canvasBounds`, or the point `placeBy` names — whatever transform it carries (a text the user dragged, turned or scaled in the app); either alone moves it along that axis. A turned or scaled text needs a device to be placed.
+
+REPLY: a line "edited <id> at seq N"; when a device made the edit, also `canvasBounds: [left, top, width, height]`, the box as drawn after it. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -468,14 +480,15 @@ Mutates an existing placed text by id: replace its string and/or move it, or res
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
 | `bold` | boolean | no |  |
-| `canvasX` | number | no | New canvas-space x of the text box's top-left corner. |
-| `canvasY` | number | no | New canvas-space y of the text box's top-left corner. |
+| `canvasX` | number | no | New canvas-space x of the text box's top-left corner as shown (or of the point `placeBy` names). |
+| `canvasY` | number | no | New canvas-space y of the text box's top-left corner as shown (or of the point `placeBy` names). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
-| `family` | string | no | A font family name from list_fonts. An unknown family fails with unknownFont. |
-| `fontSize` | number | no | Point size, 1–512. |
+| `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
+| `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `inlineMath` | boolean | no | true: every $…$ in this text is shown as a typeset formula ($$…$$ for the large form, \$ for a dollar sign); false: $ is a normal character. |
 | `italic` | boolean | no |  |
+| `placeBy` | object | no | Which point of the box `canvasX` / `canvasY` name: {row: "top"\|"middle"\|"bottom"\| "baseline", column: "left"\|"center"\|"right"} — {row: "top", column: "center"} centers the box under the point, {row: "middle", column: "right"} ends it there. `baseline` is a point ON the first line's baseline (its left end, middle or right end). Default: the top-left corner. The box is the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` capability. |
 | `spans` | array | no | Replace the text with independently-styled parts instead of a single `text` string. Same shape as add_text's `spans`. Requires a connected device. |
 | `text` | string | no | Replacement text. Plain (no style/spans), this resets formatting to plain defaults — see the tool description. Styled (with color/fontSize/bold/italic/family/spans), it replaces the characters with the new style instead. |
 | `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
@@ -488,8 +501,8 @@ Each item of `spans`:
 | `text` | string | yes | This span's text. |
 | `bold` | boolean | no |  |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
-| `family` | string | no | A font family name from list_fonts. An unknown family fails with unknownFont. |
-| `fontSize` | number | no | Point size, 1–512. |
+| `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
+| `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `italic` | boolean | no |  |
 
 ### `remove_text`
@@ -505,7 +518,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, inlineMath}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, fontSize, family, bold, italic} each) and no top-level style. `color` is light-canonical and ABSENT for the automatic color; `family` is absent for the system font. `alignment` is left / center / right / justified / natural, or mixed. `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it (the text's own points, before its transform). `inlineMath` is true when every $…$ in the text shows as a typeset formula (add_text / edit_text set it).
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, inlineMath}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, fontSize, family, bold, italic} each) and no top-level style. `color` is light-canonical and ABSENT for the automatic color; `family` is `System` for the device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it (the text's own points, before its transform). `inlineMath` is true when every $…$ in the text shows as a typeset formula (add_text / edit_text set it).
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -513,7 +526,7 @@ REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, laye
 
 ### `list_fonts`
 
-The font families installed on the connected device, sorted. Call this before setting a `family` on add_text/edit_text — an unknown family is rejected with unknownFont. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Read-only: it never writes to the document, so there is no seq assigned and nothing to retry.
+The font families installed on the connected device, sorted. Call this before setting a `family` on add_text/edit_text — an unknown family is rejected with unknownFont. `Inter Variable` is the font the app bundles and the default of a new text. A named family is laid out the same on a Mac, an iPad and an iPhone; the device's own system font (`family: "System"`, not in this list) is not. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Read-only: it never writes to the document, so there is no seq assigned and nothing to retry.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -566,7 +579,7 @@ Remove a placed image from a document by its id (as returned by add_image or rep
 
 Lists a document's arrows, one per arrow — authored by a connected InfinitySketch device with the `arrows` capability (noDeviceAvailable if none). Never writes.
 
-REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, join?, miterLimit?, roundness?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1; an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
+REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, headsLinked, dashPattern, dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags, closed, filled}`. `closed` true: the path runs on from its last node to its first — a rectangle, a circle, a dot (add_shape makes them) — so it has NO ends: the two heads and anchors are kept but not drawn, and every node, the first too, is a point the line turns at. `filled` true: the inside is painted in the line's color. `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and `dashOffset` (widths) says how the dash pattern is laid along the shaft. `keepsWidth` true: a scale moves the points and keeps `drawnWidth`; false: a scale changes `drawnWidth` too, and `unscaledWidth` is the width before it (restore_stroke_widths goes back to it; equal to `drawnWidth` otherwise). `headLength` (widths) and `headAngle` (degrees) shape the start head — and both while `headsLinked` — and `endHeadLength` / `endHeadAngle` are the end head's as drawn; `dashPattern` is the shaft's dash / gap list in widths, [] = solid. `canvasPoints` are the arrow's NODE positions in canvas space, start first (an arrow has no transform: moving one rewrites its nodes). `nodes` gives each node as `{canvasX, canvasY, type, join?, miterLimit?, roundness?}`: type `corner` (a sharp point), `smooth` (the curve passes through it smoothly, its tangent computed from its neighbours; `roundness` scales that tangent, 0–2, reported only when not 1; an Edit arc writes these). `canvasBounds` covers the curve as drawn. `drawnWidth` is the line's width in canvas points — what it draws. `color` is light-canonical `#RRGGBBAA` (its alpha is `opacity`). `layer` is `front` or `back`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -586,12 +599,13 @@ REPLY: an ARRAY of `{id, index, name, startHead, endHead, startAnchor, endAnchor
 
 ### `add_arrow`
 
-Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Places an arrow — the same object the app's Arrow tool draws: a line through `canvasPoints` (corners; two points = straight) or through `nodes` (corner and smooth points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — or, with `preset`, that preset's style; the fields you pass override either. `styleBase: "factory"` takes the omitted fields from the app's built-in style instead (round start, filled head, the middle width, black — white on dark paper —, solid, front): pass it from a script, so the same script draws the same arrow whatever the user has set. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) decides whether a later scale changes the arrow's width. `closed: true` (three points or more) joins the last point to the first with a real corner there — an outline with no seam and no heads — and `filled: true` beside it paints the inside in the line's color: a face that stacks with the other objects, which a fill_region (strokes, always below every object) cannot. For a rectangle, an ellipse, a circle or a dot use add_shape. REPLY: the seq and `arrowId`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each is a sharp corner. Or give `nodes`. |
+| `closed` | boolean | no | true: a CLOSED path — the line runs on from the last point to the first and turns there like at every corner, so there is no seam, no ends and no heads. Needs three points. false: open it again (its heads return). Omitted: an open path for add_arrow, unchanged for reshape_arrow. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
 | `cornerJoin` | string — `round`, `miter`, `bevel` | no | How EVERY interior corner point turns: round (default), miter (sharp, cut to a bevel past cornerMiterLimit) or bevel. Per point in `nodes[].join`. |
@@ -607,6 +621,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `endHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the end — the head. |
 | `endHeadAngle` | number | no | The END head's own tip half-angle in degrees (15–60). Giving it unlinks the heads. |
 | `endHeadLength` | number | no | The END head's own length in widths (2–10). Giving it unlinks the heads; omitted, the end head follows headLength. |
+| `filled` | boolean | no | true: the area a closed path encloses is painted too, in the line's color and together with the line (a translucent shape is even). Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`. |
 | `headAngle` | number | no | Half the angle at each head's tip, in degrees (15–60, default 32): the start head's, and both heads' while they are linked. |
 | `headLength` | number | no | Head length in arrow widths, tip to base (2–10, default 4): the start head's, and both heads' while they are linked (the default). |
 | `headsLinked` | boolean | no | true: one length and angle for both heads (relinking gives the end head the start head's values); false: the end head keeps its own. |
@@ -617,6 +632,7 @@ Places an arrow — the same object the app's Arrow tool draws: a line through `
 | `preset` | string | no | A preset name from list_arrow_presets (any letter case): its shape is applied first (a preset holds no color — the arrow has the new-arrow color unless `color` is given), the other fields override it. An unknown name fails with unknownPreset and lists the names there are. |
 | `startAnchor` | string — `endsAtPoint`, `centeredOnPoint` | no | Where the start's ink sits: endsAtPoint (stops on the point; default for a new arrow) or centeredOnPoint (half a width past it, like a stroke's cap). |
 | `startHead` | string — `roundEnd`, `flatEnd`, `openChevron`, `openChevronRoundTip`, `openChevronRoundWings`, `openChevronRound`, `filledTriangle`, `filledTriangleRoundTip`, `filledTriangleRoundWings`, `filledTriangleRound` | no | The shape at the start. |
+| `styleBase` | string — `user`, `factory` | no | Where every style field you leave out comes from. user (default): the user's own current style — right when you draw beside the user. factory: the app's built-in style, the same on every device whatever the user has set — right for a script, which otherwise draws differently after the user changed their tool. Needs a device with the `styleBase` capability. |
 | `tags` | array | no | Durable tags for the new arrow (see tag_elements); find it again later with find_elements. |
 
 Each item of `nodes`:
@@ -630,15 +646,49 @@ Each item of `nodes`:
 | `roundness` | number | no | A smooth node's roundness: how wide the bend runs through it, as a factor on its tangent — 1 the usual curve (default), 0 nearly a corner, 2 the widest. Not for a corner. |
 | `type` | string — `corner`, `smooth` | no | corner (default) or smooth. |
 
+### `add_shape`
+
+Places a closed shape as ONE object: a `rectangle` or `ellipse` (`canvasRect`), a `circle` (`canvasX`, `canvasY`, `radius`), a `polygon` (`canvasPoints`) or a solid `dot` (`canvasX`, `canvasY`, `diameter`). It is an ARROW object with a closed path — list_arrows shows it (`closed: true`), restyle_arrows, reshape_arrow, transform_elements, set_layer, tag_elements and remove_arrow work on it, and it stacks with the other objects (a later one lies on top; reorder_elements). That is the difference to fill_region and draw_dots, which make STROKES: those always lie below every arrow, text and formula. The geometry is the LINE'S CENTER: a rectangle of `canvasRect` drawn 2 wide reaches 1 past it on every side. `filled: true` paints the inside too, in the line's color, once (a translucent shape is even); for a face without a visible border give the line the face's color. A `dot` is always solid and exactly `diameter` across, ink to ink — its line is `drawnWidth`, but at most half the diameter. A closed path has no ends: there are no heads. Every style field you omit takes the user's new-arrow style, or the app's own with `styleBase: "factory"` — pass that from a script. `color` is light-canonical (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the `arrows` and `closedPaths` capabilities (an app from before closed paths is told to update). Many shapes in one edit: `batch`. REPLY: the seq, `arrowId`, `canvasBounds: [left, top, width, height]` — the ink's box — and `drawnWidth`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
+| `shape` | string — `rectangle`, `ellipse`, `circle`, `polygon`, `dot` | yes | What to place. Each shape takes its own geometry arguments and refuses the others by name. |
+| `canvasPoints` | array | no | polygon: [[x, y], …] — at least three corners in canvas points. The path closes from the last to the first; do not repeat the first. |
+| `canvasRect` | array | no | rectangle / ellipse: [x, y, width, height] of the line's center, in canvas points; width and height above 0. An ellipse is the one inscribed in it. |
+| `canvasX` | number | no | circle / dot: the center's x, in canvas points. |
+| `canvasY` | number | no | circle / dot: the center's y, in canvas points. |
+| `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. The line's color, and the fill's. |
+| `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. |
+| `cornerJoin` | string — `round`, `miter`, `bevel` | no | How every corner of a rectangle or polygon turns: round (default), miter (sharp) or bevel. |
+| `cornerMiterLimit` | number | no | A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp. |
+| `dashAlignment` | string — `fitGaps`, `fitPattern`, `exact` | no | How a dashed line's pattern is laid: fitGaps (default), fitPattern or exact — as add_arrow's. |
+| `dashAnchor` | string — `start`, `end`, `center` | no | Where an `exact` pattern starts. |
+| `dashCorners` | boolean | no | Fit modes only (default true): each side between two corners fitted on its own, a dash centered on every corner. |
+| `dashOffset` | number | no | Shifts the pattern, in line widths (−50…50; default 0). |
+| `dashPattern` | array | no | The line type: dash, gap, dash, gap … in line widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid. Round a closed path the pattern closes on itself: a whole number of periods, and with dashCorners a dash centered on every corner. Not for a dot. |
+| `diameter` | number | no | dot: how wide the solid dot is, ink to ink, in canvas points (1–2000). |
+| `drawnWidth` | number | no | Line width in canvas points (0.5–40). For a dot: at most half its diameter is used. |
+| `filled` | boolean | no | Paint the inside too, in the line's color (default false). A dot is always filled. |
+| `keepsWidth` | boolean | no | true (default): a later scale moves the shape's points and keeps its line width; false: the width scales too. |
+| `layer` | string — `front`, `back` | no | front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to. |
+| `opacity` | number | no | 0…1 — the color's alpha (overrides the alpha of `color`). |
+| `preset` | string | no | A preset name from list_arrow_presets: its line width, line type and corners are applied first, the other fields override it. |
+| `radius` | number | no | circle: the radius of the line's center, in canvas points, above 0. The ink reaches half a drawnWidth past it. |
+| `styleBase` | string — `user`, `factory` | no | Where every style field you leave out comes from. user (default): the user's own current style — right when you draw beside the user. factory: the app's built-in style, the same on every device whatever the user has set — right for a script, which otherwise draws differently after the user changed their tool. Needs a device with the `styleBase` capability. |
+| `tags` | array | no | Durable tags for the new shape (see tag_elements); find it again later with find_elements. |
+
 ### `reshape_arrow`
 
-Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. Read the current nodes with list_arrows, change what you need, send them back. A pinned arrow is reshaped too, as transform_elements moves one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Replaces one arrow's geometry — its `canvasPoints` (corners) or `nodes` (list_arrows' shape: corner / smooth) — keeping its id, style, layer, tags and place in the stacking order. Read the current nodes with list_arrows, change what you need, send them back. A pinned arrow is reshaped too, as transform_elements moves one (pinning protects it from the user's touches). `closed` / `filled` close or open the path and fill it or not; with one of them the geometry may be left out, and the points stay. REQUIRES a device with the `arrows` capability. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `arrowId` | string | yes | The arrow (list_arrows' `id`). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `canvasPoints` | array | no | [[x, y], …] — at least two points, start first, in canvas points; each a sharp corner. Or give `nodes`. |
+| `closed` | boolean | no | true: a CLOSED path — the line runs on from the last point to the first and turns there like at every corner, so there is no seam, no ends and no heads. Needs three points. false: open it again (its heads return). Omitted: an open path for add_arrow, unchanged for reshape_arrow. |
+| `filled` | boolean | no | true: the area a closed path encloses is painted too, in the line's color and together with the line (a translucent shape is even). Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`. |
 | `nodes` | array | no | At least two nodes, start first: {canvasX, canvasY, type?, join?, miterLimit?, roundness?}. type corner (default; a sharp point), smooth (the curve passes through smoothly — centripetal Catmull-Rom from the neighbours; roundness 0–2 scales its tangent, 1 the default). Instead of canvasPoints. |
 
 Each item of `nodes`:
@@ -827,25 +877,27 @@ REPLY: an ARRAY of `{id, latex, typeset, message?, canvasBounds, canvasBaseline,
 
 ### `add_formula`
 
-Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. Write `latex` WITHOUT `$` markers: `\frac{a}{b}`, not `$\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same `canvasY` sit on one line, as text does. `fontSize` is the point size it is typeset at (1–2000); omitted, the user's text size, else 20. `color` is light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a dark-authored hex); omitted, the user's text color, else Automatic — black on light paper, white on dark. A source that does not typeset is STORED and reported (`typeset: false` with the parser's `message`), shown as its source text until you correct it with edit_formula. A blank source fails with emptyFormula, one longer than 4000 UTF-16 code units (most characters count 1, an emoji 2) with formulaTooLong, a `fontSize` outside 1–2000 with invalidFontSize. Goes on top of Front objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
+Places a formula object: ONE LaTeX formula per object, typeset by the app — what its Formula button makes. Write `latex` WITHOUT `$` markers: `\frac{a}{b}`, not `$\frac{a}{b}$`. A formula inside a sentence is not this: it is a text with `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same `canvasY` sit on one line, as text does. `fontSize` is the point size it is typeset at (1–2000); omitted, the user's text size, else 20. `placeBy` makes the coordinates name another point of the box — its center, its right end — so a centered formula is one call. `color` is light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a dark-authored hex); omitted, the user's text color, else Automatic — black on light paper, white on dark. A source that does not typeset is STORED and reported (`typeset: false` with the parser's `message`), shown as its source text until you correct it with edit_formula. A blank source fails with emptyFormula, one longer than 4000 UTF-16 code units (most characters count 1, an emoji 2) with formulaTooLong, a `fontSize` outside 1–2000 with invalidFontSize. Goes on top of Front objects (or `layer: "back"`). REQUIRES a device with the `formulas` capability.
 
 REPLY: one JSON object `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` — `canvasBounds` is [left, top, width, height] of the typeset box as drawn and `canvasBaseline` the point at the left end of its baseline, in canvas space. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `canvasX` | number | yes | Canvas x-coordinate of the left end of the baseline. |
-| `canvasY` | number | yes | Canvas y-coordinate of the baseline. |
+| `canvasX` | number | yes | Canvas x-coordinate of the left end of the baseline (or of the point `placeBy` names). |
+| `canvasY` | number | yes | Canvas y-coordinate of the baseline (or of the point `placeBy` names). |
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `latex` | string | yes | The LaTeX source of ONE formula, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic. |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` (and the colors named in the source) were chosen for a dark page. Default light. |
 | `fontSize` | number | no | Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20. |
 | `layer` | string — `front`, `back` | no | front (above the strokes, the default) or back (behind strokes and grids). |
+| `placeBy` | object | no | Which point of the box `canvasX` / `canvasY` name: {row: "top"\|"middle"\|"bottom"\| "baseline", column: "left"\|"center"\|"right"} — {row: "top", column: "center"} centers the box under the point, {row: "middle", column: "right"} ends it there. `baseline` is a point ON the first line's baseline (its left end, middle or right end). Default: the left end of the baseline. The box is the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` capability. |
+| `styleBase` | string — `user`, `factory` | no | Where every style field you leave out comes from. user (default): the user's own current style — right when you draw beside the user. factory: the app's built-in style, the same on every device whatever the user has set — right for a script, which otherwise draws differently after the user changed their tool. Needs a device with the `styleBase` capability. |
 | `tags` | array | no | Durable tags for the new formula (see tag_elements); find it again later with find_elements. |
 
 ### `edit_formula`
 
-Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000) and `color` (light-canonical; `colorAppearance` only together with `color`) — give at least one. The LEFT END OF THE BASELINE stays where it is on the canvas, also when the formula is rotated or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset is stored and reported as on add_formula. formulaNotFound for an unknown id, invalidFontSize for a size outside 1–2000. An edit that changes nothing writes nothing. REQUIRES a device with the `formulas` capability.
+Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` markers), `fontSize` (points, 1–2000), `color` (light-canonical; `colorAppearance` only together with `color`) and a new place (`canvasX` and/or `canvasY`, naming the left end of the baseline as shown or the point `placeBy` says, whatever transform the formula carries) — give at least one. Without a new place the LEFT END OF THE BASELINE stays where it is on the canvas, also when the formula is rotated or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset is stored and reported as on add_formula. formulaNotFound for an unknown id, invalidFontSize for a size outside 1–2000. An edit that changes nothing writes nothing. REQUIRES a device with the `formulas` capability.
 
 REPLY: `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` as add_formula's; an edit that changed nothing has `unchanged: true` and no `seq`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
@@ -853,10 +905,13 @@ REPLY: `{id, typeset, message?, canvasBounds, canvasBaseline, seq}` as add_formu
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `id` | string | yes | The formula (list_formulas' or add_formula's `id`). |
+| `canvasX` | number | no | A new canvas x-coordinate for the left end of the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability. |
+| `canvasY` | number | no | A new canvas y-coordinate for the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). |
 | `colorAppearance` | string — `light`, `dark` | no | "dark" when `color` was chosen for a dark page. Default light. Only with `color`. |
 | `fontSize` | number | no | The new point size, 1–2000. |
 | `latex` | string | no | The new LaTeX source, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2). |
+| `placeBy` | object | no | Which point of the box `canvasX` / `canvasY` name: {row: "top"\|"middle"\|"bottom"\| "baseline", column: "left"\|"center"\|"right"} — {row: "top", column: "center"} centers the box under the point, {row: "middle", column: "right"} ends it there. `baseline` is a point ON the first line's baseline (its left end, middle or right end). Default: the left end of the baseline. The box is the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` capability. |
 
 ### `remove_formula`
 
@@ -989,18 +1044,22 @@ Many-to-many: an element carries any number of tags and a tag covers any number 
 
 ### `find_elements`
 
-Resolve TAGS to element ids, so you can act on them with any tool that takes ids. Read-only and cheap: no document payload comes back, just `{tag: [ids]}` for the tags that resolve.
+Resolve TAGS to element ids, so you can act on them with any tool that takes ids. Read-only and cheap: no document payload comes back, just ids.
 
-Ids come back in DOCUMENT order — strokes in drawing order, then texts, then images, then arrows — so a tagged series is returned in a stable, meaningful sequence.
+Ids come back in DOCUMENT order — strokes in drawing order, then texts, then images, then arrows, then formulas — so a tagged series is returned in a stable, meaningful sequence.
 
-A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / add_arrow / fill_region / draw_dots. Use list_tags to see what a document already has.
+`match: "all"` keeps only the elements that carry EVERY tag you name — a section is "everything tagged `sheet` and `loop`". `groupBy: "kind"` answers by kind, under the argument names the tools that act on elements take, so the reply can be handed on to transform_elements, select_elements or copy_elements as it is. Either needs a device with the `tagQueries` capability.
 
-REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object rather than present-and-empty, so check for the key before indexing it.
+A tag whose elements no longer exist is simply ABSENT from the reply rather than a dangling id, so an empty answer means "those elements are gone", not "the lookup failed". Tags are set with tag_elements, or at creation time by draw_strokes / add_text / add_image / add_arrow / add_formula / fill_region / draw_dots. Use list_tags to see what a document already has.
+
+REPLY: by default an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object rather than present-and-empty, so check for the key before indexing it. With `groupBy: "kind"` the object is `{"strokeIds": [], "textIds": [], "imageIds": [], "arrowIds": [], "formulaIds": []}` — every key present, each holding the matching elements of that kind.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to query. |
 | `tags` | array | yes | The tags to resolve. |
+| `groupBy` | string — `tag`, `kind` | no | tag (default): `{tag: [ids]}`. kind: `{strokeIds, textIds, imageIds, arrowIds, formulaIds}`. |
+| `match` | string — `any`, `all` | no | any (default): an element carrying at least one of `tags`. all: only elements carrying every one of them. |
 
 ### `list_tags`
 
@@ -1086,7 +1145,11 @@ Sets the `pinned` flag on the named placed texts, images, arrows and/or formulas
 
 ### `copy_elements`
 
-Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images, arrows and formulas keeping the order they had among each other. At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a device with the `formulas` capability). REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+Copies named strokes/texts/images/arrows/formulas from document `source` INTO document `target`, as FRESH clones (fresh ids) — unlike merge_docs, elements are never deduped by identity, so copying the same source element twice yields two distinct clones. `source` is left untouched; `target` gains the copies, texts, images, arrows and formulas keeping the order they had among each other. `source` and `target` MAY BE THE SAME document: the clones then lie exactly on their originals, so move them (transform_elements) or change them next.
+
+PLACE THE CLONES IN THE SAME CALL: `scale`, `rotate` (both about `canvasAnchor`) and `canvasTranslate` are transform_elements' operations, applied to the clones only; `tags` names them; `scaleWidths: true` lets the arrows' line widths follow the scale. To put a symbol's pin on a point P: `canvasAnchor` = the pin's place in the source, `canvasTranslate` = P minus that place. These need a device with the `copyTransform` capability.
+
+At least one of `strokeIds`/ `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a device with the `formulas` capability). REQUIRES a connected device with the copyElements capability — fails with noDeviceAvailable if none is connected, sourceNotFound / targetNotFound if either document is absent, and deviceFailed: elementNotFound if an id isn't found in `source`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
 
 REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdImageIds`, `createdArrowIds` and `createdFormulaIds` — deliberately not `strokeIds`/`textIds`/`imageIds`/`arrowIds`/`formulaIds`, which are this tool's ARGUMENTS and name the elements in the SOURCE.
 
@@ -1095,10 +1158,38 @@ REPLY: the clones' NEW ids, as `createdStrokeIds`, `createdTextIds`, `createdIma
 | `source` | string | yes | The document to copy FROM (left unchanged). |
 | `target` | string | yes | The document to copy INTO (gains the clones). |
 | `arrowIds` | array | no | Arrow ids to clone, from list_arrows. |
+| `canvasAnchor` | array | no | [x, y], the fixed point of `scale` and `rotate`, in the SOURCE's coordinates (where the clones lie before they move). Defaults to the centre of the clones' bounding box. |
+| `canvasTranslate` | array | no | [dx, dy] the clones are moved by, last. Without it they lie at their sources' coordinates. |
 | `formulaIds` | array | no | Formula ids to clone, from list_formulas. |
 | `imageIds` | array | no | Placed-image ids to clone, from list_images. |
+| `rotate` | number | no | Degrees the clones are turned about `canvasAnchor`, after the scale; positive = clockwise on screen. |
+| `scale` | array | no | [sx, sy] applied to the CLONES about `canvasAnchor`; non-zero. A negative factor mirrors. |
+| `scaleWidths` | boolean | no | true: the cloned arrows' line widths follow `scale` (heads and dashes are in widths and follow too), whatever their keepsWidth — which is left as it was. Default false: each arrow follows its own keepsWidth. A stroke's ink always scales with it. |
 | `strokeIds` | array | no | Stroke ids to clone, from list_strokes/get_strokes. |
+| `tags` | array | no | Tags every clone gets, on top of the ones it inherits from its source. |
 | `textIds` | array | no | Placed-text ids to clone, from list_texts. |
+
+### `batch`
+
+Several writes to ONE document as ONE edit: each op is an ordinary tool call (`{tool, arguments}`), run in order on a working copy of the document, and the result is written once. The user's canvas changes once, the user gets ONE undo step for the lot (as does undo_last_edit), and there is one `seq`. Use it for anything made of many elements — a chart, a circuit, clearing a section and drawing it again — instead of hundreds of single calls.
+
+ATOMIC: if any op fails, NOTHING is written and the error names the op. An op sees what the ops before it did, so you can add a text and list_texts after it, or tag what an earlier op created (by an id you gave it a tag for; replies arrive only at the end). Each op's `arguments` are the tool's own; leave `docId` out (it is this batch's document; `target` for copy_elements, whose `source` may be any document). Tools a batch takes: add_arrow, add_formula, add_grid, add_image, add_shape, add_text, copy_elements, delete_strokes, draw_dots, draw_strokes, edit_formula, edit_text, fill_region, find_elements, get_strokes, list_arrows, list_formulas, list_grids, list_images, list_strokes, list_tags, list_texts, remove_arrow, remove_formula, remove_grid, remove_image, remove_text, reorder_elements, reorder_grids, reset_element_transforms, reshape_arrow, reshape_strokes, restore_stroke_widths, restyle_arrows, restyle_strokes, set_grid_origin, set_layer, set_paper, set_pinned, snap_points, tag_elements, transform_elements, transform_strokes, update_grid. Not the live-selection tools, not render_sketch, and nothing that creates, replaces or deletes a document.
+
+A batch is ONE request: it has to finish within your client's timeout. An op that needs a device costs a round trip (roughly a tenth of a second), so keep a batch to a few hundred ops at most (limit 400). If the document changes while the batch runs — the user draws — the batch is run once more on the new document by itself; if it changes again, the batch's result is merged into the document as it then is and written, as long as the user and the batch did not change the same element. Only then — or when the document changes a third time — the answer is docChangedDuringOp with nothing written: send the batch again. A batch you cancel stops at its next op and writes nothing.
+
+REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in order. A WRITE's entry is an object: `message` (its reply's first line), `seq`, and the fields its reply names — `id` for the element it made (always `id`, also for an arrow), `canvasBounds`, `ids`, `createdArrowIds` and so on, `notes` for anything it has to tell you. A read's entry is its listing. A batch whose ops changed nothing has `unchanged: true` and no `seq`. Rejected with docChangedDuringOp if the document changed while this call was being processed — re-read the document and retry. The USER CAN UNDO your edit at any time (one undo step per tool call), so ids you obtained earlier may no longer exist: re-read (list_strokes / list_texts / list_images / get_selection) before acting on them rather than caching. Subscribe to the resource infsketch://doc/<docId> if you want to be told when the document changes.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) every op works on. |
+| `ops` | array | yes | The tool calls, in the order they are applied. |
+
+Each item of `ops`:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tool` | string | yes | A tool name, e.g. add_arrow. |
+| `arguments` | object | no | That tool's arguments, without docId. |
 
 ---
 
@@ -1245,7 +1336,7 @@ Delete everything in the user's LIVE rect-select selection, exactly as the toolb
 
 Renders a region of a document, specific strokes, and/or ephemeral candidate strokes that are not written to the document — use it to preview a stroke before committing it with draw_strokes, optionally composited over the document's real content to judge fit and alignment. Authored by a connected InfinitySketch device. Pass `appearance: "light"|"dark"` to render as though the device were showing that appearance, regardless of what it is actually showing — the default is the document's own (the last opener's device); two connected devices can be viewing in different modes, so render both to check your work in each. Returns a PNG plus metadata: the covered rect, the scale actually used, the appearance actually rendered, the canvas contentSize, and — per grid — its id, thickness, and each drawn/snap line family's id, lineAngleDeg and label. These grid and family ids are what snap_points' gridIds and transform_strokes' snapTo refer to. Ephemeral `strokes`' `color` hexes are light-canonical like everywhere else on this surface — pass colorAppearance: "dark" if you picked them for the dark canvas. READ lineAngleDeg for a family's line direction, never infer it from `normal` — normal is PERPENDICULAR to the lines it describes ([1, 0] means VERTICAL lines, not horizontal). Only visible grids appear in the rendered image, but visible and enabled are independent — a grid can be snapped to without being drawable, or drawn without being snapped to; both flags are reported for every grid, so check `enabled` for whether a grid you can't see is still pulling strokes onto it. To ZOOM IN, shrink the rect: the scale rises to fill the pixel budget, up to 16x. (A 60x50pt rect comes back 960x800, not 120x100.) The scale actually used is always reported in the metadata. An empty document (nothing to auto-fit, no explicit rect) now renders at the document's saved viewport instead of failing — only an explicit include: "none" with no ephemeral strokes still fails with deviceFailed: emptyRender (there is deliberately nothing to show). REQUIRES a connected device — fails with noDeviceAvailable if none is connected, deviceTimeout if it doesn't respond in time, and deviceFailed: <reason> for a bad spec (e.g. an unknown strokeKey). Read-only: it never writes to the document, so there is no seq assigned and nothing to retry.
 
-REPLY: a PNG image plus a metadata text block. With writeToFile: true there is NO image — the reply is one JSON object of that same metadata plus `filePath` (an absolute path on the machine the server runs on) and `renderUrl` (a path RELATIVE to this server, e.g. /api/renders/<name>.png — join it to the address you reached this server on and download it, which is what to do when you are NOT on the server's machine).
+REPLY: a PNG image plus a metadata text block. With writeToFile: true there is NO image — the reply is one JSON object of that same metadata plus `filePath` (an absolute path on the machine the server runs on) and `renderUrl` (a path RELATIVE to this server, e.g. /api/renders/<name>.png — join it to the address you reached this server on and download it, which is what to do when you are NOT on the server's machine). The metadata's `renderedBy` names the kind of device that made the image ("mac", "ipad", "iphone"). A text in the SYSTEM font (list_texts: `family: "System"` — every text made before the app had its own font) is set differently on a Mac: 4 to 5 % wider below 20 pt and with another line height, so a wrapped line can break at another word; an iPad and an iPhone set it alike. A text in Inter (the default of a new text) or another named family, and a formula, are the same on every device. So compare an image of system-font text only with one from the same kind, or ask for one with `device`.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
@@ -1257,9 +1348,10 @@ REPLY: a PNG image plus a metadata text block. With writeToFile: true there is N
 | `background` | string — `transparent`, `paper`, `paper+grid` | no | "transparent", "paper" (the document's background colour for the current appearance), or "paper+grid" (default — the grid is what agents align to). |
 | `canvasRect` | array | no | [x, y, w, h] in canvas coordinates. Omit for auto-fit: the tight bounding box of everything rendered, expanded by padding. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
+| `device` | string — `mac`, `ipad`, `iphone` | no | Render on a device of this kind, or fail with noDeviceAvailable when none is connected. Omitted, the server picks (a device that has the document open is preferred). Devices lay text out a little differently, so an image that must not change from one export to the next — one meant for publishing — should always name the same kind. list_open_docs shows the kinds connected. |
 | `formulaIds` | array | no | With include: "formulas" (which requires it), the formula ids (list_formulas) to show. |
 | `include` | string — `document`, `strokes`, `arrows`, `formulas`, `none` | no | What document content to render, alongside any ephemeral strokes and arrows below. "document" (default): every stroke, placed image, text, arrow and formula. "strokes": only the strokes named by strokeIds — no images or texts. "arrows": only the arrows named by arrowIds (and restyle.arrowIds) — a clean swatch. "formulas": only the formulas named by formulaIds (needs a device with the `formulas` capability). "none": nothing from the document. |
-| `maxPixels` | number | no | Pixel budget. Defaults to 1000000, hard ceiling 4000000. An over-large request is downscaled, not rejected, and the metadata reports the scale actually used. |
+| `maxPixels` | number | no | Pixel budget. Defaults to 1000000, hard ceiling 4000000. An over-large request — a larger budget, or a `scale` whose image would pass the ceiling — is downscaled to the ceiling, not rejected: the metadata reports the `scale` actually used, and `requestedScale` when an explicit scale was reduced. |
 | `padding` | number | no | Auto-fit margin in canvas points. Defaults to 10% of the fitted box's larger side, minimum 20. |
 | `restyle` | object | no | Render EXISTING arrows as if restyled — the document unchanged: `arrowIds` plus any of restyle_arrows' fields (preset, heads, widths, dash, color, opacity, keepsWidth …), applied by the same code restyle_arrows uses. Iterate: render → adjust → render → restyle_arrows. The metadata's `restyledArrows` reports each one's `canvasBounds` and resolved `style`. Combine with include: "arrows" for an isolated swatch. |
 | `scale` | number | no | Pixels per canvas point, at most 16. THIS is the knob for how big the image comes back — and by default the image is returned INLINE, so its size is a cost you pay on every call (with writeToFile: true it is not, so a big scale is cheap there). Omit it and the renderer picks a scale that fits `maxPixels`. |
@@ -1277,6 +1369,21 @@ Each item of `strokes`:
 | `inkType` | string — `pen`, `pencil`, `marker`, `monoline`, `fountainPen`, `watercolor`, `crayon` | no | The ink to draw with. OMIT IT to inherit the ink the user currently has selected (see get_tool); pen when no inking tool is selected. THEY DIFFER IN CHARACTER, not only in name, and you cannot see that from a listing: `pen` is opaque and even — reach for it for solid fills, flat colour, and anything you layer; `marker` is wide and TRANSLUCENT, so colours build where strokes overlap and whatever is underneath shows through (painting a solid area in marker leaves the paper visible between passes); `pencil` is textured; `fountainPen`, `watercolor` and `crayon` are expressive — try them and look. Each ink has a thinnest width it can draw (below it a stroke is effectively INVISIBLE), so a drawnWidth under it is raised and the reply says so. A pen whose width is CONSTANT is a monoline, and lists as one — including every pen you author with a single `drawnWidth`. Monoline is not a different rendered ink but a tool behaviour ("hold the width constant whatever the pressure"), PencilKit's archive records it as pen, and the app derives the name back from the uniform sizes, so `pen` with one width and `monoline` are the same stroke and read back as `monoline`. A pen reads back as `pen` only when its per-point `stampSize` varies. |
 | `smooth` | boolean | no | How to read `points`. DEFAULT false: they are a POLYLINE — straight segments, sharp corners, which is almost certainly what you mean. Set true to have them treated as spline knots and smoothly interpolated (useful for a curve given as a few sparse points) — PKStrokePath splines THROUGH its control points, so a sparse polyline misread as knots renders as a rounded teardrop, not the shape you asked for. Note reshape_strokes defaults the OTHER way. A polyline too corner-dense to fit the 4000-point canonical budget fails loudly — send fewer points, or split the shape into several strokes. smooth: true is NOT the escape from that: it skips the budget (the verbatim path has no point cap of its own, only the message-size limit) precisely BECAUSE it does no corner work at all, so every sharp corner then comes out rounded. |
 
+### `export_sketch`
+
+Renders a document for PUBLISHING and writes the PNG to a file: the paper without the grid, in the appearance you name, the content with a narrow margin. It is render_sketch with the defaults a posted image needs, so none of them can be forgotten — render_sketch is for looking and aligning (the grid is on, the appearance is whatever device opened the document last, the image is small). Read-only. The image may be up to 16 megapixels, four times render_sketch's ceiling, because it goes to a file and never into the reply; without `scale` or `maxPixels` it is about 8 megapixels. `appearance` is REQUIRED: an export must not depend on who opened the document last. A text in the system font is laid out differently on a Mac than on an iPad or iPhone (render_sketch's description), so name `device` when exports must match from one day to the next. REQUIRES a connected device with the `exportRender` capability. REPLY: ONE JSON object — the render's metadata (`canvasRect`, `pixelSize`, `scale`, `appearance`, `renderedBy`, …) with `filePath` (absolute, on the server's machine) and `renderUrl` (relative to this server; download it when you are not on that machine). The server names the file and keeps its render directory bounded, oldest first: copy the file soon. PNG only — a vector format is not built.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `appearance` | string — `light`, `dark` | yes | Which appearance to export: the light page or the dark one. Required. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to export. |
+| `background` | string — `paper`, `transparent` | no | "paper" (default): the document's paper color for `appearance`. "transparent": no paper. The grid is never exported — use render_sketch with "paper+grid" to see it. |
+| `canvasRect` | array | no | [x, y, width, height] in canvas points: exactly this part. Omitted: everything in the document, with `padding` round it. |
+| `device` | string — `mac`, `ipad`, `iphone` | no | Export on a device of this kind, or fail with noDeviceAvailable when none is connected. Omitted, the server picks. |
+| `maxPixels` | number | no | Pixel budget when `scale` is omitted. Default 8000000, at most 16000000. |
+| `padding` | number | no | The margin round the content when `canvasRect` is omitted, in canvas points. Default 40. |
+| `scale` | number | no | Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`. |
+
 ### `get_tool`
 
 Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, and when true `inkType`, `toolWidth`, `pickerDialWidth` and `color` (#RRGGBBAA). READ THIS BEFORE DRAWING and pass the values explicitly to draw_strokes / draw_selection / render_sketch, so strokes you author match the pen the user is holding unless they asked for something else. The values are never applied implicitly: you hold them, so a preview and its commit are the same numbers even if the user switches tools in between. `isInkingTool` is false for the eraser, lasso, or Bring to Front — nothing sensible to inherit, so use your own values. `color` is reported LIGHT-CANONICAL, whatever appearance the device is currently showing — copy it into draw_strokes/restyle_strokes verbatim, no colorAppearance needed.
@@ -1286,4 +1393,18 @@ Report the tool picker's CURRENT tool on the connected device — `isInkingTool`
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `docId` | string | yes | Any open document id on the device. |
+
+### `diff_docs`
+
+What differs between a document and a BASE copy of it, element by element — read-only. THE way to learn what the user changed: keep a copy when you finish (the bytes of the `infsketch://doc/<id>/raw` resource, saved to a file, or a second document), and when the user says "I adjusted it", diff against that copy before you touch anything, so their changes are taken over and not overwritten.
+
+It compares CONTENT, not bytes: a device that merely opens a document rewrites its thumbnail, viewport and appearance, and re-archives its strokes, so the raw bytes change when nobody edited anything. `equal: true` means the sync engine sees no change. Give exactly one base: `baseDocId` (another document on this server) or `basePath` (an ABSOLUTE path to a saved .infsketch copy on the machine the server runs on). REQUIRES a device with the `diffDocs` capability; baseNotFound for an unknown `baseDocId`, baseUndecodable when the base is not a document.
+
+REPLY: one JSON object `{equal, bytesEqual, added, removed, changed, changes, retagged, reordered, docFields}`. `added`, `removed` and `changed` are each `{strokeIds, textIds, imageIds, arrowIds, formulaIds}` (every key present) — ids of this document for added and changed, of the base for removed. `changes` maps each changed id to what differs: "geometry" (where it is, its transform, an arrow's points, a wrap width), "content" (a text's characters, a formula's source, an image's pixels), "style" (everything else). `retagged` lists elements whose tags differ, `reordered` is true when the stacking of what both have differs, and `docFields` names the document's own fields that differ (grids, paper, export settings).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `docId` | string | yes | The document as it is now (its id, or its name when no other document has that name). |
+| `baseDocId` | string | no | The base: another document on this server (id, or unambiguous name). |
+| `basePath` | string | no | The base: an absolute path to a .infsketch file on the machine the server runs on. |
 

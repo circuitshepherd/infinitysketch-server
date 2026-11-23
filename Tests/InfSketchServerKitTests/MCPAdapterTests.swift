@@ -335,9 +335,13 @@ actor FakeCreateDocDevice {
     /// An APP-style push: straight up the WS `op` path, exactly as the mirror's settle-push
     /// arrives — NOT through any MCP tool. What `theAppsOwnPushIsNotUndoable` needs.
     func push(docId: String, bytes: Data) async throws {
+        // The `subscribed` snapshot is NOT awaited here: this device's pump loop reads the same
+        // socket and takes it, so a read here got the NEXT message — the keepalive, 30 s later
+        // (measured 2026-11-23: the two tests that push each took 30.3 s, a third of the
+        // suite's wall time). The server handles one connection's messages in order, so the op
+        // is applied after the subscribe either way.
         try await ws.send(.string(ClientMessage.subscribe(
             docId: docId, createIfMissing: true).jsonText()))
-        _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
         try await ws.send(.string(ClientMessage.op(
             docId: docId, opId: "app-push-\(UUID().uuidString)",
             payload: OpPayload(type: "fullDoc", data: bytes)).jsonText()))
@@ -462,6 +466,13 @@ actor FakeStrokeOpDevice {
     func sendReply(requestId: UInt32, docId: String, bytes: Data) async throws {
         try await ws.send(.string(ClientMessage.strokeOpReply(
             requestId: requestId, docId: docId, payload: .inline(bytes), meta: nil, failureReason: nil
+        ).jsonText()))
+    }
+
+    /// The same with a `meta` (an op that answers with both).
+    func sendReply(requestId: UInt32, docId: String, bytes: Data, meta: Data) async throws {
+        try await ws.send(.string(ClientMessage.strokeOpReply(
+            requestId: requestId, docId: docId, payload: .inline(bytes), meta: meta, failureReason: nil
         ).jsonText()))
     }
 
@@ -806,8 +817,9 @@ actor FakeStrokeOpDevice {
     /// renaming this from `listToolsContainsAllFiftyEightTools`.
     /// The arrow preset writes and the new-arrow style (2026-10-15) added seven, renaming this from
     /// `listToolsContainsAllFiftyNineTools`. The formula tools (2026-11-19) added four, renaming
-    /// this from `listToolsContainsAllSixtySixTools`.
-    @Test func listToolsContainsAllSeventyTools() async throws {
+    /// this from `listToolsContainsAllSixtySixTools`. `diff_docs` and `batch` (2026-11-22) added
+    /// two, renaming this from `listToolsContainsAllSeventyTools`.
+    @Test func listToolsContainsAllSeventyTwoTools() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
@@ -817,7 +829,7 @@ actor FakeStrokeOpDevice {
         let names = Set(tools.map(\.name))
         #expect(names == [
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
-            "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
+            "draw_strokes", "delete_strokes", "list_strokes", "render_sketch", "export_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
             "transform_elements", "undo_last_edit", "fill_region", "draw_dots", "list_tags",
@@ -827,10 +839,10 @@ actor FakeStrokeOpDevice {
             "merge_docs",
             "add_image", "remove_image", "list_texts", "list_images",
             "list_grids", "add_grid", "update_grid", "remove_grid", "set_grid_origin",
-            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements",
+            "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements", "diff_docs", "batch",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
-            "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
+            "list_arrows", "list_arrow_presets", "add_arrow", "add_shape", "reshape_arrow", "restyle_arrows", "remove_arrow",
             "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
             "list_formulas", "add_formula", "edit_formula", "remove_formula",
@@ -1359,6 +1371,671 @@ actor FakeStrokeOpDevice {
             arguments: ["docId": "d", "textId": .string(id), "text": "after"])
         #expect(isError != true)
         #expect(await device.receivedRequests.isEmpty, "plain edit_text must not relay to any device")
+
+        await server.stop()
+    }
+
+    /// A solid fill thinner than 3 points is told that it will stripe in a small image; a wider
+    /// one, a hatch, and a fill at the user's own pen width are not.
+    @Test func aThinSolidFillIsToldItWillStripe() {
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 1, spacingRatio: nil)?.contains("stripes") == true)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 2.9, spacingRatio: 0.2) != nil)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 3, spacingRatio: nil) == nil)
+        #expect(MCPAdapter.thinFillNote(drawnWidth: 1, spacingRatio: 3) == nil, "a hatch is meant to show its lines")
+        #expect(MCPAdapter.thinFillNote(drawnWidth: nil, spacingRatio: nil) == nil)
+    }
+
+    /// `list_docs` says when the server first stored a document — and leaves the field out when
+    /// it does not know, never guessing from the modification date.
+    @Test func listDocsSaysWhenADocumentWasFirstStored() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d" through a store: its creation
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "list_docs", arguments: [:])
+        #expect(isError != true)
+        let rows = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [[String: Any]])
+        let row = try #require(rows.first { $0["id"] as? String == "d" })
+        let createdAt = try #require(row["createdAt"] as? String)
+        let date = try #require(ISO8601DateFormatter().date(from: createdAt))
+        #expect(abs(date.timeIntervalSinceNow) < 60)
+
+        await server.stop()
+    }
+
+    // MARK: - one shape for every write's result
+
+    /// A write's text is as it was; beside it `structuredContent` says the same in ONE shape:
+    /// `message`, `seq`, a field per `key: value` line, `notes`, and the new element's id as `id`
+    /// whatever the tool calls it.
+    @Test func aWritesReplyHasOneStructuredShape() throws {
+        func fields(_ text: String, seq: Int? = 7) throws -> [String: Value] {
+            try #require(MCPAdapter.structuredReply(text, seq: seq)?.objectValue)
+        }
+        let arrow = try fields("added arrow to D at seq 7\narrowId: A1")
+        #expect(arrow["message"] == .string("added arrow to D at seq 7"))
+        #expect(arrow["seq"] == .int(7))
+        #expect(arrow["arrowId"] == .string("A1") && arrow["id"] == .string("A1"))
+
+        let text = try fields("added styled text at seq 7\nid: T1\ncanvasBounds: [1.5, 20.0, 17.0, 21.0]")
+        #expect(text["id"] == .string("T1"))
+        let bounds = try #require(text["canvasBounds"]?.arrayValue)
+        #expect(bounds.compactMap { Double($0, strict: false) } == [1.5, 20, 17, 21], "an array of numbers, not a string")
+
+        // The plain add_text names its element only in its sentence, and its last word is the seq:
+        // that text stays, and the id is read out of it.
+        let plain = try fields("added 11111111-2222-3333-4444-555555555555 at seq 7")
+        #expect(plain["id"] == .string("11111111-2222-3333-4444-555555555555"))
+        let removed = try fields("removed arrow 11111111-2222-3333-4444-555555555555 at seq 7")
+        #expect(removed["id"] == .string("11111111-2222-3333-4444-555555555555"))
+
+        // A DOCUMENT's id is a UUID too, and most replies name the document: that is never `id`.
+        // (The review found a dozen tools answering `id: <the document>`; the fixtures' documents
+        // are called "d", which is why no test saw it.)
+        let doc = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        for sentence in ["set paper on \(doc) at seq 7", "set pinned=true on 2 element(s) in \(doc) at seq 7",
+                         "transformed elements in \(doc) at seq 7", "filled the region in \(doc) with 1 stroke(s) at seq 7",
+                         "copied 2 element(s) from \(doc) into \(doc) at seq 7", "restyled arrows in \(doc) at seq 7",
+                         "added image to \(doc) at seq 7", "merged \(doc) into \(doc) at seq 7"] {
+            #expect(try fields(sentence)["id"] == nil, "\(sentence)")
+        }
+        #expect(try fields("added arrow to \(doc) at seq 7\narrowId: A1")["id"] == .string("A1"))
+
+        let copy = try fields("copied 2 element(s) from S into T at seq 7\ncreatedArrowIds: a, b\ncreatedTextIds: c")
+        #expect(copy["createdArrowIds"] == .array([.string("a"), .string("b")]))
+        #expect(copy["createdTextIds"] == .array([.string("c")]))
+
+        let fill = try fields("filled the region in D with 1 stroke(s) at seq 7\nids: k1\nstoredColors: #AFAFB5FF\nnote: a solid fill this thin shows stripes")
+        #expect(fill["ids"] == .array([.string("k1")]))
+        #expect(fill["storedColors"] == .array([.string("#AFAFB5FF")]))
+        #expect(fill["notes"] == .array([.string("a solid fill this thin shows stripes")]))
+
+        let drawn = try fields("drew 1 stroke(s) at seq 7\nids: k1\ninherited from the user's tool: color, width")
+        #expect(drawn["notes"] == .array([.string("inherited from the user's tool: color, width")]),
+                "a line that is not `key: value` is kept, as a note")
+
+        // A reply that is JSON already (the formula tools') is its own structure.
+        let formula = try fields(#"{"id":"F1","seq":9,"typeset":true,"canvasBounds":[1,2,3,4]}"#)
+        #expect(formula["id"] == .string("F1") && formula["seq"] == .int(9) && formula["message"] == nil)
+    }
+
+    /// The structure rides on the real result of a write, and the text beside it is unchanged.
+    @Test func aWriteReturnsItsStructureBesideItsText() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let context = try await client.send(CallTool.request(.init(
+            name: "add_text", arguments: ["docId": "d", "text": "label", "canvasX": 1, "canvasY": 2])))
+        let result = try await context.value
+        let text = toolResultText(result.content)
+        #expect(text.hasPrefix("added ") && text.contains(" at seq "))
+        let structured = try #require(result.structuredContent?.objectValue)
+        let id = try #require(structured["id"]?.stringValue)
+        #expect(text == "added \(id) at seq \(structured["seq"]?.intValue ?? -1)", "the text is what it always was")
+        #expect(try await texts(of: client, "d").first?.id == id)
+
+        await server.stop()
+    }
+
+    // MARK: - device kinds
+
+    /// A device says its kind with a hello word (`kind:mac`). `list_open_docs` counts the kinds
+    /// apart from the abilities, and `render_sketch`'s `device` asks for one — read by the server,
+    /// never relayed.
+    /// `--prefer-device mac` (improvement note D2: "the Mac does the work, the iPad shows the
+    /// result"): work any capable device can do goes to one of that kind while one is connected,
+    /// whichever device spoke last; with none of that kind, to the ordinary choice. A request
+    /// that names a kind itself is not overruled.
+    @Test func aPreferredKindOfDeviceGetsTheWork() async throws {
+        let (server, port, task) = try await startServer(config: SessionConfig(preferredDeviceKind: "mac"))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reply = FakeStrokeOpDevice.AutoReply.bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"arrowId":"A"}"#.utf8))
+        let mac = try await FakeStrokeOpDevice(port: port, autoReply: reply, capabilities: ["authorStrokes", "arrows", "kind:mac"])
+        defer { Task { await mac.close() } }
+        // Connected LAST, so the most recently active: without a preference the work is its.
+        let ipad = try await FakeStrokeOpDevice(port: port, autoReply: reply, capabilities: ["authorStrokes", "arrows", "kind:ipad"])
+        defer { Task { await ipad.close() } }
+
+        let line: Value = .array([.array([0, 0]), .array([50, 0])])
+        let (_, isError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(isError != true)
+        #expect(await mac.receivedRequests.count == 1)
+        #expect(await ipad.receivedRequests.isEmpty)
+
+        let (listed, _) = try await client.callTool(name: "list_open_docs", arguments: [:])
+        let listing = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(listed).utf8)) as? [String: Any])
+        #expect((listing["devices"] as? [String: Any])?["preferredKind"] as? String == "mac")
+
+        // A render that asks for the iPad gets the iPad.
+        _ = try await client.callTool(name: "render_sketch", arguments: ["docId": "d", "device": "ipad"])
+        #expect(await ipad.receivedRequests.count == 1)
+        #expect(await mac.receivedRequests.count == 1)
+
+        // With no Mac connected the work is done by what is there.
+        await mac.close()
+        try await Task.sleep(for: .milliseconds(200))
+        let (_, laterError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(laterError != true)
+        #expect(await ipad.receivedRequests.count == 2)
+        await server.stop()
+    }
+
+    /// A write's structured reply names the kind of device that did the work; its text does not
+    /// change, and an error or a reply without a structured form is left as it is.
+    @Test func aWritesStructuredReplyNamesTheDevice() {
+        let write = MCPAdapter.writeResult("added arrow to d at seq 3\narrowId: A1B2C3D4-0000-0000-0000-000000000001", seq: 3)
+        let named = MCPAdapter.naming(device: "mac", in: write)
+        guard case .object(let fields)? = named.structuredContent else { Issue.record("no structured content"); return }
+        #expect(fields["device"] == .string("mac") && fields["seq"] == .int(3))
+        #expect(named.content == write.content, "the text is what it was")
+        #expect(MCPAdapter.naming(device: nil, in: write).structuredContent == write.structuredContent)
+        let plain = CallTool.Result(content: [.text(text: "[]", annotations: nil, _meta: nil)])
+        #expect(MCPAdapter.naming(device: "mac", in: plain).structuredContent == nil)
+        let failed = CallTool.Result(content: [.text(text: "deviceTimeout", annotations: nil, _meta: nil)],
+                                     structuredContent: .object(["message": "x"]), isError: true)
+        #expect(MCPAdapter.naming(device: "mac", in: failed).structuredContent == .object(["message": "x"]))
+    }
+
+    @Test func aRenderCanAskForAKindOfDeviceAndTheKindsAreListed() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let mac = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data(#"{"renderedBy":"mac"}"#.utf8)),
+            capabilities: ["authorStrokes", "kind:mac"])
+        defer { Task { await mac.close() } }
+
+        let (listed, _) = try await client.callTool(name: "list_open_docs", arguments: [:])
+        let listing = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(listed).utf8)) as? [String: Any])
+        let devices = try #require(listing["devices"] as? [String: Any])
+        #expect(devices["kinds"] as? [String: Int] == ["mac": 1])
+        #expect(devices["capabilities"] as? [String] == ["authorStrokes"], "a kind is not an ability")
+
+        let (refused, refusedError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "ipad"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("none of them a ipad"), "\(toolResultText(refused))")
+        #expect(await mac.receivedRequests.isEmpty)
+
+        let (_, isError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "mac"])
+        #expect(isError != true)
+        let request = try #require(await mac.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["device"] == nil, "which device is the server's business, not the renderer's")
+
+        let (bad, badError) = try await client.callTool(
+            name: "render_sketch", arguments: ["docId": "d", "device": "watch"])
+        #expect(badError == true)
+        #expect(toolResultText(bad).hasPrefix("invalidArguments: device"))
+
+        await server.stop()
+    }
+
+    // MARK: - batch
+
+    /// The document's texts, read back through the summary resource's own parser.
+    private func texts(of client: Client, _ docId: String) async throws -> [DocJSON.TextSummary] {
+        let raw = try await client.readResource(uri: "infsketch://doc/\(docId)/raw")
+        let blob = try #require(raw[0].blob)
+        let bytes = try #require(Data(base64Encoded: blob))
+        return try DocJSON.summary(from: bytes).texts
+    }
+
+    /// Several writes land as ONE write: one seq, every op's reply in order, and one
+    /// `undo_last_edit` takes the whole batch back.
+    @Test func aBatchWritesOnceAndIsOneUndoStep() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        // One ordinary write first, to know what a single write's seq is.
+        let (first, _) = try await client.callTool(
+            name: "add_text", arguments: ["docId": "d", "text": "before", "canvasX": 0, "canvasY": 0])
+        let seqBefore = try #require(Int(toolResultText(first).components(separatedBy: "at seq ").last ?? ""))
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "one", "canvasX": 10, "canvasY": 20]],
+                ["tool": "add_text", "arguments": ["text": "two", "canvasX": 30, "canvasY": 40]],
+                ["tool": "set_paper", "arguments": ["light": "#FFEEDD"]],
+            ]])
+        #expect(isError != true, "\(toolResultText(content))")
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        #expect(reply["seq"] as? Int == seqBefore + 1, "three ops, ONE write")
+        let results = try #require(reply["results"] as? [[String: Any]])
+        #expect(results.count == 3)
+        #expect((results[0]["message"] as? String)?.hasPrefix("added ") == true)
+        #expect(results[0]["seq"] as? Int == seqBefore + 1)
+        #expect((results[2]["message"] as? String)?.contains("set paper") == true)
+
+        let after = try await texts(of: client, "d")
+        #expect(after.map(\.text) == ["before", "one", "two"])
+        // The reply's ids are the ones in the document.
+        #expect(results[0]["id"] as? String == after[1].id)
+        #expect(results[1]["id"] as? String == after[2].id)
+
+        let (undone, undoError) = try await client.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+        #expect(undoError != true, "\(toolResultText(undone))")
+        #expect(try await texts(of: client, "d").map(\.text) == ["before"], "one undo takes the whole batch back")
+
+        await server.stop()
+    }
+
+    /// An op that fails stops the batch and NOTHING is written — not even the ops before it.
+    @Test func aFailingOpWritesNothingAndIsNamed() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "one", "canvasX": 10, "canvasY": 20]],
+                ["tool": "edit_text", "arguments": ["textId": "no-such-text", "text": "x"]],
+                ["tool": "add_text", "arguments": ["text": "three", "canvasX": 10, "canvasY": 20]],
+            ]])
+        #expect(isError == true)
+        let text = toolResultText(content)
+        #expect(text.hasPrefix("batchFailed: ops[1] (edit_text) — textNotFound"), "\(text)")
+        #expect(text.contains("wrote NOTHING"))
+        #expect(try await texts(of: client, "d").isEmpty)
+
+        await server.stop()
+    }
+
+    /// What a batch refuses before any op runs: a tool that does not work on bytes, an op aimed at
+    /// another document, an argument its tool does not know, and a malformed op.
+    @Test func aBatchChecksEveryOpBeforeAnyRuns() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "other", bytes: Fixtures.docBytes)
+        let good: Value = ["tool": "add_text", "arguments": ["text": "one", "canvasX": 1, "canvasY": 2]]
+
+        func refusal(_ ops: [Value]) async throws -> String {
+            let (content, isError) = try await client.callTool(name: "batch", arguments: ["docId": "d", "ops": .array(ops)])
+            #expect(isError == true)
+            return toolResultText(content)
+        }
+        #expect(try await refusal([good, ["tool": "delete_doc", "arguments": [:]]]).hasPrefix(#"invalidArgument: ops[1].tool "delete_doc" cannot run in a batch"#))
+        #expect(try await refusal([good, ["tool": "transform_selection", "arguments": [:]]]).contains("cannot run in a batch"))
+        #expect(try await refusal([good, ["tool": "add_text", "arguments": ["docId": "other", "text": "x", "canvasX": 1, "canvasY": 2]]])
+            .hasPrefix("invalidArgument: ops[1].docId names another document"))
+        #expect(try await refusal([good, ["tool": "add_text", "arguments": ["text": "x", "canvasX": 1, "canvasY": 2, "colour": "#FF0000"]]])
+            .hasPrefix("ops[1]: invalidArgument: colour"))
+        #expect(try await refusal([good, ["arguments": [:]]]).hasPrefix("invalidArgument: ops[1] must be"))
+        #expect(try await refusal([]).hasPrefix("invalidArgument: ops must be a non-empty array"))
+        #expect(try await texts(of: client, "d").isEmpty, "none of the refused batches wrote its first op")
+
+        // An op may name the batch's own document; it is the same document.
+        let (same, sameError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d", "ops": [["tool": "add_text", "arguments": ["docId": "d", "text": "x", "canvasX": 1, "canvasY": 2]]]])
+        #expect(sameError != true, "\(toolResultText(same))")
+
+        await server.stop()
+    }
+
+    /// An op that needs a device is handed the batch's WORKING copy — what the ops before it left
+    /// — and what the device returns is what the next op and the one write build on.
+    @Test func aDeviceOpInABatchWorksOnWhatTheOpsBeforeItLeft() async throws {
+        let (server, port, task) = try await startServer(
+            seedDocId: "d", bytes: Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let fromDevice = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"device"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: fromDevice, meta: Data(#"{"arrowId":"A1"}"#.utf8)), capabilities: ["arrows"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(name: "batch", arguments: [
+            "docId": "d",
+            "ops": [
+                ["tool": "add_text", "arguments": ["text": "label", "canvasX": 10, "canvasY": 20]],
+                ["tool": "add_arrow", "arguments": ["canvasPoints": [[0, 0], [10, 0]]]],
+                ["tool": "add_text", "arguments": ["text": "after", "canvasX": 1, "canvasY": 2]],
+            ]])
+        #expect(isError != true, "\(toolResultText(content))")
+
+        let request = try #require(await device.receivedRequests.first)
+        #expect(try DocJSON.summary(from: request.docBytes).texts.map(\.text) == ["label"],
+                "the device was handed the copy with op 0 applied, which is not yet on the server")
+        #expect(await device.receivedRequests.count == 1)
+
+        let raw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let blob = try #require(raw[0].blob)
+        let stored = try #require(Data(base64Encoded: blob))
+        let object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["marker"] as? String == "device", "op 2 built on what the device returned")
+        #expect(try DocJSON.summary(from: stored).texts.map(\.text) == ["after"])
+
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let results = try #require(reply["results"] as? [[String: Any]])
+        #expect(results[1]["arrowId"] as? String == "A1")
+        #expect(results[1]["id"] as? String == "A1", "the new element's id is always also `id`")
+
+        await server.stop()
+    }
+
+    /// A batch whose write is refused TWICE — the user kept drawing — is merged into the document
+    /// as it is now, when the merge has no conflict: the device is handed the three versions
+    /// (`mergeEdit`) and what it returns is written. With a conflict nothing is written and the
+    /// agent is told to send the batch again, as before.
+    @Test(arguments: [0, 1])
+    func aBatchRefusedTwiceIsMergedWhenNothingConflicts(conflicts: Int) async throws {
+        let seed = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "d", bytes: seed)
+        defer { task.cancel() }
+        let agent = try await connectedClient(port: port)
+        defer { Task { await agent.disconnect() } }
+        let user = try await connectedClient(port: port)
+        defer { Task { await user.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil, capabilities: ["arrows", "mergeDocs", "mergeEdit"])
+        defer { Task { await device.close() } }
+        func requests(_ n: Int) async -> Bool {
+            await waitFor { await device.receivedRequests.count >= n }
+            return await device.receivedRequests.count >= n
+        }
+        func stored() async throws -> [String: Any] {
+            let raw = try await user.readResource(uri: "infsketch://doc/d/raw")
+            let blob = try #require(raw[0].blob)
+            let bytes = try #require(Data(base64Encoded: blob))
+            return try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        }
+
+        let batch = Task { try await agent.callTool(name: "batch", arguments: [
+            "docId": "d", "ops": [["tool": "add_arrow", "arguments": ["canvasPoints": [[0, 0], [10, 0]]]]]]) }
+        let withArrow = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"arrow"}"#.utf8)
+        // Twice the batch's op runs, and twice the document changes under it before its write.
+        for run in 1...2 {
+            #expect(await requests(run))
+            let (_, userError) = try await user.callTool(name: "set_paper", arguments: ["docId": "d", "light": run == 1 ? "#FFEEC0" : "#C0EEFF"])
+            #expect(userError != true)
+            let pending = try #require(await device.receivedRequests.last)
+            try await device.sendReply(requestId: pending.requestId, docId: "d", bytes: withArrow, meta: Data(#"{"arrowId":"A1"}"#.utf8))
+        }
+        // The third request is the merge: the document as it is now, with the two other versions.
+        #expect(await requests(3))
+        let merge = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: merge.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "mergeEdit")
+        #expect(Data(base64Encoded: spec["theirs"] as? String ?? "") == withArrow, "the batch's result")
+        let base = try #require(JSONSerialization.jsonObject(with: Data(base64Encoded: spec["base"] as? String ?? "") ?? Data()) as? [String: Any])
+        #expect(base["marker"] == nil, "the document the second run started from")
+        let now = try #require(JSONSerialization.jsonObject(with: merge.docBytes) as? [String: Any])
+        #expect(now["marker"] == nil && now["backgroundColor"] != nil, "the document as the user has it now: \(now.keys.sorted())")
+
+        let merged = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"merged"}"#.utf8)
+        try await device.sendReply(requestId: merge.requestId, docId: "d", bytes: merged,
+                                   meta: Data(#"{"conflicts":\#(conflicts)}"#.utf8))
+        let (content, isError) = try await batch.value
+        if conflicts == 0 {
+            #expect(isError != true, "\(toolResultText(content))")
+            #expect(try await stored()["marker"] as? String == "merged")
+            let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+            #expect(reply["seq"] != nil && (reply["results"] as? [[String: Any]])?.first?["id"] as? String == "A1")
+            // ONE undo entry, back to the document as the user had it.
+            let (undone, undoError) = try await agent.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+            #expect(undoError != true, "\(toolResultText(undone))")
+            let back = try await stored()
+            #expect(back["marker"] == nil && back["backgroundColor"] != nil)
+        } else {
+            #expect(isError == true)
+            #expect(toolResultText(content).contains("wrote NOTHING") && toolResultText(content).contains("send it again"))
+            #expect(try await stored()["marker"] == nil, "a merge that dropped part of the batch is not written")
+        }
+        await server.stop()
+    }
+
+    /// `diff_docs` relays the document with the BASE as a bundle part and passes the device's
+    /// JSON through; the base is another document or a file, exactly one of them.
+    @Test func diffDocsRelaysTheBaseAndPassesTheReplyThrough() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let baseBytes = Data(#"{"aaa001_thumbnailData":"","marker":"base"}"#.utf8)
+        try await seedDocDirectly(server, docId: "copy", bytes: baseBytes)
+        let answer = Data(#"{"equal":true}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(answer), capabilities: ["diffDocs"])
+        defer { Task { await device.close() } }
+
+        let (content, isError) = try await client.callTool(
+            name: "diff_docs", arguments: ["docId": "d", "baseDocId": "copy"])
+        #expect(isError != true, "\(toolResultText(content))")
+        #expect(toolResultText(content) == #"{"equal":true}"#)
+        let request = try #require(await device.receivedRequests.last)
+        #expect(request.docId == "d" && request.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "diffDocs")
+        let carried = try #require(spec["base"] as? String)
+        #expect(Data(base64Encoded: carried) == baseBytes)
+
+        // The same base from a file.
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("diff-base-\(UUID().uuidString).infsketch")
+        try baseBytes.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let (fromFile, fromFileError) = try await client.callTool(
+            name: "diff_docs", arguments: ["docId": "d", "basePath": .string(file.path)])
+        #expect(fromFileError != true, "\(toolResultText(fromFile))")
+        let fileRequest = try #require(await device.receivedRequests.last)
+        let fileSpec = try #require(JSONSerialization.jsonObject(with: fileRequest.spec) as? [String: Any])
+        let fileCarried = try #require(fileSpec["base"] as? String)
+        #expect(Data(base64Encoded: fileCarried) == baseBytes)
+
+        // The document itself was not written.
+        let raw = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let blob = try #require(raw[0].blob)
+        #expect(Data(base64Encoded: blob) == Fixtures.docBytes)
+
+        await server.stop()
+    }
+
+    @Test func diffDocsRefusesABaseItCannotReadByName() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        func refusal(_ arguments: [String: Value]) async throws -> String {
+            let (content, isError) = try await client.callTool(name: "diff_docs", arguments: arguments)
+            #expect(isError == true)
+            return toolResultText(content)
+        }
+        #expect(try await refusal(["docId": "d"]).hasPrefix("invalidArguments: give exactly one"))
+        #expect(try await refusal(["docId": "d", "baseDocId": "d", "basePath": "/tmp/x"]).hasPrefix("invalidArguments: give exactly one"))
+        #expect(try await refusal(["docId": "d", "baseDocId": "nothing-here"]).hasPrefix("baseNotFound"))
+        #expect(try await refusal(["docId": "d", "basePath": "relative/copy.infsketch"]).hasPrefix("basePathNotAbsolute"))
+        #expect(try await refusal(["docId": "d", "basePath": "/nonexistent/copy.infsketch"]).hasPrefix("baseFileNotFound"))
+        await server.stop()
+    }
+
+    /// `styleBase` rides in the spec and needs a device that knows it: an older app would ignore
+    /// it and draw the arrow in the user's style. An add without it still reaches an older app.
+    @Test func styleBaseGoesOnlyToADeviceThatKnowsIt() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reply = Data(#"{"aaa001_thumbnailData":"","marker":"arrow"}"#.utf8)
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(reply), capabilities: ["arrows"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]], "styleBase": "factory"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("styleBase"), "\(toolResultText(refused))")
+        let (plain, plainError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]]])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "styleBase"])
+        defer { Task { await device.close() } }
+        let (added, addedError) = try await client.callTool(
+            name: "add_arrow", arguments: ["docId": "d", "canvasPoints": [[0, 0], [10, 0]], "styleBase": "factory"])
+        #expect(addedError != true, "\(toolResultText(added))")
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["styleBase"] as? String == "factory")
+
+        await server.stop()
+    }
+
+    /// `placeBy` is device work under its own capability: an app without it would ignore the
+    /// key, place by the default point and answer success. The reply carries the box the device
+    /// laid out, for add and for edit.
+    @Test func placeByGoesToADeviceThatKnowsItAndTheReplyCarriesTheBox() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "tick", "canvasX": 10, "canvasY": 20,
+                        "placeBy": ["row": "top", "column": "center"]])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("placeBy"), "\(toolResultText(refused))")
+        await old.close()
+
+        let placed = Data(#"{"aaa001_thumbnailData":"","marker":"placed"}"#.utf8)
+        let meta = Data(#"{"id":"11111111-2222-3333-4444-555555555555","canvasBounds":"1.5, 20.0, 17.0, 21.0"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: placed, meta: meta), capabilities: ["authorText", "placeBy"])
+        defer { Task { await device.close() } }
+
+        let (added, addedError) = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "tick", "canvasX": 10, "canvasY": 20,
+                        "placeBy": ["row": "top", "column": "center"]])
+        #expect(addedError != true, "\(toolResultText(added))")
+        let addedText = toolResultText(added)
+        #expect(addedText.contains("id: 11111111-2222-3333-4444-555555555555"))
+        #expect(addedText.contains("canvasBounds: [1.5, 20.0, 17.0, 21.0]"))
+        let addRequest = try #require(await device.receivedRequests.last)
+        let addSpec = try #require(JSONSerialization.jsonObject(with: addRequest.spec) as? [String: Any])
+        #expect(addSpec["op"] as? String == "addText")
+        #expect((addSpec["placeBy"] as? [String: String]) == ["row": "top", "column": "center"])
+        #expect(addSpec["inlineMath"] == nil, "not said, not sent")
+
+        // A said `inlineMath` goes to the device BESIDE `placeBy`, so that it places the box the
+        // text will be shown with; without `placeBy` it is the server's alone, as before.
+        _ = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 10, "canvasY": 20, "inlineMath": true,
+                        "placeBy": ["row": "top", "column": "center"]])
+        let mathRequest = try #require(await device.receivedRequests.last)
+        let mathSpec = try #require(JSONSerialization.jsonObject(with: mathRequest.spec) as? [String: Any])
+        #expect(mathSpec["inlineMath"] as? Bool == true)
+        _ = try await client.callTool(
+            name: "add_text",
+            arguments: ["docId": "d", "text": "$x$", "canvasX": 10, "canvasY": 20, "inlineMath": true, "color": "#FF0000"])
+        let styledRequest = try #require(await device.receivedRequests.last)
+        let styledSpec = try #require(JSONSerialization.jsonObject(with: styledRequest.spec) as? [String: Any])
+        #expect(styledSpec["inlineMath"] == nil)
+
+        let (edited, editedError) = try await client.callTool(
+            name: "edit_text",
+            arguments: ["docId": "d", "textId": "11111111-2222-3333-4444-555555555555", "canvasX": 30,
+                        "placeBy": ["row": "middle", "column": "right"]])
+        #expect(editedError != true, "\(toolResultText(edited))")
+        #expect(toolResultText(edited).contains("canvasBounds: [1.5, 20.0, 17.0, 21.0]"))
+        let editRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editRequest.spec) as? [String: Any])
+        #expect(editSpec["op"] as? String == "editText")
+        #expect(editSpec["canvasX"] as? Double == 30)
+        #expect(editSpec["canvasY"] == nil)
+
+        await server.stop()
+    }
+
+    /// A position for a text that carries a transform means "where it is shown" only to an app
+    /// with `placeBy`: an older one writes the origin under the transform and answers success.
+    /// So a device-path edit that moves such a text asks for that app, also without `placeBy`.
+    @Test func aPositionForATransformedTextOnTheDevicePathNeedsAnAppThatPlaces() async throws {
+        func doc(transform: String) -> Data {
+            Data(#"{"aaa001_thumbnailData":"","placedTextsData":[{"id":"AAAAAAAA-0000-0000-0000-000000000001","text":["hi",{}],"rect":[[100,200],[1,1]],"transform":\#(transform),"opacity":1,"pinned":false,"wordWrapEnabled":false,"colorSchemeIsDark":false}]}"#.utf8)
+        }
+        let id = "AAAAAAAA-0000-0000-0000-000000000001"
+        let (server, port, task) = try await startServer(
+            seedDocId: "turned", bytes: doc(transform: #"{"a":0,"b":1,"c":-1,"d":0,"tx":5,"ty":7}"#))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "plain", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":0,"ty":0}"#))
+        try await seedDocDirectly(server, docId: "dragged", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":5,"ty":7}"#))
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        // Turned: refused for the older app, by the name of what it lacks.
+        let (turned, turnedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "turned", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(turnedError == true)
+        #expect(toolResultText(turned).contains("placeBy"), "\(toolResultText(turned))")
+        // A styled edit that also moves a DRAGGED text: the same.
+        let (dragged, draggedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "dragged", "textId": .string(id), "canvasX": 50, "canvasY": 60, "color": "#FF0000"])
+        #expect(draggedError == true)
+        #expect(toolResultText(dragged).contains("placeBy"))
+        #expect(await old.receivedRequests.isEmpty)
+        // An untransformed text is moved by the older app as it always was.
+        let (plain, plainError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "plain", "textId": .string(id), "canvasX": 50, "canvasY": 60, "color": "#FF0000"])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
+
+        await server.stop()
+    }
+
+    /// A position for a text that is turned or scaled is the device's to compute (its shown
+    /// corner depends on its laid-out size); a text that was only dragged is placed by the server.
+    @Test func aNewPositionForATurnedTextIsRelayedAndForADraggedOneIsNot() async throws {
+        func doc(transform: String) -> Data {
+            Data(#"{"aaa001_thumbnailData":"","placedTextsData":[{"id":"AAAAAAAA-0000-0000-0000-000000000001","text":["hi",{}],"rect":[[100,200],[1,1]],"transform":\#(transform),"opacity":1,"pinned":false,"wordWrapEnabled":false,"colorSchemeIsDark":false}]}"#.utf8)
+        }
+        let id = "AAAAAAAA-0000-0000-0000-000000000001"
+        let (server, port, task) = try await startServer(
+            seedDocId: "dragged", bytes: doc(transform: #"{"a":1,"b":0,"c":0,"d":1,"tx":5,"ty":7}"#))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        try await seedDocDirectly(server, docId: "turned", bytes: doc(transform: #"{"a":0,"b":1,"c":-1,"d":0,"tx":5,"ty":7}"#))
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(Data(#"{"aaa001_thumbnailData":"","marker":"device"}"#.utf8)), capabilities: ["authorText", "placeBy"])
+        defer { Task { await device.close() } }
+
+        let (_, draggedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "dragged", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(draggedError != true)
+        #expect(await device.receivedRequests.isEmpty, "a dragged text is placed by the server")
+        let raw = try await client.readResource(uri: "infsketch://doc/dragged/raw")
+        let blob = try #require(raw[0].blob)
+        let stored = try #require(Data(base64Encoded: blob))
+        let object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        let entry = try #require((object["placedTextsData"] as? [[String: Any]])?.first)
+        #expect(((entry["rect"] as? [Any])?[0] as? [Double]) == [45, 53], "shown at (50, 60): origin + (5, 7)")
+
+        let (_, turnedError) = try await client.callTool(
+            name: "edit_text", arguments: ["docId": "turned", "textId": .string(id), "canvasX": 50, "canvasY": 60])
+        #expect(turnedError != true)
+        let request = try #require(await device.receivedRequests.last)
+        #expect(request.docId == "turned")
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "editText")
 
         await server.stop()
     }
@@ -2099,7 +2776,7 @@ actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "create_doc", arguments: ["name": "SlowDoc"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "deviceTimeout")
+        #expect(toolResultText(content).hasPrefix("deviceTimeout — NOTHING WAS WRITTEN"))
 
         await server.stop()
     }
@@ -2449,6 +3126,81 @@ actor FakeStrokeOpDevice {
         let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
         #expect(spec["tags"] as? [String] == ["axis"])
         await server.stop()
+    }
+
+    /// A closed or filled path, and add_shape, reach only a `closedPaths` device: an app from
+    /// before format 8 would ignore `closed` and `filled` and answer success with an open arrow,
+    /// and does not know `addShape` at all. A plain add_arrow still reaches it.
+    @Test func closedPathsGoOnlyToADeviceThatDrawsThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "authorStrokes"])
+        defer { Task { await old.close() } }
+        let triangle: Value = .array([.array([0, 0]), .array([50, 0]), .array([25, 40])])
+        for arguments: [String: Value] in [
+            ["docId": "d", "canvasPoints": triangle, "closed": true],
+            ["docId": "d", "canvasPoints": triangle, "closed": true, "filled": true],
+        ] {
+            let (refused, isError) = try await client.callTool(name: "add_arrow", arguments: arguments)
+            #expect(isError == true)
+            #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+            #expect(toolResultText(refused).contains("closedPaths"), "the refusal names the missing part: \(toolResultText(refused))")
+        }
+        let (shapeRefused, shapeIsError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "dot", "canvasX": 10, "canvasY": 10, "diameter": 4])
+        #expect(shapeIsError == true && toolResultText(shapeRefused).hasPrefix("noDeviceAvailable"))
+        let (reshapeRefused, reshapeIsError) = try await client.callTool(name: "reshape_arrow", arguments: [
+            "docId": "d", "arrowId": .string(UUID().uuidString), "closed": true])
+        #expect(reshapeIsError == true && toolResultText(reshapeRefused).hasPrefix("noDeviceAvailable"))
+        let (previewRefused, previewIsError) = try await client.callTool(name: "render_sketch", arguments: [
+            "docId": "d", "arrows": .array([.object(["canvasPoints": triangle, "closed": true])])])
+        #expect(previewIsError == true && toolResultText(previewRefused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, plainIsError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": triangle])
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+        await old.close()
+
+        let meta = try JSONEncoder().encode(["arrowId": "A1B2C3D4-0000-0000-0000-000000000001",
+                                             "canvasBounds": "8.000, 8.000, 4.000, 4.000", "drawnWidth": "2.0"])
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta),
+                                                  capabilities: ["arrows", "closedPaths"])
+        defer { Task { await device.close() } }
+        let (added, addedIsError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "dot", "canvasX": 10, "canvasY": 10, "diameter": 4, "color": "#FF0000"])
+        #expect(addedIsError != true)
+        let text = toolResultText(added)
+        #expect(text.hasPrefix("added shape to "))
+        #expect(text.contains("arrowId: A1B2C3D4-0000-0000-0000-000000000001"))
+        #expect(text.contains("canvasBounds: [8.000, 8.000, 4.000, 4.000]") && text.contains("drawnWidth: 2.0"))
+        let shapeRequest = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: shapeRequest.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addShape" && spec["shape"] as? String == "dot")
+        #expect(spec["diameter"] as? Double == 4 && spec["color"] as? String == "#FF0000")
+        // The structured form: the id under `id`, the bounds as numbers.
+        let structured = try #require(MCPAdapter.structuredReply(text, seq: 3))
+        guard case .object(let fields) = structured else { Issue.record("not an object"); return }
+        #expect(fields["id"] == .string("A1B2C3D4-0000-0000-0000-000000000001"))
+        guard case .array(let bounds)? = fields["canvasBounds"] else { Issue.record("canvasBounds is no array"); return }
+        #expect(bounds.compactMap { Double($0) } == [8, 8, 4, 4], "the box as four numbers: \(bounds)")
+
+        let (_, closedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": triangle, "closed": true, "filled": true])
+        #expect(closedIsError != true)
+        let closedRequest = try #require(await device.receivedRequests.last)
+        let closedSpec = try #require(JSONSerialization.jsonObject(with: closedRequest.spec) as? [String: Any])
+        #expect(closedSpec["closed"] as? Bool == true && closedSpec["filled"] as? Bool == true)
+        await server.stop()
+    }
+
+    /// add_shape runs inside a batch like add_arrow, and is a plain bytes op: a lost device
+    /// cannot have changed anything.
+    @Test func addShapeIsBatchableAndABytesOp() {
+        #expect(MCPAdapter.batchableTools.contains("add_shape"))
+        #expect(!MCPAdapter.liveSelectionWriteTools.contains("add_shape"))
+        #expect(!MCPAdapter.deviceSettingWriteTools.contains("add_shape"))
     }
 
     /// restore_stroke_widths names what it was given (whole-branch review #5).
@@ -3415,6 +4167,110 @@ actor FakeStrokeOpDevice {
         #expect((httpResponse as? HTTPURLResponse)?.statusCode == 200)
         #expect(downloaded == pngBytes)
 
+        await server.stop()
+    }
+
+    /// fill_region's `edge` reaches only a `fillEdge` device: another would ignore it and let the
+    /// ink reach past the outline. A fill without it still reaches every device.
+    @Test func aFillsEdgeGoesOnlyToADeviceThatKnowsIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await old.close() } }
+        let square: Value = .array([.array([0, 0]), .array([50, 0]), .array([50, 50]), .array([0, 50])])
+        let (refused, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d", "canvasPoints": square, "edge": "inside"])
+        #expect(isError == true && toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("fillEdge"))
+        let (_, plainError) = try await client.callTool(name: "fill_region", arguments: ["docId": "d", "canvasPoints": square])
+        #expect(plainError != true)
+        await old.close()
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["authorStrokes", "fillEdge"])
+        defer { Task { await device.close() } }
+        let (_, edgeError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d", "canvasPoints": square, "edge": "inside"])
+        #expect(edgeError != true)
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["edge"] as? String == "inside")
+        await server.stop()
+    }
+
+    // MARK: - export_sketch (improvement note D3)
+
+    /// An export is a render with the defaults a published image needs — the paper without the
+    /// grid, a stated appearance, a narrow margin, a larger pixel budget — written to a file.
+    /// It goes only to an `exportRender` device: another would ignore `forFile` and hand back an
+    /// image a quarter the size.
+    @Test func exportSketchRendersWithPostingDefaultsIntoAFile() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: Data(#"{"scale":4.0}"#.utf8)))
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "dark"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("exportRender"))
+        #expect(await old.receivedRequests.isEmpty)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: Data(#"{"scale":4.0}"#.utf8)),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "dark"])
+        #expect(isError != true)
+        #expect(toolResultImage(content) == nil, "an export is a file, never an inline image")
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let path = try #require(reply["filePath"] as? String)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pngBytes)
+        #expect((reply["renderUrl"] as? String)?.hasPrefix("/api/renders/") == true)
+        #expect(reply["scale"] as? Double == 4.0)
+
+        let first = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: first.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "render")
+        #expect(spec["forFile"] as? Bool == true)
+        #expect(spec["background"] as? String == "paper", "no grid unless render_sketch is asked for one")
+        #expect(spec["appearance"] as? String == "dark")
+        #expect(spec["padding"] as? Int == MCPAdapter.exportDefaultPadding)
+        #expect(spec["maxPixels"] as? Int == MCPAdapter.exportDefaultMaxPixels)
+
+        // What the caller says wins, and a scale leaves the budget out.
+        _ = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "scale": 6, "padding": 12, "background": "transparent",
+            "canvasRect": .array([0, 0, 100, 50])])
+        let second = try #require(await device.receivedRequests.last)
+        let said = try #require(JSONSerialization.jsonObject(with: second.spec) as? [String: Any])
+        #expect(said["scale"] as? Double == 6 && said["maxPixels"] == nil && said["padding"] as? Double == 12)
+        #expect(said["background"] as? String == "transparent" && said["canvasRect"] as? [Double] == [0, 0, 100, 50])
+        await server.stop()
+    }
+
+    /// The appearance is the caller's to state, and the grid is not exportable.
+    @Test func exportSketchRefusesWhatWouldMakeTheImageDependOnChance() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data("{}".utf8)),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await device.close() } }
+        let (noAppearance, e1) = try await client.callTool(name: "export_sketch", arguments: ["docId": "d"])
+        #expect(e1 == true)
+        let (grid, e2) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "dark", "background": "paper+grid"])
+        #expect(e2 == true && toolResultText(grid).contains("never shows the grid"))
+        _ = noAppearance
+        #expect(await device.receivedRequests.isEmpty)
         await server.stop()
     }
 
@@ -4586,7 +5442,7 @@ actor FakeStrokeOpDevice {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
                                      "add_text", "edit_text", "render_sketch",
-                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
+                                     "add_arrow", "add_shape", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
                                      "add_formula", "edit_formula"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }
@@ -5344,6 +6200,59 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A call that lost its device says whether it can have changed anything: a bytes op cannot
+    /// (the server writes only after the device has answered), a live-selection op can.
+    @Test func aLostDeviceSaysWhetherTheCallCanHaveChangedAnything() {
+        #expect(MCPAdapter.deviceLostClause(tool: "add_formula").hasPrefix("NOTHING WAS WRITTEN"))
+        #expect(MCPAdapter.deviceLostClause(tool: "render_sketch").hasPrefix("NOTHING WAS WRITTEN"))
+        #expect(MCPAdapter.deviceLostClause(tool: "transform_selection").contains("may still apply"))
+        #expect(MCPAdapter.deviceLostClause(tool: "select_elements").contains("may still apply"))
+        #expect(MCPAdapter.deviceLostClause(tool: "set_new_arrow_style").contains("may still have changed"))
+    }
+
+    /// `find_elements` with `match` or `groupBy` goes only to a device that knows them, and the
+    /// two keys ride in the spec; without them the call is the one an older app answers.
+    @Test func findElementsRelaysItsOptionsUnderTheirOwnCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"roof":["a"]}"#.utf8)),
+            capabilities: ["tagElements"])
+        let (plain, plainError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"]])
+        #expect(plainError != true)
+        #expect(toolResultText(plain) == #"{"roof":["a"]}"#)
+
+        let (refused, refusedError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"], "groupBy": "kind"])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("tagQueries"))
+        await old.close()
+
+        let new = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"strokeIds":["a"]}"#.utf8)),
+            capabilities: ["tagElements", "tagQueries"])
+        defer { Task { await new.close() } }
+        let (grouped, groupedError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof", "sheet"], "match": "all", "groupBy": "kind"])
+        #expect(groupedError != true, "\(toolResultText(grouped))")
+        let request = try #require(await new.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["match"] as? String == "all")
+        #expect(spec["groupBy"] as? String == "kind")
+        #expect(spec["tags"] as? [String] == ["roof", "sheet"])
+
+        let (bad, badError) = try await client.callTool(
+            name: "find_elements", arguments: ["docId": "d", "tags": ["roof"], "match": "most"])
+        #expect(badError == true)
+        #expect(toolResultText(bad).hasPrefix("invalidArguments: match"))
+
+        await server.stop()
+    }
+
     /// `source` absent -> "sourceNotFound", checked before any device is
     /// contacted (mirrors `unknownDoc`'s pre-device-round-trip convenience —
     /// see `callCreateDoc`'s `docExists` pre-check).
@@ -5567,6 +6476,48 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// What is done to the clones in the same call — a transform, tags, the width switch — rides
+    /// in the spec and needs a device that knows it (`copyTransform`): an older app ignores the
+    /// keys and answers a copy that was neither moved nor tagged. A plain copy still reaches it.
+    @Test func copyElementsRelaysWhatIsDoneToTheClonesUnderItsOwnCapability() async throws {
+        let (server, port, task) = try await startServer()  // seeds "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["copyElements"])
+        let (refused, refusedError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "d", "strokeIds": ["k1"], "canvasTranslate": [10, 20]])
+        #expect(refusedError == true)
+        #expect(toolResultText(refused).contains("copyTransform"), "\(toolResultText(refused))")
+        let (plain, plainError) = try await client.callTool(
+            name: "copy_elements", arguments: ["source": "d", "target": "d", "strokeIds": ["k1"]])
+        #expect(plainError != true, "\(toolResultText(plain))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytes(modified), capabilities: ["copyElements", "copyTransform"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "copy_elements",
+            arguments: ["source": "d", "target": "d", "strokeIds": ["k1"],
+                        "scale": [0.5, 0.5], "rotate": 90, "canvasAnchor": [100, 200], "canvasTranslate": [10, 20],
+                        "scaleWidths": true, "tags": ["circuit"]])
+        #expect(isError != true, "\(toolResultText(content))")
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["scale"] as? [Double] == [0.5, 0.5])
+        #expect(spec["rotate"] as? Double == 90)
+        #expect(spec["canvasAnchor"] as? [Double] == [100, 200])
+        #expect(spec["canvasTranslate"] as? [Double] == [10, 20])
+        #expect(spec["scaleWidths"] as? Bool == true)
+        #expect(spec["tags"] as? [String] == ["circuit"])
+
+        await server.stop()
+    }
+
     /// `out.meta`'s created ids (`CopyElements.perform`'s app-side
     /// `{"createdStrokeKeys": […], "createdTextIds": […], "createdImageIds": […]}`
     /// shape) are surfaced in the result text the same way draw_strokes
@@ -5630,19 +6581,35 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
-    /// `source == target` -> "invalidArguments", checked before either doc's
-    /// bytes are even read.
-    @Test func copyElementsSameDocErrors() async throws {
+    /// `source == target` is a copy WITHIN one document: relayed like any other, the document's
+    /// own bytes riding both as the source part and as `docBytes`. It was refused with a bare
+    /// `invalidArguments` until 2026-11-22 (an agent deriving one symbol from another in a
+    /// library sketch had to read every arrow and add it again).
+    @Test func copyElementsWithinOneDocumentIsRelayed() async throws {
         let (server, port, task) = try await startServer()  // seeds "d"
         defer { task.cancel() }
         let client = try await connectedClient(port: port)
         defer { Task { await client.disconnect() } }
 
+        let modified = Data(#"{"aaa001_thumbnailData":"","marker":"copied"}"#.utf8)
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(modified), capabilities: ["copyElements"])
+        defer { Task { await device.close() } }
+
         let (content, isError) = try await client.callTool(
             name: "copy_elements",
             arguments: ["source": "d", "target": "d", "strokeIds": ["k1"]])
-        #expect(isError == true)
-        #expect(toolResultText(content) == "invalidArguments")
+        #expect(isError != true, "\(toolResultText(content))")
+
+        let received = try #require(await device.receivedRequests.first)
+        #expect(received.docId == "d")
+        #expect(received.docBytes == Fixtures.docBytes)
+        let spec = try #require(JSONSerialization.jsonObject(with: received.spec) as? [String: Any])
+        let encodedSource = try #require(spec["source"] as? String)
+        #expect(Data(base64Encoded: encodedSource) == Fixtures.docBytes)
+
+        let rawContents = try await client.readResource(uri: "infsketch://doc/d/raw")
+        let rawBlob = try #require(rawContents[0].blob)
+        #expect(Data(base64Encoded: rawBlob) == modified)
 
         await server.stop()
     }
@@ -5659,7 +6626,7 @@ actor FakeStrokeOpDevice {
         let (content, isError) = try await client.callTool(
             name: "copy_elements", arguments: ["source": "a", "target": "b"])
         #expect(isError == true)
-        #expect(toolResultText(content) == "invalidArguments")
+        #expect(toolResultText(content).hasPrefix("invalidArguments: name at least one of"))
 
         await server.stop()
     }

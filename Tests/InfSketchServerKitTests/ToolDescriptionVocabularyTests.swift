@@ -93,6 +93,18 @@ struct ToolDescriptionVocabularyTests {
         #expect(!Self.containsBareToken("y", in: "the array is ordered by distance only"))
     }
 
+    /// `add_text` takes `text` OR `spans`. With `text` listed as required, a client that checks
+    /// its arguments against the schema could not send `spans` at all: the device refuses the
+    /// two together (`supply "text" OR "spans", not both`).
+    @Test func addTextDoesNotRequireTextSoThatSpansCanBeSentAlone() throws {
+        let tool = try #require(MCPAdapter.toolDefinitions.first { $0.name == "add_text" })
+        guard case .object(let schema) = tool.inputSchema, case .array(let required)? = schema["required"] else {
+            Issue.record("add_text has no required list"); return
+        }
+        #expect(!required.contains(.string("text")))
+        #expect(required.contains(.string("docId")) && required.contains(.string("canvasX")))
+    }
+
     /// `undo_last_edit` said calling it again "does the obvious thing" — read by an agent as
     /// "undoes the undo". It walks one edit FURTHER back; there is no redo.
     @Test func undoLastEditSaysRepeatingItWalksBack() throws {

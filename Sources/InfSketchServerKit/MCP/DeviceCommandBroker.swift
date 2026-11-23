@@ -217,11 +217,46 @@ public actor DeviceCommandBroker {
     private let quietAfter: Duration
 
     public init(createTimeout: Duration = .seconds(10), strokeOpTimeout: Duration = .seconds(20),
-                quietAfter: Duration = .seconds(30), deviceWait: Duration = .zero) {
+                quietAfter: Duration = .seconds(30), deviceWait: Duration = .zero, preferredKind: String? = nil) {
         self.createTimeout = createTimeout
         self.strokeOpTimeout = strokeOpTimeout
         self.quietAfter = quietAfter
         self.deviceWait = deviceWait
+        self.preferredKind = preferredKind
+    }
+
+    /// The kind of device the WORK goes to while one of that kind is connected and able
+    /// (`--prefer-device mac`; improvement note D2: "the Mac does the work, the iPad shows the
+    /// result"). It decides among the devices that can do an op on a document's BYTES: one of
+    /// this kind is asked first — one that has the document open before one that has not — and
+    /// with none of this kind able, the ordinary choice is made. It does not touch an op on a
+    /// device's live state (a selection is where the user made it), a request addressed to one
+    /// device, or a request that names a kind itself (`render_sketch`'s `device`).
+    public let preferredKind: String?
+
+    /// Which KIND of device answered the last request made in the current task, for the tool
+    /// call that task is serving (`MCPAdapter.handleCallTool` sets the box, reads it afterwards
+    /// and names the kind in the reply's structured form). A device's text layout depends on its
+    /// kind, so "which device did this" is part of a write's answer.
+    public final class ServedBy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        public init() {}
+        public var kind: String? {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func note(_ kind: String?) {
+            lock.lock(); defer { lock.unlock() }
+            if let kind { value = kind }
+        }
+    }
+
+    @TaskLocal public static var servedBy: ServedBy?
+
+    /// The kind a connection said in its hello (`kind:mac`), nil for an app that does not say.
+    private static func kind(of connection: Connection) -> String? {
+        connection.capabilities.first { $0.hasPrefix(kindPrefix) }.map { String($0.dropFirst(kindPrefix.count)) }
     }
 
     // MARK: - waiting for a device
@@ -382,6 +417,20 @@ public actor DeviceCommandBroker {
     /// problems with different fixes, and the bare reason string tells them apart for nobody.
     public func connectionSummary() -> (count: Int, capabilities: Set<String>) {
         (connections.count, connections.reduce(into: Set<String>()) { $0.formUnion($1.capabilities) })
+    }
+
+    /// The hello word a device says its KIND with: `kind:mac`, `kind:ipad`, `kind:iphone` (app
+    /// 2.6 and later). Among the capabilities so that a request can ask for a kind by joining it
+    /// (`authorStrokes+kind:mac`), but it is not an ability and is listed apart from them.
+    public static let kindPrefix = "kind:"
+
+    /// The kind of each connected device, by connection — "unknown" for an app that does not say.
+    public func deviceKinds() -> [UUID: String] {
+        Dictionary(uniqueKeysWithValues: connections.map { connection in
+            let kind = connection.capabilities.first { $0.hasPrefix(Self.kindPrefix) }
+                .map { String($0.dropFirst(Self.kindPrefix.count)) }
+            return (connection.id, kind ?? "unknown")
+        })
     }
 
     /// WSAdapter calls on connection close. Fails that connection's pending
@@ -673,7 +722,7 @@ public actor DeviceCommandBroker {
         }
         let now = ContinuousClock.now
         // A device with the document open first; for `.preferOpen`, any capable one after that.
-        func pick(excluding: Set<UUID>) -> Connection? {
+        func pick(capability: String, excluding: Set<UUID>) -> Connection? {
             if let open, let preferred = pickConnection(capability: capability, deviceId: deviceId,
                                                         excluding: excluding, within: open) {
                 // An op any device can serve does not wait on an open device that has gone quiet
@@ -689,6 +738,21 @@ public actor DeviceCommandBroker {
             }
             if routing == .requireOpen, open != nil { return nil }
             return pickConnection(capability: capability, deviceId: deviceId, excluding: excluding)
+        }
+        // The preferred kind first (`preferredKind`), for work any capable device can do and a
+        // request that names no kind itself; with none of that kind able, the ordinary choice.
+        let preferring: String? = routing == .preferOpen && !capability.contains(Self.kindPrefix)
+            ? preferredKind.map { capability + "+" + Self.kindPrefix + $0 } : nil
+        // A preference is not worth a timeout: a preferred device that has gone quiet (a
+        // suspended iPad) does not get the work while the ordinary choice is awake (review
+        // 2026-11-23 — it cost every op the stroke-op timeout before another device was tried).
+        func pick(excluding: Set<UUID>) -> Connection? {
+            let ordinary = pick(capability: capability, excluding: excluding)
+            guard let preferring, let chosen = pick(capability: preferring, excluding: excluding) else { return ordinary }
+            if now - chosen.lastActivity > quietAfter, let ordinary, now - ordinary.lastActivity <= quietAfter {
+                return ordinary
+            }
+            return chosen
         }
         guard let first = pick(excluding: []) else {
             // "Nothing can do this at all" and "something could, but not with this document
@@ -776,6 +840,8 @@ public actor DeviceCommandBroker {
         // Whichever completion path fires (reply / timeout / unregister)
         // releases docIdsInFlight via completePending — nothing further to
         // clean up here regardless of how this throws or returns.
+        let kind = Self.kind(of: connection)
+        defer { Self.servedBy?.note(kind) }
         return try await withCheckedThrowingContinuation { continuation in
             // Register BEFORE sending (the MirrorTransport-subscribe
             // idiom): the reply-routing side must always find an entry

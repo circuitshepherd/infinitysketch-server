@@ -1,4 +1,5 @@
 import Foundation
+import InfSketchWire
 
 /// Pure `JSONSerialization` manipulation of `.infsketch` document JSON, scoped to
 /// placed-text entries (`placedTextsData`). No UIKit, no Codable model of the app's
@@ -50,13 +51,17 @@ public enum DocJSON {
         case invalidColor
         case arrowNotFound
         case formulaNotFound
+        /// A text that is turned or scaled cannot be placed without laying it out; the caller
+        /// routes such an edit to a device first, so this is only reached without one.
+        case textNeedsDeviceToPlace
         /// The document was written by an app whose file format is newer than the one these
         /// edits know (`knownFormatVersion`).
         case documentFormatNewer(file: Int)
     }
 
     /// The newest `.infsketch` format version the edits in this file understand — the app's
-    /// `SketchDocData.currentFormatVersion` at this server's release (7: a text's `inlineMath` and
+    /// `SketchDocData.currentFormatVersion` at this server's release (8: an arrow's `closed` and
+    /// `filled`, which no edit here reads or writes; 7: a text's `inlineMath` and
     /// the document's `newTextsInlineMath`, formulas; 6: one mixed `placedObjects` list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
     /// refuses it: a format change can move where elements live, and an edit made on the old
     /// shape answers not-found for elements that exist, or writes a key the newer app no longer
@@ -64,7 +69,7 @@ public enum DocJSON {
     /// finds nothing, and tells the agent the text is not there. The document itself stays an
     /// opaque payload for sync; only these direct edits read its shape. **Raise this together
     /// with the app's format version, in the same paired release.**
-    public static let knownFormatVersion = 7
+    public static let knownFormatVersion = 8
 
     // MARK: - Read
 
@@ -99,6 +104,11 @@ public enum DocJSON {
     /// false). The key is written only when true, and writing it raises the document to format 7
     /// (`writeInlineMath`); false and nil on a document without the default write exactly the
     /// entry this wrote before formulas existed.
+    ///
+    /// **The font** (2026-11-23): in a document of format 8 or newer the run names the font the
+    /// app bundles, at a fixed size (`AgentTextDefaults`), so the text is the same on every
+    /// device. In an older document the run has no attributes, as always: an app that old does
+    /// not have the font, and each device shows the text in its own system font.
     public static func addText(
         to bytes: Data,
         id: UUID,
@@ -129,6 +139,11 @@ public enum DocJSON {
             // a new text goes in front of the strokes, where texts have always been.
             entry["kind"] = ElementKind.text.rawValue
             entry["layer"] = "front"
+        }
+        let version = (doc["formatVersion"] as? NSNumber)?.intValue ?? (doc["formatVersion"] as? Int) ?? 1
+        if version >= AgentTextDefaults.firstFormatWithTheFont {
+            let font: [String: Any] = ["NSFont": AgentTextDefaults.fontAttribute]
+            entry["text"] = [text, font] as [Any]
         }
         let formulas = inlineMath ?? ((doc["newTextsInlineMath"] as? Bool) ?? false)
         writeInlineMath(formulas, into: &entry, doc: &doc)
@@ -183,7 +198,20 @@ public enum DocJSON {
         }
 
         if x != nil || y != nil {
-            entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
+            // `x` / `y` say where the text is SHOWN. A text the user dragged in the app carries
+            // that drag as a translation on its `transform`, and the origin written here is the
+            // point asked for less that translation — written as asked (until 2026-11-22), the
+            // text landed beside the place by exactly its drag. A text that is turned or scaled
+            // is not placed here at all: its shown corner depends on its laid-out size, which
+            // only a device has (`textPlacementNeedsDevice`, routed in `MCPAdapter.callEditText`).
+            switch transformKind(of: entry) {
+            case .identity:
+                entry["rect"] = updatedRect(entry["rect"], x: x, y: y)
+            case .translation(let tx, let ty):
+                entry["rect"] = updatedRect(entry["rect"], x: x.map { $0 - tx }, y: y.map { $0 - ty })
+            case .other:
+                throw DocJSONError.textNeedsDeviceToPlace
+            }
         }
 
         if let inlineMath {
@@ -193,6 +221,44 @@ public enum DocJSON {
         elements[index] = entry
         setElements(elements, .text, in: &doc)
         return try serialize(doc)
+    }
+
+    /// What a text entry's `transform` does to a position: nothing, a shift, or more.
+    enum TransformKind: Equatable {
+        case identity
+        case translation(tx: Double, ty: Double)
+        case other
+    }
+
+    static func transformKind(of entry: [String: Any]) -> TransformKind {
+        guard let t = entry["transform"] as? [String: Any] else { return .identity }
+        func value(_ key: String, default fallback: Double) -> Double { t[key].flatMap(doubleValue) ?? fallback }
+        let linear = [value("a", default: 1), value("b", default: 0), value("c", default: 0), value("d", default: 1)]
+        guard linear == [1, 0, 0, 1] else { return .other }
+        let tx = value("tx", default: 0), ty = value("ty", default: 0)
+        return tx == 0 && ty == 0 ? .identity : .translation(tx: tx, ty: ty)
+    }
+
+    /// Whether this text carries a transform at all — a drag's translation included. A position
+    /// for such a text is only placed where it is SHOWN by an app that has `placeBy`; an older
+    /// one writes the origin under the transform and answers success.
+    public static func textIsTransformed(in bytes: Data, textId: String) -> Bool {
+        guard let doc = try? parseDocument(bytes) else { return false }
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              let entry = elements[index] as? [String: Any] else { return false }
+        return transformKind(of: entry) != .identity
+    }
+
+    /// Whether moving this text to a canvas position needs a device: it is turned, scaled or
+    /// skewed, so where its corner is shown depends on its laid-out size. False for an unknown id
+    /// (the edit itself answers `textNotFound`).
+    public static func textPlacementNeedsDevice(in bytes: Data, textId: String) -> Bool {
+        guard let doc = try? parseDocument(bytes) else { return false }
+        let elements = rawTextElements(of: doc)
+        guard let index = entryIndex(withId: textId, in: elements),
+              let entry = elements[index] as? [String: Any] else { return false }
+        return transformKind(of: entry) == .other
     }
 
     /// Sets one text's `inlineMath` (format 7) and nothing else — the device path of `add_text` /
@@ -559,6 +625,12 @@ public enum DocJSON {
               let y = doubleValue(origin[1])
         else { return nil }
         let pinned = (entry["pinned"] as? Bool) ?? false
+        // Where the text is SHOWN: a text the user dragged carries the drag on its transform, and
+        // the summary's position is the one `edit_text` takes back. (A turned or scaled text's
+        // shown corner needs its laid-out size; its stored origin is reported, as before.)
+        if case .translation(let tx, let ty) = transformKind(of: entry) {
+            return TextSummary(id: id, text: strings.joined(), x: x + tx, y: y + ty, pinned: pinned)
+        }
         return TextSummary(id: id, text: strings.joined(), x: x, y: y, pinned: pinned)
     }
 

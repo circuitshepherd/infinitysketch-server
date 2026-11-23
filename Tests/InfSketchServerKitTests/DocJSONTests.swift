@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import InfSketchServerKit
+import InfSketchWire
 
 @Suite struct DocJSONTests {
     static let fixture: Data = Data(#"""
@@ -79,8 +80,10 @@ import Testing
         let s = try DocJSON.summary(from: out)
         let edited = try #require(s.texts.first(where: { $0.id.hasSuffix("0002") }))
         #expect(edited.text == "Replaced")
+        // The fixture's text carries a drag of (-5, 6) on its transform; positions are where the
+        // text is SHOWN, in the edit and in the summary alike.
         #expect(edited.x == 7)
-        #expect(edited.y == 400)   // untouched axis preserved
+        #expect(edited.y == 406)   // untouched axis preserved: origin 400 + the drag's 6
         // The new characters keep the style of the text's FIRST run, copied as it is — the
         // attributes are UIKit-archived data this side cannot make, but it can keep them.
         // (Until 2026-11-19 a new string reset the runs to [string, {}].)
@@ -91,6 +94,55 @@ import Testing
         #expect(runs.count == 2)
         #expect(runs[0] as? String == "Replaced")
         #expect(runs[1] as? [String: String] == ["NSColor": "ZHVtbXk=", "NSFont": "ZHVtbXk="])
+    }
+
+    /// A text the user DRAGGED carries the drag as a translation on its transform. A position
+    /// says where the text is SHOWN, so the origin written is the point less that translation —
+    /// written as asked, the text landed beside the place by exactly its drag (2026-11-22).
+    @Test func editTextPlacesADraggedTextWhereAsked() throws {
+        var obj = try JSONSerialization.jsonObject(with: Self.fixture) as! [String: Any]
+        var texts = obj["placedTextsData"] as! [[String: Any]]
+        let index = try #require(texts.firstIndex { ($0["id"] as? String)?.hasSuffix("0002") == true })
+        texts[index]["transform"] = ["a": 1, "b": 0, "c": 0, "d": 1, "tx": 37.5, "ty": -12]
+        obj["placedTextsData"] = texts
+        let dragged = try JSONSerialization.data(withJSONObject: obj)
+
+        let out = try DocJSON.editText(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002",
+                                       newText: nil, x: 500, y: 250)
+        let after = try JSONSerialization.jsonObject(with: out) as! [String: Any]
+        let entry = (after["placedTextsData"] as! [[String: Any]])[index]
+        let origin = (entry["rect"] as! [Any])[0] as! [Double]
+        // Written out as Doubles: `250 + 12` inside the macro is an Int to the Linux toolchain.
+        #expect(origin == [462.5, 262.0], "origin + translation (37.5, -12) is the point asked for (500, 250)")
+        #expect((entry["transform"] as! [String: Double])["tx"] == 37.5, "the transform is left alone")
+
+        // One axis alone: the other keeps its origin.
+        let onlyY = try DocJSON.editText(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002",
+                                         newText: nil, x: nil, y: 0)
+        let entryY = ((try JSONSerialization.jsonObject(with: onlyY) as! [String: Any])["placedTextsData"] as! [[String: Any]])[index]
+        let originY = (entryY["rect"] as! [Any])[0] as! [Double]
+        #expect(originY[1] == 12)
+        #expect(!DocJSON.textPlacementNeedsDevice(in: dragged, textId: "AAAAAAAA-0000-0000-0000-000000000002"))
+    }
+
+    /// A turned or scaled text is not placed here: its shown corner depends on its laid-out
+    /// size, which only a device has. Its characters can still be changed.
+    @Test func editTextDoesNotPlaceATurnedText() throws {
+        var obj = try JSONSerialization.jsonObject(with: Self.fixture) as! [String: Any]
+        var texts = obj["placedTextsData"] as! [[String: Any]]
+        let index = try #require(texts.firstIndex { ($0["id"] as? String)?.hasSuffix("0002") == true })
+        texts[index]["transform"] = ["a": 0, "b": 1, "c": -1, "d": 0, "tx": 10, "ty": 20]
+        obj["placedTextsData"] = texts
+        let turned = try JSONSerialization.data(withJSONObject: obj)
+        let id = "AAAAAAAA-0000-0000-0000-000000000002"
+
+        #expect(DocJSON.textPlacementNeedsDevice(in: turned, textId: id))
+        #expect(!DocJSON.textPlacementNeedsDevice(in: Self.fixture, textId: id))
+        #expect(!DocJSON.textPlacementNeedsDevice(in: turned, textId: "missing"))
+        #expect(throws: DocJSON.DocJSONError.textNeedsDeviceToPlace) {
+            _ = try DocJSON.editText(in: turned, textId: id, newText: nil, x: 1, y: 2)
+        }
+        _ = try DocJSON.editText(in: turned, textId: id, newText: "new words", x: nil, y: nil)
     }
 
     /// A text of several runs becomes one run in the FIRST run's style; a text without a style
@@ -751,5 +803,67 @@ import Testing
         #expect(throws: DocJSON.DocJSONError.textNotFound) {
             _ = try DocJSON.setInlineMath(in: deviceBytes, textId: "nope", to: true)
         }
+    }
+
+    // MARK: - The font of a plain text (document format 8)
+
+    /// The format-6 document at another format version.
+    static func document(format: Int) -> Data {
+        Data(String(decoding: format6, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 6,", with: "\"formatVersion\": \(format),")
+            .utf8)
+    }
+
+    /// From format 8 on every app that opens the document bundles Inter, and the server's own
+    /// text names it: the same font file on every device, where a run without a font is each
+    /// device's system font.
+    @Test func aPlainTextInAFormat8DocumentNamesTheBundledFont() throws {
+        let id = UUID()
+        let out = try DocJSON.addText(to: Self.document(format: 8), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let runs = try #require(try Self.entry(out, id.uuidString)["text"] as? [Any])
+        #expect(runs.count == 2)
+        #expect(runs.first as? String == "Label")
+        let attributes = try #require(runs.last as? [String: Any])
+        #expect(attributes.count == 1)
+        #expect(attributes["NSFont"] as? String == AgentTextDefaults.fontAttribute)
+        #expect(try Self.formatVersion(out) == 8)
+    }
+
+    /// An app of an older format does not have the font: it would show a substitute and store
+    /// the substitute at its next save. So an older document gets the run it always got, and
+    /// its format version is not raised for it.
+    @Test(arguments: [6, 7])
+    func aPlainTextInAnOlderDocumentHasNoFont(format: Int) throws {
+        let id = UUID()
+        let out = try DocJSON.addText(to: Self.document(format: format), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let runs = try #require(try Self.entry(out, id.uuidString)["text"] as? [Any])
+        #expect(runs.first as? String == "Label")
+        #expect((runs.last as? [String: Any])?.isEmpty == true)
+        #expect(try Self.formatVersion(out) == format)
+    }
+
+    /// New characters of a text the server gave the font keep it (the first run's attributes
+    /// are copied as they are).
+    @Test func newCharactersOfSuchATextKeepTheFont() throws {
+        let id = UUID()
+        let added = try DocJSON.addText(to: Self.document(format: 8), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let edited = try DocJSON.editText(in: added, textId: id.uuidString, newText: "Caption", x: nil, y: nil)
+        let runs = try #require(try Self.entry(edited, id.uuidString)["text"] as? [Any])
+        #expect(runs.first as? String == "Caption")
+        #expect((runs.last as? [String: Any])?["NSFont"] as? String == AgentTextDefaults.fontAttribute)
+    }
+
+    /// The archive this side carries and cannot make: it has to be a keyed archive that names
+    /// the family's regular face at the default size. That it DECODES to that font is the
+    /// app's test (`BundledInterFontTests`); this one runs on every platform the server does.
+    @Test func theFontAttributeIsAnArchiveOfTheDefaultFont() throws {
+        let data = try #require(Data(base64Encoded: AgentTextDefaults.fontAttribute))
+        let plist = try #require(try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        #expect(plist["$archiver"] as? String == "NSKeyedArchiver")
+        let objects = try #require(plist["$objects"] as? [Any])
+        #expect(objects.contains { $0 as? String == "InterVariable" })
+        #expect(objects.contains { ($0 as? NSNumber)?.doubleValue == AgentTextDefaults.fontSize && !($0 is String) })
+        #expect(AgentTextDefaults.family == "Inter Variable")
+        #expect(AgentTextDefaults.firstFormatWithTheFont <= DocJSON.knownFormatVersion)
     }
 }

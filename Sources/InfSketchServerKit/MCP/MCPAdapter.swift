@@ -356,7 +356,7 @@ public actor MCPAdapter {
             ])
 
         case .docSummary(let docId):
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             let summary: DocJSON.DocSummary
@@ -372,7 +372,7 @@ public actor MCPAdapter {
             ])
 
         case .docRaw(let docId):
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 throw MCPError.invalidParams("Unknown document: \(docId)")
             }
             return ReadResource.Result(contents: [
@@ -385,7 +385,7 @@ public actor MCPAdapter {
                     .binary(frame.png, uri: uri, mimeType: "image/png")
                 ])
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId),
+            guard let bytes = await documentBytes(docId: docId),
                   let thumbnail = ThumbnailExtractor.thumbnailPNG(fromDocumentBytes: bytes)
             else {
                 throw MCPError.invalidParams("No frame or thumbnail available for document: \(docId)")
@@ -494,6 +494,7 @@ public actor MCPAdapter {
         var parts = ["authorText"]
         if has("wordWrap") || has("wrapWidth") { parts.append("textWrap") }
         if has("layer") { parts.append("objectLayerWrites") }
+        if has("placeBy") { parts.append("placeBy") }
         return parts.joined(separator: "+")
     }
 
@@ -506,7 +507,7 @@ public actor MCPAdapter {
     /// document format, none of which the server-side `DocJSON` path writes — so a tagged or
     /// anchored call must take the device path or the argument would be silently dropped.
     private static func hasStyleArgs(_ arguments: [String: Value]?) -> Bool {
-        (styleArgKeys + ["tags", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"]).contains { key in
+        (styleArgKeys + ["tags", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"]).contains { key in
             guard let value = arguments?[key] else { return false }
             return !value.isNull
         }
@@ -533,6 +534,43 @@ public actor MCPAdapter {
             least 24, rounded to a whole point. Needs a connected device.
             """]),
     ]
+
+    /// `styleBase` — where the style fields a call leaves out come from (`add_arrow`,
+    /// `add_formula`, an ephemeral arrow of `render_sketch`). Relayed under `…+styleBase`: an app
+    /// without it would ignore the key and use the user's style with a success reply.
+    private static let styleBaseProperty: Value = .object([
+        "type": "string", "enum": .array(["user", "factory"].map(Value.string)),
+        "description": """
+            Where every style field you leave out comes from. user (default): the user's own \
+            current style — right when you draw beside the user. factory: the app's built-in \
+            style, the same on every device whatever the user has set — right for a script, which \
+            otherwise draws differently after the user changed their tool. Needs a device with \
+            the `styleBase` capability.
+            """,
+    ])
+
+    /// `placeBy` — which point of the box `canvasX` / `canvasY` name (texts and formulas). Device
+    /// work: only a device knows the box. Relayed under `…+placeBy`, since an app without it
+    /// would ignore the key and place by the default point with a success reply.
+    private static func placeByProperty(default defaultPoint: String) -> Value {
+        .object([
+            "type": "object",
+            "description": """
+                Which point of the box `canvasX` / `canvasY` name: {row: "top"|"middle"|"bottom"| \
+                "baseline", column: "left"|"center"|"right"} — {row: "top", column: "center"} \
+                centers the box under the point, {row: "middle", column: "right"} ends it there. \
+                `baseline` is a point ON the first line's baseline (its left end, middle or \
+                right end). Default: \(defaultPoint). The box is the one the listing reports as \
+                `canvasBounds`. Needs a device with the `placeBy` capability.
+                """,
+            "properties": .object([
+                "row": .object(["type": "string", "enum": .array(["top", "middle", "bottom", "baseline"].map(Value.string))]),
+                "column": .object(["type": "string", "enum": .array(["left", "center", "right"].map(Value.string))]),
+            ]),
+            "required": .array(["row", "column"].map(Value.string)),
+            "additionalProperties": .bool(false),
+        ])
+    }
 
     /// A text's anchor — the point of its box that stays put as it grows — and what picking
     /// one does to the paragraphs' alignment; the Properties panel's anchor grid, as arguments.
@@ -577,10 +615,10 @@ public actor MCPAdapter {
     /// overrides.
     private static let textStyleProperties: [String: Value] = [
         "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
-        "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
+        "fontSize": .object(["type": "number", "description": "Point size, 1–512. A NEW text or span without one is 17 pt."]),
         "bold": .object(["type": "boolean"]),
         "italic": .object(["type": "boolean"]),
-        "family": .object(["type": "string", "description": "A font family name from list_fonts. An unknown family fails with unknownFont."]),
+        "family": .object(["type": "string", "description": "A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
     ]
 
     /// One `spans` array entry: required `text`, plus every whole-field
@@ -762,22 +800,33 @@ public actor MCPAdapter {
                 needs a connected device; plain text does not. Returns the new text's id so you \
                 can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
                 author for the dark canvas). Font families come from list_fonts — call it \
-                before setting a `family`. `anchor` picks the point of the box that stays put \
+                before setting a `family`; without one the text is in Inter, the font the app \
+                bundles, at 17 pt unless `fontSize` says otherwise, and is the same on every \
+                device. `anchor` picks the point of the box that stays put \
                 as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / \
                 `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the \
                 strokes (both need a device). Formulas: write the LaTeX between `$…$` and set \
                 `inlineMath: true` (omitted, the new text takes the document's own default); the \
                 write does not report whether a formula typesets — render_sketch shows it. \
-                \(writeToolCaveats)
+                `placeBy` says which point of the box (canvasX, canvasY) names — its top center, \
+                its right middle, its baseline — so a centered or right-aligned label is ONE call \
+                (needs a device). `anchor` does NOT do that: it never moves the text.
+
+                REPLY: a line "added … at seq N" and a line `id: <the new text's id>`; when a \
+                device laid the text out (any call with a style, tags, an anchor, wrap, a layer \
+                or `placeBy`), also `canvasBounds: [left, top, width, height]`, the box as drawn. \
+                A plain call is written by the server alone, which cannot measure text: pass \
+                `placeBy` (e.g. {row: "top", column: "left"}, which is where it goes anyway) \
+                when you need the box. \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
                 "properties": .object(
                     [
                         "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
-                        "text": .object(["type": "string", "description": "The text to place. Omit if using `spans`."]),
-                        "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner."]),
-                        "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner."]),
+                        "text": .object(["type": "string", "description": "The text to place. Give `text` OR `spans`, exactly one of them."]),
+                        "canvasX": .object(["type": "number", "description": "Canvas-space x of the text box's top-left corner (or of the point `placeBy` names)."]),
+                        "canvasY": .object(["type": "number", "description": "Canvas-space y of the text box's top-left corner (or of the point `placeBy` names)."]),
                         "colorAppearance": colorAppearanceProperty,
                         "tags": .object([
                             "type": "array", "items": .object(["type": "string"]),
@@ -801,11 +850,16 @@ public actor MCPAdapter {
                         "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                           "description": "front (above the strokes; the default) or back (behind strokes and grids). Needs a connected device."]),
                         "inlineMath": inlineMathProperty,
+                        "placeBy": placeByProperty(default: "the top-left corner"),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
                 ),
-                "required": .array(["docId", "text", "canvasX", "canvasY"].map(Value.string)),
+                // `text` is NOT required: a call gives `text` OR `spans`. Listed as required, a
+                // client that checks its arguments against the schema could not send `spans` at
+                // all (the device refuses both together). The either-or is not written as a
+                // top-level `oneOf`: several clients refuse a tool whose schema has one.
+                "required": .array(["docId", "canvasX", "canvasY"].map(Value.string)),
             ])
         ),
         Tool(
@@ -829,7 +883,14 @@ public actor MCPAdapter {
                 keeps that point when its characters change. `wordWrap` / `wrapWidth` turn word \
                 wrap on or off and set its width (needs a device). To move a text between layers \
                 use set_layer. `inlineMath` switches formulas on or off; omitted, the text keeps \
-                its setting. \(writeToolCaveats)
+                its setting. `canvasX` / `canvasY` say where the text is SHOWN — the top-left \
+                corner of its `canvasBounds`, or the point `placeBy` names — whatever transform it \
+                carries (a text the user dragged, turned or scaled in the app); either alone \
+                moves it along that axis. A turned or scaled text needs a device to be placed.
+
+                REPLY: a line "edited <id> at seq N"; when a device made the edit, also \
+                `canvasBounds: [left, top, width, height]`, the box as drawn after it. \
+                \(writeToolCaveats)
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -846,8 +907,8 @@ public actor MCPAdapter {
                                 replaces the characters with the new style instead.
                                 """,
                         ]),
-                        "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner."]),
-                        "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner."]),
+                        "canvasX": .object(["type": "number", "description": "New canvas-space x of the text box's top-left corner as shown (or of the point `placeBy` names)."]),
+                        "canvasY": .object(["type": "number", "description": "New canvas-space y of the text box's top-left corner as shown (or of the point `placeBy` names)."]),
                         "colorAppearance": colorAppearanceProperty,
                         "spans": .object([
                             "type": "array",
@@ -859,6 +920,7 @@ public actor MCPAdapter {
                             "items": textSpanItemSchema,
                         ]),
                         "inlineMath": inlineMathProperty,
+                        "placeBy": placeByProperty(default: "the top-left corner"),
                     ].merging(textStyleProperties) { current, _ in current }
                      .merging(textAnchorProperties) { current, _ in current }
                      .merging(textWrapProperties) { current, _ in current }
@@ -909,22 +971,30 @@ public actor MCPAdapter {
             name: "find_elements",
             description: """
                 Resolve TAGS to element ids, so you can act on them with any tool that takes \
-                ids. Read-only and cheap: no document payload comes back, just \
-                `{tag: [ids]}` for the tags that resolve.
+                ids. Read-only and cheap: no document payload comes back, just ids.
 
                 Ids come back in DOCUMENT order — strokes in drawing order, then texts, then \
-                images, then arrows — so a tagged series is returned in a stable, meaningful \
-                sequence.
+                images, then arrows, then formulas — so a tagged series is returned in a stable, \
+                meaningful sequence.
+
+                `match: "all"` keeps only the elements that carry EVERY tag you name — a section \
+                is "everything tagged `sheet` and `loop`". `groupBy: "kind"` answers by kind, \
+                under the argument names the tools that act on elements take, so the reply can be \
+                handed on to transform_elements, select_elements or copy_elements as it is. \
+                Either needs a device with the `tagQueries` capability.
 
                 A tag whose elements no longer exist is simply ABSENT from the reply rather than \
                 a dangling id, so an empty answer means "those elements are gone", not "the \
                 lookup failed". Tags are set with tag_elements, or at creation time by \
-                draw_strokes / add_text / add_image / add_arrow / fill_region / draw_dots. Use list_tags to \
-                see what a document already has.
+                draw_strokes / add_text / add_image / add_arrow / add_formula / fill_region / \
+                draw_dots. Use list_tags to see what a document already has.
 
-                REPLY: an OBJECT mapping each tag you asked for to an ARRAY of element ids, e.g. \
-                `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from the object \
-                rather than present-and-empty, so check for the key before indexing it.
+                REPLY: by default an OBJECT mapping each tag you asked for to an ARRAY of element \
+                ids, e.g. `{"roof": ["id1", "id2"]}`. A tag with no live elements is ABSENT from \
+                the object rather than present-and-empty, so check for the key before indexing \
+                it. With `groupBy: "kind"` the object is `{"strokeIds": [], "textIds": [], \
+                "imageIds": [], "arrowIds": [], "formulaIds": []}` — every key present, each \
+                holding the matching elements of that kind.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -933,6 +1003,14 @@ public actor MCPAdapter {
                     "tags": .object([
                         "type": "array", "items": .object(["type": "string"]),
                         "description": "The tags to resolve.",
+                    ]),
+                    "match": .object([
+                        "type": "string", "enum": .array([.string("any"), .string("all")]),
+                        "description": "any (default): an element carrying at least one of `tags`. all: only elements carrying every one of them.",
+                    ]),
+                    "groupBy": .object([
+                        "type": "string", "enum": .array([.string("tag"), .string("kind")]),
+                        "description": "tag (default): `{tag: [ids]}`. kind: `{strokeIds, textIds, imageIds, arrowIds, formulaIds}`.",
                     ]),
                 ]),
                 "required": .array(["docId", "tags"].map(Value.string)),
@@ -1171,7 +1249,10 @@ public actor MCPAdapter {
                 closely spaced strokes you would otherwise compute yourself. The strokes are \
                 generated on the device and are ORDINARY strokes: the user can erase part of the \
                 fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, \
-                exactly like anything they drew.
+                exactly like anything they drew. Being strokes, a fill lies BELOW every arrow, \
+                text and formula: for a face that must cover a line, or one flat color at any \
+                size with an exact edge, place an object instead (add_shape, or add_arrow with \
+                `closed` and `filled`).
 
                 `canvasPoints` is the boundary in canvas coordinates, closed by repeating the \
                 first point (an unclosed path is closed for you). Concave shapes fill correctly, \
@@ -1194,6 +1275,17 @@ public actor MCPAdapter {
                 plain rectangle drawn with border:false has visibly wavy sides. If only one edge \
                 is construction, keep the border and cover that edge, or draw the edges you want \
                 yourself with draw_strokes.
+
+                A THIN FILL SHOWS STRIPES IN A SMALL IMAGE. The passes are ink, and ink thinner \
+                than about 3 points is not rendered flat below about 2 pixels per canvas point — \
+                a zoomed-out canvas, an export of a whole sheet. Measured on a 140 × 120 fill: \
+                `drawnWidth: 1` is ruled with stripes at 1.5 to 2 px/pt and a fifth too faint at 1 \
+                px/pt, however dense its passes (`spacingRatio` does not help); `drawnWidth: 3` \
+                is flat from 1.5 px/pt up, and at every scale looked at from 3 px/pt both are. So \
+                fill a face with `drawnWidth` 3 or more — and count on the ink reaching HALF ITS \
+                WIDTH past the outline you give, since the border is centred on it: draw the \
+                outline that much smaller where the edge has to be exact. The reply says so when \
+                a solid fill is thinner.
 
                 TWO HONEST LIMITS. The document still carries every stroke, so a large fill is \
                 genuinely large — the reply tells you how many were made, and past 4 000 passes \
@@ -1251,6 +1343,10 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": "Direction of the passes; 0 is horizontal.",
                     ]),
+                    "edge": .object([
+                        "type": "string", "enum": .array(["centered", "inside"].map(Value.string)),
+                        "description": "Where the ink ends. \"centered\" (default): border and pass ends are centred on canvasPoints, so the ink reaches half a drawnWidth past it. \"inside\": the region is first shrunk by half a drawnWidth, so the ink ends ON canvasPoints — a face filled with wide passes (drawnWidth 3 or more renders flat at any scale) then stays inside its outline. Its OUTWARD corners come out rounded by half the width, since a round pen cannot reach into a corner (a sharp-cornered face is add_shape's). A region narrower than drawnWidth has nothing left inside and is refused.",
+                    ]),
                     "border": .object([
                         "type": "boolean",
                         "description": """
@@ -1268,8 +1364,8 @@ public actor MCPAdapter {
         Tool(
             name: "list_docs",
             description: """
-                Every document on the server: `{id, name, sizeBytes, modifiedAt, hasContent, \
-                open}`, newest-modified first. START HERE when you do not already have a docId — \
+                Every document on the server: `{id, name, sizeBytes, modifiedAt, createdAt, \
+                hasContent, open}`, newest-modified first. START HERE when you do not already have a docId — \
                 every other tool takes one, and this is the tool that tells you what they are. \
                 `id` is the document; `name` is its label, which two documents may share. Every \
                 tool accepts the id, or the name when no other document has it.
@@ -1278,10 +1374,15 @@ public actor MCPAdapter {
                 user's canvas; use list_open_docs when you want the device and capability detail \
                 as well. `hasContent: false` means the bytes live on a device rather than here — \
                 every content tool fetches those for you automatically, or call fetch_doc to pull \
-                one explicitly. An empty list means the server holds no documents at all.
+                one explicitly. An empty list means the server holds no documents at all. \
+                `createdAt` is when this server first stored the document — its creation, for one \
+                made through this server; it is ABSENT for a document the server held before it \
+                kept that record, and for one whose bytes live on a device. `modifiedAt` moves \
+                when a device merely opens the document (thumbnail, viewport): to learn whether \
+                its content changed, use diff_docs.
 
-                REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, hasContent, open}`, newest \
-                first.
+                REPLY: an ARRAY of `{id, name, sizeBytes, modifiedAt, createdAt?, hasContent, \
+                open}`, newest first.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -1292,8 +1393,15 @@ public actor MCPAdapter {
             name: "list_open_docs",
             description: """
                 What is OPEN right now, and on what. Read-only, no device round trip, no docId \
-                needed. Returns `{devices: {count, capabilities}, openDocs: [{docId, name, seq, \
-                subscribers}]}` — `docId` is the document's id, `name` its label.
+                needed. Returns `{devices: {count, capabilities, kinds, preferredKind?}, openDocs: [{docId, name, \
+                seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. \
+                `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" \
+                for an app that does not say) and `openOn` lists the kinds that have that \
+                document open. The SERVER picks the device for a call — one that has the document \
+                open is preferred, and `preferredKind`, present when the server was started with \
+                `--prefer-device`, names the kind that is given the work first; only \
+                render_sketch and export_sketch let you ask for a kind yourself (`device`). A \
+                write's structured reply says which kind did it (`device`).
 
                 CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human \
                 says may be shared by several documents (a shared name is refused \
@@ -1319,7 +1427,10 @@ public actor MCPAdapter {
             description: """
                 The font families installed on the connected device, sorted. Call this before \
                 setting a `family` on add_text/edit_text — an unknown family is rejected with \
-                unknownFont. REQUIRES a connected device — fails with noDeviceAvailable if none \
+                unknownFont. `Inter Variable` is the font the app bundles and the default of a \
+                new text. A named family is laid out the same on a Mac, an iPad and an \
+                iPhone; the device's own system font (`family: "System"`, not in this list) is \
+                not. REQUIRES a connected device — fails with noDeviceAvailable if none \
                 is connected and deviceTimeout if it doesn't respond in time. Read-only: it \
                 never writes to the document, so there is no seq assigned and nothing to retry.
                 """,
@@ -1706,8 +1817,8 @@ public actor MCPAdapter {
                 it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, \
                 `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, \
                 fontSize, family, bold, italic} each) and no top-level style. `color` is \
-                light-canonical and ABSENT for the automatic color; `family` is absent for the \
-                system font. `alignment` is left / center / right / justified / natural, or mixed. \
+                light-canonical and ABSENT for the automatic color; `family` is `System` for the \
+                device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. \
                 `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
                 (the text's own points, before its transform). `inlineMath` is true when every $…$ \
                 in the text shows as a typeset formula (add_text / edit_text set it).
@@ -1729,7 +1840,11 @@ public actor MCPAdapter {
                 REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, \
                 headsLinked, dashPattern, \
-                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
+                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags, closed, filled}`. \
+                `closed` true: the path runs on from its last node to its first — a rectangle, a \
+                circle, a dot (add_shape makes them) — so it has NO ends: the two heads and anchors \
+                are kept but not drawn, and every node, the first too, is a point the line turns at. \
+                `filled` true: the inside is painted in the line's color. \
                 `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
                 join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
                 `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and \
@@ -1930,10 +2045,20 @@ public actor MCPAdapter {
                 points — list_arrows' shape; a smooth point's curve is derived, there are no handles) with a shape at each end, on top of Front \
                 objects (or `layer: "back"`). Give exactly one of `canvasPoints` and `nodes`. Every style field you omit takes the USER'S NEW-ARROW STYLE \
                 (what their Arrow tool draws now: tips, placements, width, color, head, line type, layer) — \
-                or, with `preset`, that preset's style; the fields you pass override either. `color` is light-canonical \
+                or, with `preset`, that preset's style; the fields you pass override either. \
+                `styleBase: "factory"` takes the omitted fields from the app's built-in style \
+                instead (round start, filled head, the middle width, black — white on dark \
+                paper —, solid, front): \
+                pass it from a script, so the same script draws the same arrow whatever the user \
+                has set. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
                 the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) \
-                decides whether a later scale changes the arrow's width. REPLY: the seq and \
+                decides whether a later scale changes the arrow's width. `closed: true` (three \
+                points or more) joins the last point to the first with a real corner there — an \
+                outline with no seam and no heads — and `filled: true` beside it paints the inside \
+                in the line's color: a face that stacks with the other objects, which a fill_region \
+                (strokes, always below every object) cannot. For a rectangle, an ellipse, a circle \
+                or a dot use add_shape. REPLY: the seq and \
                 `arrowId`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -1966,6 +2091,7 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its shape is applied first (a preset holds no color — the arrow has the new-arrow color unless `color` is given), the other fields override it. An unknown name fails with unknownPreset and lists the names there are."]),
+                    "styleBase": styleBaseProperty,
                     "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
                                       "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to (the Arrow tool's Layer setting, normally front)."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
@@ -1986,8 +2112,84 @@ public actor MCPAdapter {
                         "description": "Durable tags for the new arrow (see tag_elements); find it again later with find_elements.",
                     ]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
+                    "closed": closedPathProperty,
+                    "filled": filledPathProperty,
                 ]),
                 "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_shape",
+            description: """
+                Places a closed shape as ONE object: a `rectangle` or `ellipse` (`canvasRect`), a \
+                `circle` (`canvasX`, `canvasY`, `radius`), a `polygon` (`canvasPoints`) or a solid \
+                `dot` (`canvasX`, `canvasY`, `diameter`). It is an ARROW object with a closed path — \
+                list_arrows shows it (`closed: true`), restyle_arrows, reshape_arrow, \
+                transform_elements, set_layer, tag_elements and remove_arrow work on it, and it \
+                stacks with the other objects (a later one lies on top; reorder_elements). That is \
+                the difference to fill_region and draw_dots, which make STROKES: those always lie \
+                below every arrow, text and formula. \
+                The geometry is the LINE'S CENTER: a rectangle of `canvasRect` drawn 2 wide \
+                reaches 1 past it on every side. `filled: true` paints the inside too, in the \
+                line's color, once (a translucent shape is even); for a face without a visible \
+                border give the line the face's color. A `dot` is always solid and exactly \
+                `diameter` across, ink to ink — its line is `drawnWidth`, but at most half the \
+                diameter. A closed path has no ends: there are no heads. \
+                Every style field you omit takes the user's new-arrow style, or the app's own with \
+                `styleBase: "factory"` — pass that from a script. `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the \
+                `arrows` and `closedPaths` capabilities (an app from before closed paths is told to \
+                update). Many shapes in one edit: `batch`. \
+                REPLY: the seq, `arrowId`, `canvasBounds: [left, top, width, height]` — the ink's \
+                box — and `drawnWidth`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "shape": .object(["type": "string", "enum": .array(["rectangle", "ellipse", "circle", "polygon", "dot"].map(Value.string)),
+                                      "description": "What to place. Each shape takes its own geometry arguments and refuses the others by name."]),
+                    "canvasRect": .object(["type": "array", "items": .object(["type": "number"]), "minItems": 4, "maxItems": 4,
+                                           "description": "rectangle / ellipse: [x, y, width, height] of the line's center, in canvas points; width and height above 0. An ellipse is the one inscribed in it."]),
+                    "canvasX": .object(["type": "number", "description": "circle / dot: the center's x, in canvas points."]),
+                    "canvasY": .object(["type": "number", "description": "circle / dot: the center's y, in canvas points."]),
+                    "radius": .object(["type": "number", "description": "circle: the radius of the line's center, in canvas points, above 0. The ink reaches half a drawnWidth past it."]),
+                    "diameter": .object(["type": "number", "minimum": 1, "maximum": 2000,
+                                         "description": "dot: how wide the solid dot is, ink to ink, in canvas points (1–2000)."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "polygon: [[x, y], …] — at least three corners in canvas points. The path closes from the last to the first; do not repeat the first.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "filled": .object(["type": "boolean", "description": "Paint the inside too, in the line's color (default false). A dot is always filled."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40). For a dot: at most half its diameter is used."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The line type: dash, gap, dash, gap … in line widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid. Round a closed path the pattern closes on itself: a whole number of periods, and with dashCorners a dash centered on every corner. Not for a dot."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. The line's color, and the fill's."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets: its line width, line type and corners are applied first, the other fields override it."]),
+                    "styleBase": styleBaseProperty,
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
+                                              "description": "How a dashed line's pattern is laid: fitGaps (default), fitPattern or exact — as add_arrow's."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each side between two corners fitted on its own, a dash centered on every corner."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts."]),
+                    "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "Shifts the pattern, in line widths (−50…50; default 0)."]),
+                    "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
+                                           "description": "How every corner of a rectangle or polygon turns: round (default), miter (sharp) or bevel."]),
+                    "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20,
+                                                 "description": "A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "true (default): a later scale moves the shape's points and keeps its line width; false: the width scales too."]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for the new shape (see tag_elements); find it again later with find_elements.",
+                    ]),
+                ]),
+                "required": .array(["docId", "shape"].map(Value.string)),
             ])
         ),
         Tool(
@@ -1997,7 +2199,9 @@ public actor MCPAdapter {
                 shape: corner / smooth) — keeping its id, style, layer, tags \
                 and place in the stacking order. Read the current nodes with list_arrows, change what \
                 you need, send them back. A pinned arrow is reshaped too, as transform_elements moves \
-                one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. \
+                one (pinning protects it from the user's touches). `closed` / `filled` close or open \
+                the path and fill it or not; with one of them the geometry may be left out, and the \
+                points stay. REQUIRES a device with the `arrows` capability. \
                 \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -2011,6 +2215,8 @@ public actor MCPAdapter {
                         "items": .object(["type": "array", "items": .object(["type": "number"])]),
                     ]),
                     "nodes": MCPAdapter.arrowNodesProperty,
+                    "closed": closedPathProperty,
+                    "filled": filledPathProperty,
                 ]),
                 "required": .array(["docId", "arrowId"].map(Value.string)),
             ])
@@ -2123,7 +2329,9 @@ public actor MCPAdapter {
                 `inlineMath: true` (add_text), with each formula between `$` signs. `canvasX` and \
                 `canvasY` are the LEFT END OF THE BASELINE, so formulas placed at the same \
                 `canvasY` sit on one line, as text does. `fontSize` is the point size it is \
-                typeset at (1–2000); omitted, the user's text size, else 20. `color` is \
+                typeset at (1–2000); omitted, the user's text size, else 20. `placeBy` makes \
+                the coordinates name another point of the box — its center, its right end — so a \
+                centered formula is one call. `color` is \
                 light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a \
                 dark-authored hex); omitted, the user's text color, else Automatic — black on \
                 light paper, white on dark. A source that does not typeset is STORED and \
@@ -2143,8 +2351,10 @@ public actor MCPAdapter {
                 "properties": .object([
                     "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
                     "latex": .object(["type": "string", "description": "The LaTeX source of ONE formula, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
-                    "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline."]),
-                    "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline."]),
+                    "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline (or of the point `placeBy` names)."]),
+                    "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline (or of the point `placeBy` names)."]),
+                    "placeBy": placeByProperty(default: "the left end of the baseline"),
+                    "styleBase": styleBaseProperty,
                     "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
@@ -2163,8 +2373,10 @@ public actor MCPAdapter {
             name: "edit_formula",
             description: """
                 Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` \
-                markers), `fontSize` (points, 1–2000) and `color` (light-canonical; \
-                `colorAppearance` only together with `color`) — give at least one. The LEFT END \
+                markers), `fontSize` (points, 1–2000), `color` (light-canonical; \
+                `colorAppearance` only together with `color`) and a new place (`canvasX` and/or \
+                `canvasY`, naming the left end of the baseline as shown or the point `placeBy` \
+                says, whatever transform the formula carries) — give at least one. Without a new place the LEFT END \
                 OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
                 or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset \
                 is stored and reported as on add_formula. formulaNotFound for an unknown id, \
@@ -2182,6 +2394,9 @@ public actor MCPAdapter {
                     "id": .object(["type": "string", "description": "The formula (list_formulas' or add_formula's `id`)."]),
                     "latex": .object(["type": "string", "description": "The new LaTeX source, without `$` markers, at most 4000 UTF-16 code units (most characters count 1, an emoji 2)."]),
                     "fontSize": .object(["type": "number", "description": "The new point size, 1–2000."]),
+                    "canvasX": .object(["type": "number", "description": "A new canvas x-coordinate for the left end of the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
+                    "canvasY": .object(["type": "number", "description": "A new canvas y-coordinate for the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
+                    "placeBy": placeByProperty(default: "the left end of the baseline"),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light. Only with `color`."]),
@@ -2461,7 +2676,14 @@ public actor MCPAdapter {
                 absolute path on the machine the server runs on) and `renderUrl` (a path RELATIVE \
                 to this server, e.g. /api/renders/<name>.png — join it to the address you reached \
                 this server on and download it, which is what to do when you are NOT on the \
-                server's machine).
+                server's machine). The metadata's `renderedBy` names the kind of device that made \
+                the image ("mac", "ipad", "iphone"). A text in the SYSTEM font (list_texts: \
+                `family: "System"` — every text made before the app had its own font) is \
+                set differently on a Mac: 4 to 5 % wider below 20 pt and with another line \
+                height, so a wrapped line can break at another word; an iPad and an iPhone set \
+                it alike. A text in Inter (the default of a new text) or another named family, \
+                and a formula, are the same on every device. So compare an image of system-font text only with one \
+                from the same kind, or ask for one with `device`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2583,8 +2805,10 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": """
                             Pixel budget. Defaults to 1000000, hard ceiling 4000000. An \
-                            over-large request is downscaled, not rejected, and the \
-                            metadata reports the scale actually used.
+                            over-large request — a larger budget, or a `scale` whose image \
+                            would pass the ceiling — is downscaled to the ceiling, not rejected: \
+                            the metadata reports the `scale` actually used, and \
+                            `requestedScale` when an explicit scale was reduced.
                             """,
                     ]),
                     "appearance": .object([
@@ -2593,6 +2817,17 @@ public actor MCPAdapter {
                         "description": "Which appearance to render. Default: the document's own (the last opener's device). Two connected devices can be viewing in different modes — render both to check your work in each.",
                     ]),
                     "colorAppearance": colorAppearanceProperty,
+                    "device": .object([
+                        "type": "string", "enum": .array(["mac", "ipad", "iphone"].map(Value.string)),
+                        "description": """
+                            Render on a device of this kind, or fail with noDeviceAvailable when \
+                            none is connected. Omitted, the server picks (a device that has the \
+                            document open is preferred). Devices lay text out a little \
+                            differently, so an image that must not change from one export to the \
+                            next — one meant for publishing — should always name the same kind. \
+                            list_open_docs shows the kinds connected.
+                            """,
+                    ]),
                     "writeToFile": .object([
                         "type": "boolean",
                         "description": """
@@ -2613,6 +2848,65 @@ public actor MCPAdapter {
                     ]),
                 ]),
                 "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "export_sketch",
+            description: """
+                Renders a document for PUBLISHING and writes the PNG to a file: the paper \
+                without the grid, in the appearance you name, the content with a narrow margin. \
+                It is render_sketch with the defaults a posted image needs, so none of them can \
+                be forgotten — render_sketch is for looking and aligning (the grid is on, the \
+                appearance is whatever device opened the document last, the image is small). \
+                Read-only. The image may be up to 16 megapixels, four times render_sketch's \
+                ceiling, because it goes to a file and never into the reply; without `scale` or \
+                `maxPixels` it is about 8 megapixels. \
+                `appearance` is REQUIRED: an export must not depend on who opened the document \
+                last. A text in the system font is laid out differently on a Mac than on an iPad \
+                or iPhone (render_sketch's description), so name `device` when exports must \
+                match from one day to the next. \
+                REQUIRES a connected device with the `exportRender` capability. \
+                REPLY: ONE JSON object — the render's metadata (`canvasRect`, `pixelSize`, \
+                `scale`, `appearance`, `renderedBy`, …) with `filePath` (absolute, on the \
+                server's machine) and `renderUrl` (relative to this server; download it when \
+                you are not on that machine). The server names the file and keeps its render \
+                directory bounded, oldest first: copy the file soon. PNG only — a vector \
+                format is not built.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to export."]),
+                    "appearance": .object([
+                        "type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                        "description": "Which appearance to export: the light page or the dark one. Required.",
+                    ]),
+                    "canvasRect": .object([
+                        "type": "array", "items": .object(["type": "number"]), "minItems": 4, "maxItems": 4,
+                        "description": "[x, y, width, height] in canvas points: exactly this part. Omitted: everything in the document, with `padding` round it.",
+                    ]),
+                    "padding": .object([
+                        "type": "number",
+                        "description": "The margin round the content when `canvasRect` is omitted, in canvas points. Default 40.",
+                    ]),
+                    "background": .object([
+                        "type": "string", "enum": .array(["paper", "transparent"].map(Value.string)),
+                        "description": "\"paper\" (default): the document's paper color for `appearance`. \"transparent\": no paper. The grid is never exported — use render_sketch with \"paper+grid\" to see it.",
+                    ]),
+                    "scale": .object([
+                        "type": "number",
+                        "description": "Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`.",
+                    ]),
+                    "maxPixels": .object([
+                        "type": "number",
+                        "description": "Pixel budget when `scale` is omitted. Default 8000000, at most 16000000.",
+                    ]),
+                    "device": .object([
+                        "type": "string", "enum": .array(["mac", "ipad", "iphone"].map(Value.string)),
+                        "description": "Export on a device of this kind, or fail with noDeviceAvailable when none is connected. Omitted, the server picks.",
+                    ]),
+                ]),
+                "required": .array(["docId", "appearance"].map(Value.string)),
             ])
         ),
         Tool(
@@ -3469,6 +3763,45 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "diff_docs",
+            description: """
+                What differs between a document and a BASE copy of it, element by element — \
+                read-only. THE way to learn what the user changed: keep a copy when you finish \
+                (the bytes of the `infsketch://doc/<id>/raw` resource, saved to a file, or a \
+                second document), and when the user says "I adjusted it", diff against that copy \
+                before you touch anything, so their changes are taken over and not overwritten.
+
+                It compares CONTENT, not bytes: a device that merely opens a document rewrites \
+                its thumbnail, viewport and appearance, and re-archives its strokes, so the raw \
+                bytes change when nobody edited anything. `equal: true` means the sync engine \
+                sees no change. Give exactly one base: `baseDocId` (another document on this \
+                server) or `basePath` (an ABSOLUTE path to a saved .infsketch copy on the machine \
+                the server runs on). REQUIRES a device with the `diffDocs` capability; \
+                baseNotFound for an unknown `baseDocId`, baseUndecodable when the base is not a \
+                document.
+
+                REPLY: one JSON object `{equal, bytesEqual, added, removed, changed, changes, \
+                retagged, reordered, docFields}`. `added`, `removed` and `changed` are each \
+                `{strokeIds, textIds, imageIds, arrowIds, formulaIds}` (every key present) — \
+                ids of this document for added and changed, of the base for removed. `changes` \
+                maps each changed id to what differs: "geometry" (where it is, its transform, an \
+                arrow's points, a wrap width), "content" (a text's characters, a formula's \
+                source, an image's pixels), "style" (everything else). `retagged` lists elements \
+                whose tags differ, `reordered` is true when the stacking of what both have \
+                differs, and `docFields` names the document's own fields that differ (grids, \
+                paper, export settings).
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document as it is now (its id, or its name when no other document has that name)."]),
+                    "baseDocId": .object(["type": "string", "description": "The base: another document on this server (id, or unambiguous name)."]),
+                    "basePath": .object(["type": "string", "description": "The base: an absolute path to a .infsketch file on the machine the server runs on."]),
+                ]),
+                "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "copy_elements",
             description: """
                 Copies named strokes/texts/images/arrows/formulas from document `source` INTO document \
@@ -3476,7 +3809,18 @@ public actor MCPAdapter {
                 merge_docs, elements are never deduped by identity, so copying the same \
                 source element twice yields two distinct clones. `source` is left \
                 untouched; `target` gains the copies, texts, images, arrows and formulas keeping \
-                the order they had among each other. At least one of `strokeIds`/ \
+                the order they had among each other. `source` and `target` MAY BE THE SAME \
+                document: the clones then lie exactly on their originals, so move them \
+                (transform_elements) or change them next.
+
+                PLACE THE CLONES IN THE SAME CALL: `scale`, `rotate` (both about `canvasAnchor`) \
+                and `canvasTranslate` are transform_elements' operations, applied to the clones \
+                only; `tags` names them; `scaleWidths: true` lets the arrows' line widths follow \
+                the scale. To put a symbol's pin on a point P: `canvasAnchor` = the pin's place in \
+                the source, `canvasTranslate` = P minus that place. These need a device with the \
+                `copyTransform` capability.
+
+                At least one of `strokeIds`/ \
                 `textIds`/`imageIds`/`arrowIds`/`formulaIds` is required (`formulaIds` need a \
                 device with the `formulas` capability). \
                 REQUIRES a connected device with the copyElements capability — fails with \
@@ -3518,6 +3862,30 @@ public actor MCPAdapter {
                         "type": "array",
                         "description": "Formula ids to clone, from list_formulas.",
                         "items": .object(["type": "string"]),
+                    ]),
+                    "scale": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[sx, sy] applied to the CLONES about `canvasAnchor`; non-zero. A negative factor mirrors.",
+                    ]),
+                    "rotate": .object([
+                        "type": "number",
+                        "description": "Degrees the clones are turned about `canvasAnchor`, after the scale; positive = clockwise on screen.",
+                    ]),
+                    "canvasAnchor": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[x, y], the fixed point of `scale` and `rotate`, in the SOURCE's coordinates (where the clones lie before they move). Defaults to the centre of the clones' bounding box.",
+                    ]),
+                    "canvasTranslate": .object([
+                        "type": "array", "items": .object(["type": "number"]),
+                        "description": "[dx, dy] the clones are moved by, last. Without it they lie at their sources' coordinates.",
+                    ]),
+                    "scaleWidths": .object([
+                        "type": "boolean",
+                        "description": "true: the cloned arrows' line widths follow `scale` (heads and dashes are in widths and follow too), whatever their keepsWidth — which is left as it was. Default false: each arrow follows its own keepsWidth. A stroke's ink always scales with it.",
+                    ]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Tags every clone gets, on top of the ones it inherits from its source.",
                     ]),
                 ]),
                 "required": .array(["source", "target"].map(Value.string)),
@@ -3581,6 +3949,64 @@ public actor MCPAdapter {
                     ]),
                 ]),
                 "required": .array(["docId", "mode"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "batch",
+            description: """
+                Several writes to ONE document as ONE edit: each op is an ordinary tool call \
+                (`{tool, arguments}`), run in order on a working copy of the document, and the \
+                result is written once. The user's canvas changes once, the user gets ONE undo \
+                step for the lot (as does undo_last_edit), and there is one `seq`. Use it for \
+                anything made of many elements — a chart, a circuit, clearing a section and \
+                drawing it again — instead of hundreds of single calls.
+
+                ATOMIC: if any op fails, NOTHING is written and the error names the op. An op \
+                sees what the ops before it did, so you can add a text and list_texts after it, or \
+                tag what an earlier op created (by an id you gave it a tag for; replies arrive \
+                only at the end). Each op's `arguments` are the tool's own; leave `docId` out (it \
+                is this batch's document; `target` for copy_elements, whose `source` may be any \
+                document). Tools a batch takes: \(batchableTools.sorted().joined(separator: ", ")). \
+                Not the live-selection tools, not render_sketch, and nothing that creates, \
+                replaces or deletes a document.
+
+                A batch is ONE request: it has to finish within your client's timeout. An op that \
+                needs a device costs a round trip (roughly a tenth of a second), so keep a batch \
+                to a few hundred ops at most (limit \(maxBatchOps)). If the document changes \
+                while the batch runs — the user draws — the batch is run once more on the new \
+                document by itself; if it changes again, the batch's result is merged into the \
+                document as it then is and written, as long as the user and the batch did not \
+                change the same element. Only then — or when the document changes a third time — \
+                the answer is docChangedDuringOp with nothing written: send the batch again. \
+                A batch you cancel stops at its next op and writes nothing.
+
+                REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in \
+                order. A WRITE's entry is an object: `message` (its reply's first line), `seq`, \
+                and the fields its reply names — `id` for the element it made (always `id`, also \
+                for an arrow), `canvasBounds`, `ids`, `createdArrowIds` and so on, `notes` for \
+                anything it has to tell you. A read's entry is its listing. A batch whose ops \
+                changed nothing has `unchanged: true` and no `seq`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) every op works on."]),
+                    "ops": .object([
+                        "type": "array",
+                        "description": "The tool calls, in the order they are applied.",
+                        "minItems": 1,
+                        "items": .object([
+                            "type": "object",
+                            "properties": .object([
+                                "tool": .object(["type": "string", "description": "A tool name, e.g. add_arrow."]),
+                                "arguments": .object(["type": "object", "description": "That tool's arguments, without docId."]),
+                            ]),
+                            "required": .array(["tool"].map(Value.string)),
+                            "additionalProperties": .bool(false),
+                        ]),
+                    ]),
+                ]),
+                "required": .array(["docId", "ops"].map(Value.string)),
             ])
         ),
         Tool(
@@ -3654,12 +4080,30 @@ public actor MCPAdapter {
         let (resolved, unresolved, refusal) = await resolvingDocRefs(arguments)
         if let refusal { return refusal }
         let arguments = resolved
-        let result = try await dispatchCallTool(name: name, arguments: arguments, unresolvedKeys: unresolved)
+        // Which kind of device the call's work was given to (`DeviceCommandBroker.servedBy`).
+        let served = DeviceCommandBroker.ServedBy()
+        var result = try await DeviceCommandBroker.$servedBy.withValue(served) {
+            try await dispatchCallTool(name: name, arguments: arguments, unresolvedKeys: unresolved)
+        }
+        result = Self.naming(device: served.kind, in: result)
         if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
            let docId = arguments?["docId"]?.stringValue {
             await history.recordLiveSelectionChange(docId: docId)
         }
-        return await enrichedError(result, arguments: arguments)
+        return await enrichedError(result, tool: name, arguments: arguments)
+    }
+
+    /// A write's structured reply with the KIND of device that did its work as `device`
+    /// (improvement note D2: no reply said which device had worked, and a device's kind decides
+    /// how it lays text out — a `placeBy` center is where THAT device measured it). Only the
+    /// structured form: a write's text stays as it is, and a read's reply is its listing. A
+    /// render's metadata says `renderedBy` already. No device, an error or no structured form:
+    /// unchanged.
+    static func naming(device kind: String?, in result: CallTool.Result) -> CallTool.Result {
+        guard let kind, result.isError != true, case .object(var fields)? = result.structuredContent,
+              fields["device"] == nil else { return result }
+        fields["device"] = .string(kind)
+        return CallTool.Result(content: result.content, structuredContent: .object(fields), isError: result.isError)
     }
 
     /// Whether a live-selection write may have landed on the device. A success did; so may an op
@@ -3685,7 +4129,7 @@ public actor MCPAdapter {
 
     /// Every argument that names an EXISTING document. (`merge_docs`' `into` is not one: it names
     /// a document that does not exist yet, so it is a name and nothing resolves it.)
-    static let docIdArgumentNames = ["docId", "source", "target"]
+    static let docIdArgumentNames = ["docId", "source", "target", "baseDocId"]
 
     /// Every argument that names a document, resolved to the document's id — an id, or a name no
     /// other document carries (spec 2026-09-28 §4). Done once HERE so no tool can miss it.
@@ -3848,12 +4292,16 @@ public actor MCPAdapter {
     /// place to keep correct, and it also catches the device-relayed `deviceFailed:
     /// noSelectionActive` string, which no call-site edit could reach. Anything else — every
     /// other error, and every success — passes through untouched.
-    private func enrichedError(_ result: CallTool.Result,
+    private func enrichedError(_ result: CallTool.Result, tool: String,
                                arguments: [String: Value]?) async -> CallTool.Result {
         guard result.isError == true,
               let first = result.content.first,
               case .text(let text, _, _) = first
         else { return result }
+
+        if text == "deviceTimeout" || text == "deviceDisconnected" {
+            return Self.errorResult("\(text) — \(Self.deviceLostClause(tool: tool))")
+        }
 
         if text == "unknownDoc" {
             // A content tool says `unknownDoc` when `currentBytesOrFetch` comes back empty, which
@@ -3936,6 +4384,39 @@ public actor MCPAdapter {
         return result
     }
 
+    /// What a call whose device went quiet or away has, and has not, done — the one thing the
+    /// caller needs before deciding to send it again, and could not know: a drawing script lost
+    /// its device in the middle of an `add_formula` and the bare `deviceDisconnected` did not
+    /// say whether the formula was in the document (2026-11-21).
+    ///
+    /// For every tool that works on a document's BYTES the answer is certain: the device only
+    /// computes, and the server writes after it has answered — no answer, no write. The tools
+    /// that act on the device's own state are the exception: the request may still be carried
+    /// out there until it expires.
+    static func deviceLostClause(tool: String) -> String {
+        if liveSelectionWriteTools.contains(tool) || liveSelectionStateTools.contains(tool) {
+            return "the device may still apply this to its live selection (a request expires a few seconds "
+                + "after its timeout): read the state with get_selection before sending it again"
+        }
+        if deviceSettingWriteTools.contains(tool) {
+            return "the device may still have changed this setting: read it back before sending the call again"
+        }
+        return "NOTHING WAS WRITTEN by this call: a document is written only after the device has answered, "
+            + "so sending it again cannot apply it twice"
+    }
+
+    /// Tools that change the device's selection state without writing the document.
+    static let liveSelectionStateTools: Set<String> = [
+        "select_all", "select_elements", "set_reference_point", "clear_selection",
+    ]
+
+    /// Tools that write a DEVICE setting (the arrow presets, the new-arrow style), on its main
+    /// actor, through the store its own UI uses.
+    static let deviceSettingWriteTools: Set<String> = [
+        "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
+        "restore_arrow_presets", "set_new_arrow_style",
+    ]
+
     /// "Documents: "a" (id), "b" (id)" — capped, because a store with dozens of documents should
     /// not answer a mistyped name with a wall of text. `listed` is already rendered.
     private static func documentsClause(_ listed: [String], limit: Int = 12) -> String {
@@ -3986,6 +4467,7 @@ public actor MCPAdapter {
         case "get_new_arrow_style": return await callArrowPresetOp(arguments, op: "getNewArrowStyle")
         case "set_new_arrow_style": return await callArrowPresetOp(arguments, op: "setNewArrowStyle")
         case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
+        case "add_shape": return await callArrowWrite(arguments, op: "addShape")
         case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
         case "reshape_arrow": return await callArrowWrite(arguments, op: "reshapeArrow")
         case "list_images": return await callListImages(arguments)
@@ -3996,6 +4478,7 @@ public actor MCPAdapter {
         case "set_grid_origin": return await callSetGridOrigin(arguments)
         case "reorder_grids": return await callReorderGrids(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
+        case "export_sketch": return await callExportSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
@@ -4018,9 +4501,11 @@ public actor MCPAdapter {
         case "duplicate_selection": return await callDuplicateSelection(arguments)
         case "merge_docs": return await callMergeDocs(arguments)
         case "copy_elements": return await callCopyElements(arguments)
+        case "diff_docs": return await callDiffDocs(arguments, unresolvedKeys: unresolvedKeys)
         case "reorder_elements": return await callReorderElements(arguments)
         case "set_layer": return await callSetLayer(arguments)
         case "fetch_doc": return await callFetchDoc(arguments)
+        case "batch": return await callBatch(arguments)
         default:
             throw MCPError.invalidParams("Unknown tool: \(name)")
         }
@@ -4043,13 +4528,16 @@ public actor MCPAdapter {
     private func callAddTextServerSide(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.stringArg(arguments, "docId")
+            guard arguments?["text"] != nil else {
+                return Self.errorResult("missingArgument: text — add_text takes `text` or `spans`")
+            }
             let text = try Self.stringArg(arguments, "text")
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
             let pinned = try Self.boolArg(arguments, "pinned", default: false)
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let newId = UUID()
@@ -4086,16 +4574,19 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
             }
+            // Beside `placeBy` the device is told a said `inlineMath` too, so that it places the
+            // box the text will be SHOWN with (see `callEditTextStyled`).
+            if envelope["placeBy"] != nil, let inlineMath { envelope["inlineMath"] = .bool(inlineMath) }
 
             let spec: Data
             do {
@@ -4114,9 +4605,8 @@ public actor MCPAdapter {
                 return Self.errorResult("deviceFailed: \(error)")
             }
 
-            let newId = out.meta
-                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
-                .flatMap { $0["id"] }
+            let meta = out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+            let newId = meta?["id"]
             // A said `inlineMath` is written by the server on the device's bytes (B2); an omitted
             // one is the device's: it gives a new text the document's default itself.
             var fullDoc = out.bytes
@@ -4129,6 +4619,9 @@ public actor MCPAdapter {
                 }
             }
 
+            // The box the device measured — unless the server then switched formulas on or off,
+            // which gives the text another box than the one that was measured.
+            let bounds = fullDoc == out.bytes ? meta?["canvasBounds"] : nil
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
@@ -4136,6 +4629,8 @@ public actor MCPAdapter {
                 if let newId {
                     summary += "\nid: \(newId)"
                 }
+                // The box the device laid out (`TextAuthoring.replyMeta`), as add_image reports its own.
+                if let bounds { summary += "\ncanvasBounds: [\(bounds)]" }
                 return summary
             }
         } catch let error as ArgumentError {
@@ -4233,7 +4728,7 @@ public actor MCPAdapter {
             let height = try Self.optionalDoubleArg(arguments, "canvasHeight")
             let opacity = try Self.optionalDoubleArg(arguments, "opacity")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4311,11 +4806,20 @@ public actor MCPAdapter {
         // put, which the server-side path cannot (it has no text layout).
         // The one read is handed to the server-side path, so its CAS token is the bytes this
         // decision was made on.
+        //
+        // A new POSITION for a text that is turned or scaled: where its corner is shown depends
+        // on its laid-out size, so the device places it too (`DocJSON.textPlacementNeedsDevice`;
+        // a text that was only dragged is placed here, its translation taken off).
         var prefetched: Data?
-        if let text = arguments?["text"], !text.isNull,
+        func given(_ key: String) -> Bool { arguments?[key].map { !$0.isNull } ?? false }
+        let replacesText = given("text"), moves = given("canvasX") || given("canvasY")
+        if replacesText || moves,
            case .string(let docId)? = arguments?["docId"], case .string(let textId)? = arguments?["textId"],
-           let bytes = await manager.currentBytesOrFetch(docId: docId) {
-            if DocJSON.textHasAnchor(in: bytes, textId: textId) {
+           let bytes = await documentBytes(docId: docId) {
+            if replacesText, DocJSON.textHasAnchor(in: bytes, textId: textId) {
+                return await callEditTextStyled(arguments)
+            }
+            if moves, DocJSON.textPlacementNeedsDevice(in: bytes, textId: textId) {
                 return await callEditTextStyled(arguments)
             }
             prefetched = bytes
@@ -4335,7 +4839,7 @@ public actor MCPAdapter {
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
             var read = prefetched
-            if read == nil { read = await manager.currentBytesOrFetch(docId: docId) }
+            if read == nil { read = await documentBytes(docId: docId) }
             guard let bytes = read else {
                 return Self.errorResult("unknownDoc")
             }
@@ -4368,16 +4872,28 @@ public actor MCPAdapter {
             let textId = try Self.stringArg(arguments, "textId")
             let inlineMath = try Self.optionalBoolArg(arguments, "inlineMath")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
             }
+            // A position for a text that carries a transform means "where it is SHOWN" only to an
+            // app that has `placeBy`; an older one writes the origin under the transform and
+            // answers success. So such an edit asks for that app, whether or not it names a point.
+            let moves = envelope["canvasX"] != nil || envelope["canvasY"] != nil
+            var capability = Self.textWriteCapability(arguments)
+            if moves, envelope["placeBy"] == nil, DocJSON.textIsTransformed(in: docBytes, textId: textId) {
+                capability += "+placeBy"
+            }
+            // Beside `placeBy` the device is told a said `inlineMath` too, so that it places the
+            // box the text will be SHOWN with (an app with `placeBy` reads the key; no other is
+            // ever sent it).
+            if envelope["placeBy"] != nil, let inlineMath { envelope["inlineMath"] = .bool(inlineMath) }
 
             let spec: Data
             do {
@@ -4389,7 +4905,7 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(
-                    docId: docId, docBytes: docBytes, spec: spec, capability: Self.textWriteCapability(arguments))
+                    docId: docId, docBytes: docBytes, spec: spec, capability: capability)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -4406,10 +4922,14 @@ public actor MCPAdapter {
                 }
             }
 
+            // The box the device measured — unless the server then switched formulas on or off,
+            // which gives the text another box than the one that was measured.
+            let bounds = fullDoc == out.bytes
+                ? out.meta.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }?["canvasBounds"] : nil
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: fullDoc, expectedBytes: docBytes
             ) { seq in
-                "edited \(textId) at seq \(seq)"
+                "edited \(textId) at seq \(seq)" + (bounds.map { "\ncanvasBounds: [\($0)]" } ?? "")
             }
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
@@ -4426,7 +4946,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -4463,7 +4983,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let textId = try Self.stringArg(arguments, "textId")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4489,7 +5009,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let arrowId = try Self.nonEmptyStringArg(arguments, "arrowId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4528,17 +5048,21 @@ public actor MCPAdapter {
             _ = try Self.doubleArg(arguments, "canvasX")
             _ = try Self.doubleArg(arguments, "canvasY")
             if let refusal = Self.formulaSourceRefusal(latex) { return Self.errorResult(refusal) }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
-            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags"] {
+            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy", "styleBase"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
-            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+            // An app without `placeBy` would ignore the key and place by the baseline; one
+            // without `styleBase` would take the user's text style.
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
+                                           capability: "formulas" + (envelope["placeBy"] == nil ? "" : "+placeBy")
+                                               + (envelope["styleBase"] == nil ? "" : "+styleBase"))
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -4556,17 +5080,21 @@ public actor MCPAdapter {
                let refusal = Self.formulaSourceRefusal(latex) {
                 return Self.errorResult(refusal)
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("editFormula")]
-            for key in ["id", "latex", "fontSize", "color", "colorAppearance"] {
+            for key in ["id", "latex", "fontSize", "color", "colorAppearance", "canvasX", "canvasY", "placeBy"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
-            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec)
+            // A position is new with `placeBy`: an app without it would ignore all three keys
+            // and answer an edit that moved nothing.
+            let places = ["canvasX", "canvasY", "placeBy"].contains { envelope[$0] != nil }
+            return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
+                                           capability: places ? "formulas+placeBy" : "formulas")
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -4580,10 +5108,11 @@ public actor MCPAdapter {
     /// nothing with the request's own bytes: then nothing is written (a pointless write bumps
     /// `seq` for every subscriber and spends the agent's one `undo_last_edit`) and the reply says
     /// `unchanged: true`, without a `seq`.
-    private func relayFormulaWrite(docId: String, bytes: Data, spec: Data) async -> CallTool.Result {
+    private func relayFormulaWrite(docId: String, bytes: Data, spec: Data,
+                                   capability: String = "formulas") async -> CallTool.Result {
         let out: DeviceCommandBroker.StrokeOpReply
         do {
-            out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "formulas")
+            out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: capability)
         } catch let error as DeviceCommandBroker.DeviceCommandError {
             return Self.strokeOpErrorResult(error)
         } catch {
@@ -4611,7 +5140,7 @@ public actor MCPAdapter {
     private func callListFormulas(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let spec: Data
@@ -4638,7 +5167,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let formulaId = try Self.nonEmptyStringArg(arguments, "id")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4696,7 +5225,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let imageId = try Self.stringArg(arguments, "imageId")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4727,7 +5256,7 @@ public actor MCPAdapter {
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
             let pinned = try Self.requiredBoolArg(arguments, "pinned")
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4762,7 +5291,7 @@ public actor MCPAdapter {
             guard light != nil || dark != nil || transparent != nil else {
                 return Self.errorResult("invalidArguments")
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let out: Data
@@ -4929,7 +5458,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let strokes = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5049,7 +5578,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5092,7 +5621,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5138,7 +5667,7 @@ public actor MCPAdapter {
     private func callListArrows(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             let spec: Data
@@ -5168,7 +5697,7 @@ public actor MCPAdapter {
     private func callArrowPresetOp(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
@@ -5266,20 +5795,39 @@ public actor MCPAdapter {
         ])
     }
 
+    /// `closed` on add_arrow / reshape_arrow (format 8).
+    static var closedPathProperty: Value {
+        .object(["type": "boolean",
+                 "description": "true: a CLOSED path — the line runs on from the last point to the first and turns there like at every corner, so there is no seam, no ends and no heads. Needs three points. false: open it again (its heads return). Omitted: an open path for add_arrow, unchanged for reshape_arrow."])
+    }
+
+    /// `filled` on add_arrow / reshape_arrow.
+    static var filledPathProperty: Value {
+        .object(["type": "boolean",
+                 "description": "true: the area a closed path encloses is painted too, in the line's color and together with the line (a translucent shape is even). Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`."])
+    }
+
     /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
     /// as for `transform_elements`), the result written back under the byte CAS.
     private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
-            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
+            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes", "closed", "filled"]
+                : op == "addShape"
+                ? ["shape", "canvasRect", "canvasX", "canvasY", "radius", "diameter", "canvasPoints", "filled",
+                   "drawnWidth", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
+                   "styleBase"]
+                : op == "addArrow"
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
-                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
+                   "styleBase", "closed", "filled"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
@@ -5295,8 +5843,14 @@ public actor MCPAdapter {
                 // An app without `arrowTags` decodes `tags` by IGNORING it and answers success, so a
                 // call that names tags goes only to a device that writes them.
                 let tagged: Bool = { if case .array(let t)? = envelope["tags"] { return !t.isEmpty }; return false }()
+                // The same for `styleBase`: ignored, the arrow would take the user's style.
+                // And for a closed path: an app from before format 8 would ignore `closed` and
+                // `filled` and answer success with an open arrow; `addShape` it does not know at all.
+                let closes = op == "addShape" || envelope["closed"] != nil || envelope["filled"] != nil
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
-                                                       capability: tagged ? "arrows+arrowTags" : "arrows")
+                                                       capability: (tagged ? "arrows+arrowTags" : "arrows")
+                                                           + (envelope["styleBase"] == nil ? "" : "+styleBase")
+                                                           + (closes ? "+closedPaths" : ""))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5306,12 +5860,16 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
                 var summary = op == "addArrow" ? "added arrow to \(docId) at seq \(seq)"
+                    : op == "addShape" ? "added shape to \(docId) at seq \(seq)"
                     : op == "reshapeArrow" ? "reshaped arrow in \(docId) at seq \(seq)"
                     : "restyled arrows in \(docId) at seq \(seq)"
                 if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
-                   let id = decoded["arrowId"] {
-                    summary += "\narrowId: \(id)"
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta) {
+                    if let id = decoded["arrowId"] { summary += "\narrowId: \(id)" }
+                    // A shape's ink box and the line width it was given (a dot's may be less
+                    // than the one asked for).
+                    if let bounds = decoded["canvasBounds"] { summary += "\ncanvasBounds: [\(bounds)]" }
+                    if let width = decoded["drawnWidth"] { summary += "\ndrawnWidth: \(width)" }
                 }
                 return summary
             }
@@ -5326,7 +5884,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5368,7 +5926,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5417,7 +5975,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5459,7 +6017,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.stringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5514,7 +6072,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5564,7 +6122,7 @@ public actor MCPAdapter {
             let docId = try Self.stringArg(arguments, "docId")
             let id = try Self.stringArg(arguments, "id")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5608,7 +6166,7 @@ public actor MCPAdapter {
             let x = try Self.doubleArg(arguments, "canvasX")
             let y = try Self.doubleArg(arguments, "canvasY")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5663,7 +6221,7 @@ public actor MCPAdapter {
                 return Self.errorResult("missingArgument: orderedIds")
             }
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5721,7 +6279,7 @@ public actor MCPAdapter {
             guard mode == "front" || mode == "back" else { return Self.errorResult("invalidArguments") }
             guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var reorderEnvelope: [String: Value] = [
                 "op": .string("reorderElements"),
@@ -5773,7 +6331,7 @@ public actor MCPAdapter {
             let layer = try Self.stringArg(arguments, "layer")
             guard !ids.isEmpty else { return Self.errorResult("invalidArguments: ids must name at least one element") }
             guard layer == "front" || layer == "back" else { return Self.errorResult("invalidArguments: layer must be front or back") }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
@@ -5838,7 +6396,7 @@ public actor MCPAdapter {
             // caller mistake worth naming rather than a silent no-op.
             if tags.isEmpty && mode != "replace" { return Self.errorResult("invalidArgument: tags") }
 
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object([
@@ -5876,7 +6434,26 @@ public actor MCPAdapter {
 
     /// `find_elements` — resolve tags to ids. Read-only: no submit, no seq, nothing to retry.
     private func callFindElements(_ arguments: [String: Value]?) async -> CallTool.Result {
-        await relayTagRead(arguments, op: "findElements", listKey: "tags")
+        do {
+            // `match` / `groupBy` go only to a device that knows them (`tagQueries`): an older app
+            // decodes the spec ignoring both and would answer the default lookup as if it were
+            // the one asked for. A call without them still reaches an older app.
+            var extra: [String: Value] = [:]
+            if let match = try Self.optionalStringArg(arguments, "match") {
+                guard ["any", "all"].contains(match) else { return Self.errorResult("invalidArguments: match must be any or all") }
+                extra["match"] = .string(match)
+            }
+            if let groupBy = try Self.optionalStringArg(arguments, "groupBy") {
+                guard ["tag", "kind"].contains(groupBy) else { return Self.errorResult("invalidArguments: groupBy must be tag or kind") }
+                extra["groupBy"] = .string(groupBy)
+            }
+            return await relayTagRead(arguments, op: "findElements", listKey: "tags", extra: extra,
+                                      capability: extra.isEmpty ? "tagElements" : "tagElements+tagQueries")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
     }
 
     /// `list_tags` — what tags this document has, and how many elements carry each. Read-only.
@@ -5887,21 +6464,23 @@ public actor MCPAdapter {
     /// The shared body of the two read-only tag relays: the device answers in `meta`, which is
     /// passed straight through as the tool's text.
     private func relayTagRead(_ arguments: [String: Value]?, op: String,
-                              listKey: String?) async -> CallTool.Result {
+                              listKey: String?, extra: [String: Value] = [:],
+                              capability: String = "tagElements") async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             var fields: [String: Value] = ["op": .string(op)]
+            fields.merge(extra) { current, _ in current }
             if let listKey {
                 fields[listKey] = .array(try Self.nonEmptyStringArrayArg(arguments, listKey).map(Value.string))
             }
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else { return Self.errorResult("unknownDoc") }
+            guard let bytes = await documentBytes(docId: docId) else { return Self.errorResult("unknownDoc") }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(fields)) }
             catch { return Self.errorResult("invalidArguments") }
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: "tagElements")
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec, capability: capability)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5918,6 +6497,280 @@ public actor MCPAdapter {
         }
     }
 
+    // MARK: - batch
+    //
+    // Several tool calls on ONE working copy, written once (improvement note S1, 2026-11-22: a
+    // sheet was hundreds of single calls, each its own undo step and its own change on the canvas
+    // the user was watching). It reuses every tool's own handler: a handler reads the document
+    // through `documentBytes` and writes through `submitAndRespond`, and while `activeBatch` is
+    // set both go to the batch's working copy instead of the session. No device op and no wire
+    // message knows about batches.
+    //
+    // (Placed here, between two handlers that relay nothing after it: `scripts/audit-tool-arguments`
+    // reads every `Self.<list>` that follows an op's envelope as keys that op sends.)
+
+    /// The document a running `batch` is building. Read and written only by the batch's own task
+    /// (`@TaskLocal`), on this actor.
+    final class BatchContext: @unchecked Sendable {
+        let docId: String
+        /// The working copy: the document as the ops so far have left it.
+        var bytes: Data
+        /// The reply of the op that just ran, waiting for the batch's seq; nil when it wrote nothing.
+        var pendingReply: ((Int) -> String)?
+        var wrote = false
+
+        init(docId: String, bytes: Data) {
+            self.docId = docId
+            self.bytes = bytes
+        }
+
+        func take(docId: String, bytes: Data, expectation: WriteExpectation,
+                  successText: @escaping (Int) -> String) -> CallTool.Result {
+            guard docId == self.docId else {
+                return MCPAdapter.errorResult("invalidArguments: a batch writes only its own document (\(self.docId)), not \(docId)")
+            }
+            // Every batchable tool guards its write by the bytes it read, and it read this copy.
+            guard case .matchBytes(let expected) = expectation, expected == self.bytes else {
+                return MCPAdapter.errorResult("internalError: a batched op did not write the copy it read")
+            }
+            self.bytes = bytes
+            pendingReply = successText
+            wrote = true
+            return MCPAdapter.textResult("")
+        }
+    }
+
+    @TaskLocal private static var activeBatch: BatchContext?
+
+    /// The bytes a tool works on: the document's current ones — or, inside a `batch` on that
+    /// document, the batch's working copy. EVERY tool handler reads through here.
+    private func documentBytes(docId: String) async -> Data? {
+        if let batch = Self.activeBatch, batch.docId == docId { return batch.bytes }
+        return await manager.currentBytesOrFetch(docId: docId)
+    }
+
+    static let maxBatchOps = 400
+
+    /// What may run inside a batch: the tools that work on a document's BYTES — every write of
+    /// that kind, and the reads an op sequence needs between them. A tool is batchable only if it
+    /// reads through `documentBytes` and writes through `submitAndRespond`, which every tool
+    /// below does; the live-selection tools act on a device's own session instead, and the
+    /// document-level tools (create, replace, delete, merge, undo) are not edits of one copy.
+    static let batchableTools: Set<String> = [
+        "add_text", "edit_text", "remove_text", "add_image", "remove_image",
+        "add_arrow", "add_shape", "reshape_arrow", "restyle_arrows", "remove_arrow",
+        "add_formula", "edit_formula", "remove_formula",
+        "draw_strokes", "draw_dots", "fill_region", "delete_strokes",
+        "transform_strokes", "restyle_strokes", "reshape_strokes", "restore_stroke_widths",
+        "transform_elements", "reset_element_transforms", "reorder_elements", "set_layer", "set_pinned",
+        "tag_elements", "copy_elements",
+        "add_grid", "update_grid", "remove_grid", "reorder_grids", "set_grid_origin", "set_paper",
+        // reads
+        "list_strokes", "get_strokes", "list_texts", "list_images", "list_arrows", "list_formulas",
+        "list_grids", "find_elements", "list_tags", "snap_points",
+    ]
+
+    /// A batch's `result` (made from `base`) merged into the document as it is NOW and written,
+    /// for a batch whose own write was refused twice. The device merges (`mergeEdit`: base, the
+    /// document now, the result) and says how many conflicts it met; the merge is written only
+    /// with NONE — a conflict is an element both the user and the batch changed, where the merge
+    /// keeps the user's, so the batch would not be wholly in what is written and the agent must
+    /// not be told it is. Written under the bytes the merge was made from; nil for a conflict, a
+    /// device that cannot merge, or a document that changed yet again — the caller then answers
+    /// as it always did ("send it again"). ONE undo entry, from the document as the user had it.
+    private func writingMerged(docId: String, base: Data, result: Data) async -> Int? {
+        // `base` and the result are whole documents and travel as bundle parts, as `revertMerge`'s do.
+        let envelope: [String: Value] = ["op": .string("mergeEdit")]
+        guard let current = await manager.currentBytesOrFetch(docId: docId), current != base else { return nil }
+        struct MergeMeta: Decodable { let conflicts: Int }
+        do {
+            let spec = try JSONEncoder().encode(Value.object(envelope))
+            let out = try await broker.requestStrokeOp(
+                docId: docId, docBytes: current, spec: spec, capability: "mergeDocs+mergeEdit",
+                specParts: [.base: base, .theirs: result])
+            guard let meta = out.meta.flatMap({ try? JSONDecoder().decode(MergeMeta.self, from: $0) }),
+                  meta.conflicts == 0 else { return nil }
+            // A batch the caller gave up on while the device merged writes nothing, as everywhere
+            // else in a batch (the caller then gets its refusal, which it no longer reads).
+            if Task.isCancelled { return nil }
+            guard case .accepted(let seq) = await manager.submitOpeningSession(
+                docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)",
+                payload: OpPayload(type: "fullDoc", data: out.bytes), expectation: .matchBytes(current)) else { return nil }
+            await history.record(docId: docId, before: current, after: out.bytes)
+            return seq
+        } catch {
+            return nil
+        }
+    }
+
+    private struct BatchOp {
+        let tool: String
+        var arguments: [String: Value]
+    }
+
+    private func callBatch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            guard let rawOps = arguments?["ops"] else { throw ArgumentError.missing("ops") }
+            guard case .array(let items) = rawOps, !items.isEmpty else {
+                return Self.errorResult("invalidArgument: ops must be a non-empty array of {tool, arguments}")
+            }
+            guard items.count <= Self.maxBatchOps else {
+                return Self.errorResult("invalidArgument: ops has \(items.count) entries, a batch takes at most \(Self.maxBatchOps) — split it")
+            }
+
+            // Every op's SHAPE is checked before any runs: a misspelt argument in op 180 should
+            // not cost 179 device round trips.
+            var ops: [BatchOp] = []
+            for (index, item) in items.enumerated() {
+                guard case .object(let fields) = item, case .string(let tool)? = fields["tool"] else {
+                    return Self.errorResult("invalidArgument: ops[\(index)] must be {tool, arguments}")
+                }
+                if let extra = fields.keys.sorted().first(where: { $0 != "tool" && $0 != "arguments" }) {
+                    return Self.errorResult("invalidArgument: ops[\(index)].\(extra) — an op is {tool, arguments}")
+                }
+                guard Self.batchableTools.contains(tool) else {
+                    return Self.errorResult("invalidArgument: ops[\(index)].tool \"\(tool)\" cannot run in a batch — a batch takes "
+                                            + Self.batchableTools.sorted().joined(separator: ", "))
+                }
+                var opArguments: [String: Value] = [:]
+                switch fields["arguments"] {
+                case nil, .null?: break
+                case .object(let given)?: opArguments = given
+                default: return Self.errorResult("invalidArgument: ops[\(index)].arguments must be an object")
+                }
+                // The document is the batch's. One an op names itself must be the same one.
+                let documentKey = tool == "copy_elements" ? "target" : "docId"
+                if case .string(let given)? = opArguments[documentKey] {
+                    guard case .id(docId) = await manager.resolveDocRef(given) else {
+                        return Self.errorResult("invalidArgument: ops[\(index)].\(documentKey) names another document — "
+                                                + "every op of a batch works on the batch's docId; leave it out")
+                    }
+                }
+                opArguments[documentKey] = .string(docId)
+                if let refusal = Self.enforceKnownArguments(name: tool, arguments: opArguments) {
+                    return Self.errorResult("ops[\(index)]: " + Self.text(of: refusal))
+                }
+                ops.append(BatchOp(tool: tool, arguments: opArguments))
+            }
+
+            // Run, write once. A document that changed meanwhile (the user drew) refuses the
+            // write; the ops are then run ONCE more on the new document — they are functions of
+            // the bytes they are given, and nothing of the first run was written or reported.
+            for attempt in 0..<2 {
+                guard let original = await manager.currentBytesOrFetch(docId: docId) else {
+                    return Self.errorResult("unknownDoc")
+                }
+                let context = BatchContext(docId: docId, bytes: original)
+                var replies: [(text: String, pending: ((Int) -> String)?)] = []
+                for (index, op) in ops.enumerated() {
+                    // The caller gave up (its timeout, a cancel): stop here. A device op does not
+                    // notice a cancel by itself, and a batch that ran on and wrote would be drawn
+                    // a second time by the caller that was told nothing.
+                    if Task.isCancelled { return Self.errorResult("cancelled — the batch wrote NOTHING") }
+                    let (resolved, unresolved, refusal) = await resolvingDocRefs(op.arguments)
+                    if let refusal { return Self.batchFailure(index, op.tool, refusal) }
+                    context.pendingReply = nil
+                    let result = try await Self.$activeBatch.withValue(context) {
+                        try await dispatchCallTool(name: op.tool, arguments: resolved, unresolvedKeys: unresolved)
+                    }
+                    if result.isError == true {
+                        let explained = await enrichedError(result, tool: op.tool, arguments: resolved)
+                        return Self.batchFailure(index, op.tool, explained)
+                    }
+                    replies.append((Self.text(of: result), context.pendingReply))
+                }
+
+                func reply(seq: Int?) -> CallTool.Result {
+                    var object: [String: Value] = ["results": .array(replies.map { entry -> Value in
+                        if let pending = entry.pending {
+                            // A WRITE: its structured reply, the shape a call of its own returns
+                            // beside its text (`structuredReply`). In a batch that as a whole
+                            // changed nothing (an add and its removal) there is no seq to quote.
+                            let text = seq.map(pending) ?? "applied — the batch as a whole changed nothing"
+                            return Self.structuredReply(text, seq: seq) ?? .string(text)
+                        }
+                        // A read: a tool that answers in JSON is embedded as JSON, not as a string.
+                        if let data = entry.text.data(using: .utf8),
+                           let json = try? JSONDecoder().decode(Value.self, from: data),
+                           json.objectValue != nil || json.arrayValue != nil { return json }
+                        return .string(entry.text)
+                    })]
+                    if let seq { object["seq"] = .int(seq) } else { object["unchanged"] = .bool(true) }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    let text = (try? encoder.encode(Value.object(object)))
+                        .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                    return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)],
+                                           structuredContent: .object(object))
+                }
+
+                guard context.wrote, context.bytes != original else {
+                    return reply(seq: nil)
+                }
+                if Task.isCancelled { return Self.errorResult("cancelled — the batch wrote NOTHING") }
+                let payload = OpPayload(type: "fullDoc", data: context.bytes)
+                switch await manager.submitOpeningSession(
+                    docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)", payload: payload,
+                    expectation: .matchBytes(original)
+                ) {
+                case .accepted(let seq):
+                    // ONE entry: `undo_last_edit` takes the whole batch back, as the user's undo does.
+                    await history.record(docId: docId, before: original, after: context.bytes)
+                    return reply(seq: seq)
+                case .rejected(let message):
+                    guard case .reject(_, _, let reason, _) = message else {
+                        return Self.errorResult("unexpectedServerResponse")
+                    }
+                    if reason == "docChangedDuringOp", attempt == 0 { continue }
+                    // Twice: the user keeps drawing. Running the ops a third time would only
+                    // lose the race again, so the result is MERGED into the document as it is
+                    // now — when that takes nothing from either side.
+                    if reason == "docChangedDuringOp",
+                       let seq = await writingMerged(docId: docId, base: original, result: context.bytes) {
+                        return reply(seq: seq)
+                    }
+                    return Self.errorResult("\(reason) — the batch wrote NOTHING"
+                                            + (reason == "docChangedDuringOp" ? " (the document changed twice while it ran); send it again" : ""))
+                }
+            }
+            return Self.errorResult("docChangedDuringOp — the batch wrote NOTHING; send it again")
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    static let maxFillIdsReported = 16
+
+    /// What a SOLID fill thinner than 3 points is told in its reply: such ink is not rendered
+    /// flat in a small image, whatever the pass spacing. Measured 2026-11-22 on a 140 × 120 pen
+    /// fill (row brightness, of 255, mean ± half the spread): `drawnWidth: 1` 68.3 ± 3.5 at 1.5
+    /// px/pt, 72.6 ± 4.2 at 1.9, 59.7 at 1.0 (of 76 when flat) — unchanged at three times the
+    /// passes; `drawnWidth: 2` 74.8 ± 2.5 at 1.5; `drawnWidth: 3` 76.0 ± 0 from 1.5 up. An agent
+    /// filled the faces of a 3D body with 1 pt passes for a clean edge and got ruled faces in the
+    /// export. Nil for a hatch (a ratio above 1) and when the width is the user's pen's.
+    static func thinFillNote(drawnWidth: Double?, spacingRatio: Double?) -> String? {
+        guard let drawnWidth, drawnWidth < 3, (spacingRatio ?? 0.4) <= 1 else { return nil }
+        return "a solid fill this thin shows stripes in a small image (below about 2 pixels per canvas point), "
+            + "whatever its spacingRatio; drawnWidth 3 or more renders flat, and reaches half its width past the outline"
+            + " unless edge is \"inside\" — or place the face as an object (add_shape, filled), which is flat at any size"
+    }
+
+    /// The first text of a result — a tool's reply or its error reason.
+    private static func text(of result: CallTool.Result) -> String {
+        for content in result.content {
+            if case .text(let text, _, _) = content { return text }
+        }
+        return ""
+    }
+
+    /// A batch that stopped at op `index`: which op, its own reason, and that nothing was written.
+    private static func batchFailure(_ index: Int, _ tool: String, _ result: CallTool.Result) -> CallTool.Result {
+        errorResult("batchFailed: ops[\(index)] (\(tool)) — \(text(of: result)) — the batch wrote NOTHING")
+    }
+
     /// M2c-3: the explicit counterpart to every content tool's transparent
     /// `currentBytesOrFetch` auto-fetch — this tool exists ONLY so an agent
     /// can distinguish and control the outcome the transparent tools don't
@@ -5930,7 +6783,7 @@ public actor MCPAdapter {
             if let resident = await manager.currentBytes(docId: docId) {
                 return Self.textResult("already available (\(resident.count) bytes): \(docId)")
             }
-            if let bytes = await manager.currentBytesOrFetch(docId: docId) {
+            if let bytes = await documentBytes(docId: docId) {
                 return Self.textResult("fetched \(docId) (\(bytes.count) bytes)")
             }
             // Nothing resident and the fetch returned nil: known-but-unreachable vs truly unknown.
@@ -5959,11 +6812,39 @@ public actor MCPAdapter {
     /// (stroke shape, unknown strokeIds, degenerate rect, pixel budget) is
     /// the device's job, surfaced verbatim as `deviceFailed: <reason>`.
     private func callRenderSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        await renderSketch(arguments, export: false)
+    }
+
+    /// The pixel budget of an export without `scale` or `maxPixels`, and its ceiling (the
+    /// device's, `SketchRenderer.filePixelCeiling` — said here for the tool's text and tests).
+    static let exportDefaultMaxPixels = 8_000_000
+    static let exportPixelCeiling = 16_000_000
+    /// An export's margin round the content, in canvas points.
+    static let exportDefaultPadding = 40
+
+    /// `export_sketch` (improvement note D3): a render with the defaults a published image
+    /// needs — no grid, a stated appearance, a narrow margin, written to a file, a larger pixel
+    /// ceiling — so that none of the four can be forgotten. ONE render path: it is
+    /// `renderSketch` with `export: true`, which sets what the caller left out.
+    private func callExportSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        guard case .string(let appearance)? = arguments?["appearance"], ["light", "dark"].contains(appearance) else {
+            return Self.errorResult(arguments?["appearance"] == nil
+                ? "missingArgument: appearance — \"light\" or \"dark\": an export states which page it is, it never takes the last opener's"
+                : "invalidArgument: appearance must be \"light\" or \"dark\"")
+        }
+        if let background = arguments?["background"], background != .string("paper"), background != .string("transparent") {
+            return Self.errorResult("invalidArgument: background must be \"paper\" or \"transparent\" — an export never shows the grid (render_sketch does)")
+        }
+        return await renderSketch(arguments, export: true)
+    }
+
+    private func renderSketch(_ arguments: [String: Value]?, export: Bool) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let writeToFile = try Self.boolArg(arguments, "writeToFile", default: false)
+            // An export is always a file: it may be four times the size an inline image may be.
+            let writeToFile = try export || Self.boolArg(arguments, "writeToFile", default: false)
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -5976,12 +6857,34 @@ public actor MCPAdapter {
                     specFields[key] = value
                 }
             }
+            if export {
+                // What a published image needs and the caller did not say. `forFile` raises the
+                // device's pixel ceiling: the image goes to a file, never into a reply.
+                specFields["forFile"] = .bool(true)
+                if specFields["background"] == nil { specFields["background"] = .string("paper") }
+                if specFields["padding"] == nil { specFields["padding"] = .int(Self.exportDefaultPadding) }
+                if specFields["scale"] == nil, specFields["maxPixels"] == nil {
+                    specFields["maxPixels"] = .int(Self.exportDefaultMaxPixels)
+                }
+            }
 
             let spec: Data
             do {
                 spec = try JSONEncoder().encode(Value.object(specFields))
             } catch {
                 return Self.errorResult("invalidArguments")
+            }
+
+            // `device` is read HERE and never relayed (it says WHICH device, not what to render):
+            // a kind is a hello word, so asking for one is one more part a device has to offer.
+            // Outside the relay's `do`: a wrong type must answer as an argument error, not as a
+            // device failure.
+            var kind = ""
+            if let device = try Self.optionalStringArg(arguments, "device") {
+                guard ["mac", "ipad", "iphone"].contains(device) else {
+                    return Self.errorResult("invalidArguments: device must be mac, ipad or iphone")
+                }
+                kind = "+" + DeviceCommandBroker.kindPrefix + device
             }
 
             let out: DeviceCommandBroker.StrokeOpReply
@@ -5997,10 +6900,29 @@ public actor MCPAdapter {
                     if case .array(let ids)? = arguments?["formulaIds"] { return !ids.isEmpty }
                     return false
                 }()
+                // An ephemeral arrow that names its `styleBase`: an older app would ignore it and
+                // preview the arrow in the user's style.
+                let namesStyleBase: Bool = {
+                    guard case .array(let items)? = arguments?["arrows"] else { return false }
+                    return items.contains { if case .object(let fields) = $0 { return fields["styleBase"] != nil }; return false }
+                }()
+                // An ephemeral arrow that is a closed or filled path: an app from before format 8
+                // would ignore the two keys and preview an open arrow.
+                let closesAPath: Bool = {
+                    guard case .array(let items)? = arguments?["arrows"] else { return false }
+                    return items.contains {
+                        if case .object(let fields) = $0 { return fields["closed"] != nil || fields["filled"] != nil }
+                        return false
+                    }
+                }()
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
-                                                           if: wantsFormulas))
+                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "")
+                                                           + (closesAPath ? "+closedPaths" : "")
+                                                           // An app without it would ignore `forFile` and
+                                                           // hand back an image a quarter the size.
+                                                           + (export ? "+exportRender" : "") + kind)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -6161,7 +7083,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6217,7 +7139,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6270,7 +7192,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6388,7 +7310,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6452,7 +7374,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let ids = try Self.nonEmptyStringArrayArg(arguments, "ids")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6559,7 +7481,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let items = try Self.nonEmptyValueArrayArg(arguments, "strokes")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6634,7 +7556,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6677,7 +7599,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6722,7 +7644,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6822,7 +7744,7 @@ public actor MCPAdapter {
     /// Shared relay for the live-selection ops: encode the envelope, hand it to the device's
     /// `controlSelection` bridge, and pass its selection descriptor straight back.
     private func callSelectionOp(docId: String, envelope: [String: Value]) async -> CallTool.Result {
-        guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+        guard let docBytes = await documentBytes(docId: docId) else {
             return Self.errorResult("unknownDoc")
         }
         let spec: Data
@@ -6853,7 +7775,7 @@ public actor MCPAdapter {
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds")
             let keepRect = try Self.optionalBoolArg(arguments, "keepRect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6922,7 +7844,7 @@ public actor MCPAdapter {
                 return Self.errorResult("invalidArguments: x and y are required")
             }
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -6959,7 +7881,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7009,7 +7931,7 @@ public actor MCPAdapter {
             let ops = try Self.nonEmptyValueArrayArg(arguments, "ops")
             let include = try Self.optionalStringArg(arguments, "include")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7070,7 +7992,7 @@ public actor MCPAdapter {
             let ops = try Self.optionalValueArrayArg(arguments, "ops")
             let expect = try Self.optionalStringArg(arguments, "expect")
 
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7150,10 +8072,10 @@ public actor MCPAdapter {
             }
             let prefer = try Self.optionalStringArg(arguments, "prefer") ?? "target"
 
-            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else {
+            guard let sourceBytes = await documentBytes(docId: source) else {
                 return Self.errorResult("sourceNotFound")
             }
-            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else {
+            guard let targetBytes = await documentBytes(docId: target) else {
                 return Self.errorResult("targetNotFound")
             }
             if let into {
@@ -7229,6 +8151,83 @@ public actor MCPAdapter {
     // written back to `target` under the standard byte-CAS every other write
     // tool uses. `source` is read but never written.
 
+    // MARK: - diff_docs
+    //
+    // Read-only: the device compares the document (`docBytes`) with a base copy carried as a
+    // bundle part, by content (`DocDiff`, app repo). No submit, no seq, nothing to retry.
+
+    private func callDiffDocs(_ arguments: [String: Value]?, unresolvedKeys: Set<String>) async -> CallTool.Result {
+        do {
+            let docId = try Self.nonEmptyStringArg(arguments, "docId")
+            let baseDocId = try Self.optionalStringArg(arguments, "baseDocId")
+            let basePath = try Self.optionalStringArg(arguments, "basePath")
+            guard (baseDocId == nil) != (basePath == nil) else {
+                return Self.errorResult("invalidArguments: give exactly one of baseDocId and basePath")
+            }
+            guard let docBytes = await documentBytes(docId: docId) else {
+                return Self.errorResult("unknownDoc")
+            }
+            let baseBytes: Data
+            if let baseDocId {
+                guard !unresolvedKeys.contains("baseDocId"),
+                      let bytes = await documentBytes(docId: baseDocId) else {
+                    return Self.errorResult("baseNotFound: no document \"\(baseDocId)\"")
+                }
+                baseBytes = bytes
+            } else {
+                switch Self.readDocumentFile(at: basePath ?? "") {
+                case .bytes(let data): baseBytes = data
+                case .refusal(let reason): return Self.errorResult(reason)
+                }
+            }
+            let spec: Data
+            do { spec = try JSONEncoder().encode(Value.object(["op": .string("diffDocs")])) }
+            catch { return Self.errorResult("invalidArguments") }
+            let out: DeviceCommandBroker.StrokeOpReply
+            do {
+                // The base is a WHOLE DOCUMENT and travels as a bundle part (see `OpSpecBundle`).
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: "diffDocs", specParts: [.base: baseBytes])
+            } catch let error as DeviceCommandBroker.DeviceCommandError {
+                return Self.strokeOpErrorResult(error)
+            } catch {
+                return Self.errorResult("deviceFailed: \(error)")
+            }
+            return Self.textResult(String(decoding: out.bytes, as: UTF8.self))
+        } catch let error as ArgumentError {
+            return Self.errorResult(error.reason)
+        } catch {
+            return Self.errorResult("invalidArguments")
+        }
+    }
+
+    /// Reads the file `diff_docs`' `basePath` names. A relative path is refused, as
+    /// `add_image`'s is: the caller cannot see the server's working directory.
+    static func readDocumentFile(at rawPath: String) -> ImageFileRead {
+        let path = NSString(string: rawPath).expandingTildeInPath
+        guard isAbsolutePath(path) else { return .refusal("basePathNotAbsolute: \(rawPath)") }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return .refusal("baseFileNotFound: \(path)")
+        }
+        guard !isDirectory.boolValue else { return .refusal("baseFileUnreadable: \(path) is a directory") }
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int,
+           size > maxDocumentFileBytes {
+            return .refusal("baseTooLarge: \(path) is \(size / 1_000_000) MB, limit \(maxDocumentFileBytes / 1_000_000) MB")
+        }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return .refusal("baseFileUnreadable: \(path)")
+        }
+        guard !data.isEmpty else { return .refusal("baseUndecodable: \(path) is empty") }
+        return .bytes(data)
+    }
+
+    /// As large as a document a device may push (`SessionConfig.maxTransferBytes`).
+    static let maxDocumentFileBytes = 512 * 1_000_000
+
+    /// `copy_elements`' arguments that act on the clones (the device's `CopyElements.Spec`).
+    static let copyPlacementKeys = ["scale", "rotate", "canvasAnchor", "canvasTranslate", "scaleWidths", "tags"]
+
     private func callCopyElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let source = try Self.nonEmptyStringArg(arguments, "source")
@@ -7238,11 +8237,15 @@ public actor MCPAdapter {
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let arrowIds = try Self.optionalStringArrayArg(arguments, "arrowIds") ?? []
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
-            guard source != target else { return Self.errorResult("invalidArguments") }
-            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else { return Self.errorResult("invalidArguments") }
+            // `source` may BE `target`: the clones then land in the document they came from, on
+            // top of their originals — how a variant of an element starts. (It was refused with a
+            // bare `invalidArguments` until 2026-11-22; the device's op never needed the refusal.)
+            guard !(strokeIds.isEmpty && textIds.isEmpty && imageIds.isEmpty && arrowIds.isEmpty && formulaIds.isEmpty) else {
+                return Self.errorResult("invalidArguments: name at least one of strokeIds, textIds, imageIds, arrowIds, formulaIds")
+            }
 
-            guard let sourceBytes = await manager.currentBytesOrFetch(docId: source) else { return Self.errorResult("sourceNotFound") }
-            guard let targetBytes = await manager.currentBytesOrFetch(docId: target) else { return Self.errorResult("targetNotFound") }
+            guard let sourceBytes = await documentBytes(docId: source) else { return Self.errorResult("sourceNotFound") }
+            guard let targetBytes = await documentBytes(docId: target) else { return Self.errorResult("targetNotFound") }
 
             let count = strokeIds.count + textIds.count + imageIds.count + arrowIds.count + formulaIds.count
             var copyEnvelope: [String: Value] = [
@@ -7253,6 +8256,12 @@ public actor MCPAdapter {
             ]
             if !arrowIds.isEmpty { copyEnvelope["arrowIds"] = .array(arrowIds.map(Value.string)) }
             if !formulaIds.isEmpty { copyEnvelope["formulaIds"] = .array(formulaIds.map(Value.string)) }
+            // What is done to the clones in the same call. An app without `copyTransform` would
+            // ignore these keys and answer a copy that was neither moved nor tagged.
+            var placesClones = false
+            for key in Self.copyPlacementKeys {
+                if let value = arguments?[key], !value.isNull { copyEnvelope[key] = value; placesClones = true }
+            }
             let spec: Data
             do {
                 // `source` is a WHOLE DOCUMENT and travels as a bundle part — the spec is not
@@ -7265,7 +8274,7 @@ public actor MCPAdapter {
                 out = try await broker.requestStrokeOp(
                     docId: target, docBytes: targetBytes, spec: spec,
                     capability: Self.joiningFormulas(arrowIds.isEmpty ? "copyElements" : "copyElements+arrows",
-                                                     if: !formulaIds.isEmpty),
+                                                     if: !formulaIds.isEmpty) + (placesClones ? "+copyTransform" : ""),
                     specParts: [.source: sourceBytes])
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
@@ -7350,6 +8359,12 @@ public actor MCPAdapter {
     /// the capability this tool needs (offered: …)" without naming the capability — with an older
     /// app connected that looked like a contradiction, since the device plainly was there.
     static func capabilityMissingReason(needs: [String], missing: [String], devices: Int) -> String {
+        // A KIND that is not connected is not an old app: say which kind was asked for.
+        if let kind = missing.first(where: { $0.hasPrefix(DeviceCommandBroker.kindPrefix) }) {
+            return "noDeviceAvailable — \(devices) device(s) connected, none of them a "
+                + "\(kind.dropFirst(DeviceCommandBroker.kindPrefix.count)) that can do this (asked for with `device`). "
+                + "list_open_docs shows the kinds connected; an app older than 2.6 does not say its kind."
+        }
         let all = needs.map { "`\($0)`" }.joined(separator: " + ")
         let lacking = missing.isEmpty
             ? "no single one offers all of \(all)"
@@ -7402,7 +8417,7 @@ public actor MCPAdapter {
     /// (Task 3) — see `callCreateDoc`/`callReplaceDoc` above.
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectedBytes: Data?, successText: (Int) -> String
+        expectedBytes: Data?, successText: @escaping (Int) -> String
     ) async -> CallTool.Result {
         await submitAndRespond(
             docId: docId, createIfMissing: createIfMissing, fullDoc: bytes,
@@ -7424,8 +8439,13 @@ public actor MCPAdapter {
     /// free. It does, at the cost of the primary behaviour, so it does not.)
     private func submitAndRespond(
         docId: String, createIfMissing: Bool, fullDoc bytes: Data,
-        expectation: WriteExpectation, recordForUndo: Bool = true, successText: (Int) -> String
+        expectation: WriteExpectation, recordForUndo: Bool = true, successText: @escaping (Int) -> String
     ) async -> CallTool.Result {
+        // Inside a `batch` nothing is written here: the op's result becomes the batch's working
+        // copy, and its reply is made when the batch's ONE write has its seq.
+        if let batch = Self.activeBatch {
+            return batch.take(docId: docId, bytes: bytes, expectation: expectation, successText: successText)
+        }
         let opId = "mcp-\(UUID().uuidString)"
         let payload = OpPayload(type: "fullDoc", data: bytes)
         switch await manager.submitOpeningSession(
@@ -7440,7 +8460,7 @@ public actor MCPAdapter {
             if recordForUndo, case .matchBytes(let before) = expectation {
                 await history.record(docId: docId, before: before, after: bytes)
             }
-            return CallTool.Result(content: [.text(text: successText(seq), annotations: nil, _meta: nil)])
+            return Self.writeResult(successText(seq), seq: seq)
         case .rejected(let message):
             guard case .reject(_, _, let reason, _) = message else {
                 return Self.errorResult("unexpectedServerResponse")
@@ -7455,7 +8475,7 @@ public actor MCPAdapter {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let steps = try Self.optionalIntArg(arguments, "steps") ?? 1
             guard steps >= 1 else { return Self.errorResult("invalidArguments") }
-            guard await manager.currentBytesOrFetch(docId: docId) != nil else {
+            guard await documentBytes(docId: docId) != nil else {
                 return Self.errorResult("unknownDoc")
             }
 
@@ -7482,7 +8502,7 @@ public actor MCPAdapter {
                 guard !entry.isLiveSelectionChange else {
                     return failed(Self.errorResult(Self.lastEditWasLiveSelectionReason))
                 }
-                guard let current = await manager.currentBytesOrFetch(docId: docId) else {
+                guard let current = await documentBytes(docId: docId) else {
                     return failed(Self.errorResult("unknownDoc"))
                 }
 
@@ -7572,6 +8592,7 @@ public actor MCPAdapter {
         case .invalidColor: return "invalidSpec"
         case .arrowNotFound: return "arrowNotFound"
         case .formulaNotFound: return "formulaNotFound"
+        case .textNeedsDeviceToPlace: return "invalidSpec: this text is turned or scaled; only a connected device can place it"
         case .documentFormatNewer(let file):
             // The app's own token for the same state, so an agent handles both alike.
             return "\(DeviceCommandBroker.formatRefusalPrefix): file \(file), this server edits up to \(DocJSON.knownFormatVersion) — "
@@ -7596,7 +8617,7 @@ public actor MCPAdapter {
     private func callTransformElements(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            guard let bytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let bytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("transformElements")]
@@ -7651,7 +8672,7 @@ public actor MCPAdapter {
             let imageIds = try Self.optionalStringArrayArg(arguments, "imageIds") ?? []
             let formulaIds = try Self.optionalStringArrayArg(arguments, "formulaIds") ?? []
             guard !textIds.isEmpty || !imageIds.isEmpty || !formulaIds.isEmpty else { return Self.errorResult("missingArgument") }
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var resetEnvelope: [String: Value] = [
@@ -7712,7 +8733,7 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let dots = try Self.nonEmptyValueArrayArg(arguments, "dots")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("drawDots"), "dots": .array(dots)]
@@ -7772,14 +8793,14 @@ public actor MCPAdapter {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
             let points = try Self.nonEmptyValueArrayArg(arguments, "canvasPoints")
-            guard let docBytes = await manager.currentBytesOrFetch(docId: docId) else {
+            guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = [
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "drawnWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
+            for key in ["color", "drawnWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance", "edge"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
@@ -7788,7 +8809,10 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+                // An app without `fillEdge` would ignore `edge` and let the ink reach past the
+                // outline, with a success reply.
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: envelope["edge"] == nil ? "authorStrokes" : "authorStrokes+fillEdge")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -7807,14 +8831,23 @@ public actor MCPAdapter {
             }
             let fillMeta = out.meta.flatMap { try? JSONDecoder().decode(FillMeta.self, from: $0) }
             let created = fillMeta?.keys?.count
+            let thinFillNote = Self.thinFillNote(drawnWidth: try Self.optionalDoubleArg(arguments, "drawnWidth"),
+                                                 spacingRatio: try Self.optionalDoubleArg(arguments, "spacingRatio"))
             return await submitAndRespond(
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: docBytes
             ) { seq in
                 var reply = created.map { "filled the region in \(docId) with \($0) stroke(s) at seq \(seq)" }
                     ?? "filled the region in \(docId) at seq \(seq)"
+                // The strokes it made, so the fill can be removed or restyled without a listing —
+                // while they are few: a solid fill is one stroke (a few for a concave shape), a
+                // hatch is one per line, up to thousands, and is found by its tags instead.
+                if let keys = fillMeta?.keys, !keys.isEmpty, keys.count <= Self.maxFillIdsReported {
+                    reply += "\nids: " + keys.joined(separator: ", ")
+                }
                 if let stored = fillMeta?.storedColors, !stored.isEmpty {
                     reply += "\nstoredColors: " + stored.joined(separator: ", ")
                 }
+                if let note = thinFillNote { reply += "\nnote: " + note }
                 return reply
             }
         } catch let error as ArgumentError {
@@ -7838,17 +8871,22 @@ public actor MCPAdapter {
         // Which of them a device actually has on screen — the first thing you want to know after
         // "what is there", and free here (the same in-memory read `list_open_docs` does).
         let live = await manager.liveInfo()
+        let created = await manager.creationDates()
+        let formatter = ISO8601DateFormatter()
         let payload = entries
             .sorted { $0.modifiedAt > $1.modifiedAt }
             .map { entry -> [String: Any] in
-                [
+                var row: [String: Any] = [
                     "id": entry.id,
                     "name": entry.name,
                     "sizeBytes": entry.sizeBytes,
-                    "modifiedAt": ISO8601DateFormatter().string(from: entry.modifiedAt),
+                    "modifiedAt": formatter.string(from: entry.modifiedAt),
                     "hasContent": entry.hasContent,
                     "open": (live[entry.id]?.subscriberCount ?? 0) > 0,
                 ]
+                // Absent when unknown — a document held since before the record was kept.
+                if let date = created[entry.id] { row["createdAt"] = formatter.string(from: date) }
+                return row
             }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
@@ -7858,19 +8896,29 @@ public actor MCPAdapter {
     }
 
     private func callListOpenDocs() async -> CallTool.Result {
-        let (deviceCount, capabilities) = await broker.connectionSummary()
+        let (deviceCount, allWords) = await broker.connectionSummary()
+        // A device's KIND is a hello word too, but not an ability: listed apart.
+        let capabilities = allWords.filter { !$0.hasPrefix(DeviceCommandBroker.kindPrefix) }
+        let kindOf = await broker.deviceKinds()
+        var kinds: [String: Int] = [:]
+        for kind in kindOf.values { kinds[kind, default: 0] += 1 }
         let names = Dictionary(((try? await manager.listDocuments()) ?? []).map { ($0.id, $0.name) },
                                uniquingKeysWith: { first, _ in first })
-        let open = await manager.liveInfo()
-            .filter { $0.value.subscriberCount > 0 }
-            .map { (docId, info) in
-                ["docId": docId, "name": names[docId] ?? docId, "seq": info.seq,
-                 "subscribers": info.subscriberCount] as [String: Any]
-            }
-            .sorted { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
+        var open: [[String: Any]] = []
+        for (docId, info) in await manager.liveInfo() where info.subscriberCount > 0 {
+            // Which kinds of device have it open — the browser's viewer page subscribes too and is
+            // no device, so this can be shorter than `subscribers`.
+            let openOn = await manager.subscribedConnections(docId: docId).compactMap { kindOf[$0] }.sorted()
+            open.append(["docId": docId, "name": names[docId] ?? docId, "seq": info.seq,
+                         "subscribers": info.subscriberCount, "openOn": openOn])
+        }
+        open.sort { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
 
+        var devices: [String: Any] = ["count": deviceCount, "capabilities": capabilities.sorted(), "kinds": kinds]
+        // The kind the server gives work to first, when it was started with one (`--prefer-device`).
+        if let preferred = broker.preferredKind { devices["preferredKind"] = preferred }
         let payload: [String: Any] = [
-            "devices": ["count": deviceCount, "capabilities": capabilities.sorted()],
+            "devices": devices,
             "openDocs": open,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
@@ -7889,6 +8937,78 @@ public actor MCPAdapter {
     /// `fetch_doc` is the first handler simple enough to want a named helper for it.
     private static func textResult(_ text: String) -> CallTool.Result {
         CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    }
+
+    /// A WRITE's result: its text, as always, and the same facts as `structuredContent` — ONE
+    /// shape for every write (improvement note S3, 2026-11-22: `add_formula` answered in JSON,
+    /// `add_arrow` with a sentence and a line `arrowId: …`, `add_text` with a line `id: …`,
+    /// `copy_elements` with lines of comma-separated ids, and a script needed a pattern per
+    /// tool). The text is unchanged, so nothing that reads it breaks; a script reads the object.
+    static func writeResult(_ text: String, seq: Int?) -> CallTool.Result {
+        CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)],
+                        structuredContent: structuredReply(text, seq: seq))
+    }
+
+    /// The structured form of a write's reply text. A reply that IS a JSON object (the formula
+    /// tools') is that object. Otherwise: `message` (the first line), `seq`, and one field per
+    /// `key: value` line under the line's own key — a `[…]` value as the array it is, an id list
+    /// (`ids`, `created…Ids`, `storedColors`) as an array of strings, a number as a number — with
+    /// every other line, and every `note:`, in `notes`. The new element's id is ALWAYS also `id`
+    /// (`add_arrow` says `arrowId`), so one key finds it whatever the tool.
+    static func structuredReply(_ text: String, seq: Int?) -> Value? {
+        if let data = text.data(using: .utf8),
+           let object = try? JSONDecoder().decode([String: Value].self, from: data) {
+            return .object(object)
+        }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard !lines.isEmpty else { return nil }
+        var fields: [String: Value] = ["message": .string(lines.removeFirst())]
+        if let seq { fields["seq"] = .int(seq) }
+        var notes: [Value] = []
+        for line in lines {
+            guard let colon = line.range(of: ": "),
+                  !line[..<colon.lowerBound].isEmpty,
+                  line[..<colon.lowerBound].allSatisfy({ $0.isLetter || $0.isNumber }) else {
+                notes.append(.string(line)); continue
+            }
+            let key = String(line[..<colon.lowerBound]), raw = String(line[colon.upperBound...])
+            if key == "note" { notes.append(.string(raw)); continue }
+            fields[key] = structuredValue(key: key, raw: raw)
+        }
+        if !notes.isEmpty { fields["notes"] = .array(notes) }
+        if fields["id"] == nil, let arrow = fields["arrowId"] { fields["id"] = arrow }
+        // A reply that names its element only in its sentence ("added <id> at seq 3", "edited
+        // <id> …", "removed arrow <id> …"): the TEXT stays as it is — a caller may be taking its
+        // last word for the seq, as this repo's own tests did — and the id is read out of it.
+        // ONLY right after one of these verbs: a document's id is a UUID too, and most replies
+        // name the document ("set paper on <doc>", "added arrow to <doc>", "copied … from <doc>").
+        if fields["id"] == nil, case .string(let message)? = fields["message"],
+           let verb = Self.elementNamingVerbs.first(where: { message.hasPrefix($0) }),
+           let word = message.dropFirst(verb.count).split(separator: " ").first,
+           UUID(uuidString: String(word)) != nil {
+            fields["id"] = .string(String(word))
+        }
+        return .object(fields)
+    }
+
+    /// How a reply's sentence begins when the word after it is the ELEMENT it made or touched
+    /// (longest first: "removed arrow " before "removed ").
+    static let elementNamingVerbs = [
+        "removed arrow ", "removed formula ", "removed grid ", "updated grid ", "set origin of grid ",
+        "added ", "edited ", "removed ",
+    ]
+
+    private static func structuredValue(key: String, raw: String) -> Value {
+        if raw.hasPrefix("["), let data = raw.data(using: .utf8),
+           let array = try? JSONDecoder().decode([Value].self, from: data) {
+            return .array(array)
+        }
+        if key == "ids" || key.hasSuffix("Ids") || key.hasSuffix("Colors") {
+            return .array(raw.split(separator: ",").map { .string($0.trimmingCharacters(in: .whitespaces)) })
+        }
+        if let int = Int(raw) { return .int(int) }
+        if let double = Double(raw) { return .double(double) }
+        return .string(raw)
     }
 
     // MARK: - Tool argument extraction

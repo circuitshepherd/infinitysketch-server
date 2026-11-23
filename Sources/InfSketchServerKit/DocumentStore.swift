@@ -60,6 +60,9 @@ public protocol DocumentStore: Sendable {
     /// Forgets `docId`'s label (a document deleted without stored bytes — `delete` drops the label
     /// of a stored one itself).
     func removeName(for docId: String)
+    /// When each document was first stored here, by stored id — only for the documents this
+    /// store saw being created (see `DocumentBirths`).
+    func creationDates() -> [String: Date]
 }
 
 extension DocumentStore {
@@ -81,6 +84,7 @@ extension DocumentStore {
         try setName(name, for: storedId)
     }
     public func removeName(for docId: String) {}
+    public func creationDates() -> [String: Date] { [:] }
 }
 
 public struct DirectoryDocumentStore: DocumentStore {
@@ -93,6 +97,8 @@ public struct DirectoryDocumentStore: DocumentStore {
     private let trashRetention: TimeInterval
     /// documentId → name (`.names.json`). A class instance, so this struct stays a value.
     private let labels: DocumentLabels
+    /// documentId → when it was first stored here (`.created.json`).
+    private let births: DocumentBirths
     /// How many times this store enumerated its directory (`list()`, `storedDocId(matching:)`) —
     /// what `ListingCostTests` counts, so a per-document lookup that lists the folder again (an
     /// O(N²) listing on the session actor) fails a test instead of a large library.
@@ -103,6 +109,7 @@ public struct DirectoryDocumentStore: DocumentStore {
         self.trashRetention = trashRetention
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         labels = DocumentLabels(directory: directory)
+        births = DocumentBirths(directory: directory)
         // First, before anything reads the folder: a pre-identity (name-keyed) folder becomes
         // id-keyed, once. An empty folder just gets the marker.
         IdentityMigration.run(in: directory, labels: labels)
@@ -178,8 +185,14 @@ public struct DirectoryDocumentStore: DocumentStore {
     }
 
     public func save(docId: String, bytes: Data) throws {
-        try bytes.write(to: try canonicalFileURL(for: docId), options: .atomic)
+        let url = try canonicalFileURL(for: docId)
+        // A save of an id that has no file yet is the document's creation here.
+        let isNew = !FileManager.default.fileExists(atPath: url.path)
+        try bytes.write(to: url, options: .atomic)
+        if isNew { births.recordIfAbsent(url.deletingPathExtension().lastPathComponent) }
     }
+
+    public func creationDates() -> [String: Date] { births.all() }
 
     public func exists(docId: String) throws -> Bool {
         FileManager.default.fileExists(atPath: try resolvedFileURL(for: docId).path)
@@ -281,6 +294,7 @@ public struct DirectoryDocumentStore: DocumentStore {
             try FileManager.default.removeItem(at: url)
         }
         labels.remove(stem)
+        births.remove(stem)
         // Tidying, after the part the user actually asked for. Never allowed to fail the delete.
         pruneTrash()
     }
