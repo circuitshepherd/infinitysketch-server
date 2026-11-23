@@ -743,9 +743,16 @@ public actor DeviceCommandBroker {
         // request that names no kind itself; with none of that kind able, the ordinary choice.
         let preferring: String? = routing == .preferOpen && !capability.contains(Self.kindPrefix)
             ? preferredKind.map { capability + "+" + Self.kindPrefix + $0 } : nil
+        // A preference is not worth a timeout: a preferred device that has gone quiet (a
+        // suspended iPad) does not get the work while the ordinary choice is awake (review
+        // 2026-11-23 — it cost every op the stroke-op timeout before another device was tried).
         func pick(excluding: Set<UUID>) -> Connection? {
-            if let preferring, let chosen = pick(capability: preferring, excluding: excluding) { return chosen }
-            return pick(capability: capability, excluding: excluding)
+            let ordinary = pick(capability: capability, excluding: excluding)
+            guard let preferring, let chosen = pick(capability: preferring, excluding: excluding) else { return ordinary }
+            if now - chosen.lastActivity > quietAfter, let ordinary, now - ordinary.lastActivity <= quietAfter {
+                return ordinary
+            }
+            return chosen
         }
         guard let first = pick(excluding: []) else {
             // "Nothing can do this at all" and "something could, but not with this document

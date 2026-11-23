@@ -6585,6 +6585,9 @@ public actor MCPAdapter {
                 specParts: [.base: base, .theirs: result])
             guard let meta = out.meta.flatMap({ try? JSONDecoder().decode(MergeMeta.self, from: $0) }),
                   meta.conflicts == 0 else { return nil }
+            // A batch the caller gave up on while the device merged writes nothing, as everywhere
+            // else in a batch (the caller then gets its refusal, which it no longer reads).
+            if Task.isCancelled { return nil }
             guard case .accepted(let seq) = await manager.submitOpeningSession(
                 docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)",
                 payload: OpPayload(type: "fullDoc", data: out.bytes), expectation: .matchBytes(current)) else { return nil }

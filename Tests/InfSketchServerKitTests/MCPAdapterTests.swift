@@ -335,9 +335,13 @@ actor FakeCreateDocDevice {
     /// An APP-style push: straight up the WS `op` path, exactly as the mirror's settle-push
     /// arrives — NOT through any MCP tool. What `theAppsOwnPushIsNotUndoable` needs.
     func push(docId: String, bytes: Data) async throws {
+        // The `subscribed` snapshot is NOT awaited here: this device's pump loop reads the same
+        // socket and takes it, so a read here got the NEXT message — the keepalive, 30 s later
+        // (measured 2026-11-23: the two tests that push each took 30.3 s, a third of the
+        // suite's wall time). The server handles one connection's messages in order, so the op
+        // is applied after the subscribe either way.
         try await ws.send(.string(ClientMessage.subscribe(
             docId: docId, createIfMissing: true).jsonText()))
-        _ = try await Self.receiveOne(ws)   // the `subscribed` snapshot
         try await ws.send(.string(ClientMessage.op(
             docId: docId, opId: "app-push-\(UUID().uuidString)",
             payload: OpPayload(type: "fullDoc", data: bytes)).jsonText()))

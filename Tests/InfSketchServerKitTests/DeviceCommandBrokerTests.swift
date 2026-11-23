@@ -569,6 +569,30 @@ private actor SentBox {
         #expect(await sentOpen.all().isEmpty)
     }
 
+    /// The preferred kind of device has gone quiet and another capable device is awake: the
+    /// awake one gets the work. A preference must not cost a timeout.
+    @Test func aQuietPreferredDeviceDoesNotTakeWorkFromAnAwakeOne() async throws {
+        let broker = DeviceCommandBroker(quietAfter: .seconds(2), preferredKind: "ipad")
+        let sentPad = SentBox(), sentMac = SentBox()
+        let pad = UUID(), mac = UUID()
+        await broker.register(connectionId: pad, capabilities: ["authorStrokes", "kind:ipad"]) { msg in Task { await sentPad.set(msg) } }
+        await broker.register(connectionId: mac, capabilities: ["authorStrokes", "kind:mac"]) { msg in Task { await sentMac.set(msg) } }
+        // Both awake: the preference decides.
+        let first = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        let toPad = try #require(await Self.awaitRequest(sentPad), "awake, the preferred kind is asked")
+        await broker.handleReply(requestId: toPad.0, bytes: Data("x".utf8), failureReason: nil)
+        _ = try await first.value
+        #expect(await sentMac.all().isEmpty)
+        // The iPad goes quiet, the Mac stays awake.
+        try await Task.sleep(for: .milliseconds(2300))
+        await broker.noteActivity(connectionId: mac)
+        let second = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        let toMac = try #require(await Self.awaitRequest(sentMac), "the awake device must be asked")
+        await broker.handleReply(requestId: toMac.0, bytes: Data("x".utf8), failureReason: nil)
+        _ = try await second.value
+        #expect(await sentPad.all().count == 1, "the quiet iPad was not asked again")
+    }
+
     /// When every device is quiet, the open one is still the better guess.
     @Test func anOpOnBytesStillPrefersTheOpenDeviceWhenAllAreQuiet() async throws {
         let broker = DeviceCommandBroker(quietAfter: .milliseconds(50))
