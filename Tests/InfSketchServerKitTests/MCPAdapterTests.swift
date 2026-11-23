@@ -465,6 +465,13 @@ actor FakeStrokeOpDevice {
         ).jsonText()))
     }
 
+    /// The same with a `meta` (an op that answers with both).
+    func sendReply(requestId: UInt32, docId: String, bytes: Data, meta: Data) async throws {
+        try await ws.send(.string(ClientMessage.strokeOpReply(
+            requestId: requestId, docId: docId, payload: .inline(bytes), meta: meta, failureReason: nil
+        ).jsonText()))
+    }
+
     private static func receiveOne(_ ws: URLSessionWebSocketTask) async throws -> ServerMessage {
         let frame = try await ws.receive()
         guard case .string(let text) = frame else {
@@ -1718,6 +1725,76 @@ actor FakeStrokeOpDevice {
         #expect(results[1]["arrowId"] as? String == "A1")
         #expect(results[1]["id"] as? String == "A1", "the new element's id is always also `id`")
 
+        await server.stop()
+    }
+
+    /// A batch whose write is refused TWICE — the user kept drawing — is merged into the document
+    /// as it is now, when the merge has no conflict: the device is handed the three versions
+    /// (`mergeEdit`) and what it returns is written. With a conflict nothing is written and the
+    /// agent is told to send the batch again, as before.
+    @Test(arguments: [0, 1])
+    func aBatchRefusedTwiceIsMergedWhenNothingConflicts(conflicts: Int) async throws {
+        let seed = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[]}"#.utf8)
+        let (server, port, task) = try await startServer(seedDocId: "d", bytes: seed)
+        defer { task.cancel() }
+        let agent = try await connectedClient(port: port)
+        defer { Task { await agent.disconnect() } }
+        let user = try await connectedClient(port: port)
+        defer { Task { await user.disconnect() } }
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: nil, capabilities: ["arrows", "mergeDocs", "mergeEdit"])
+        defer { Task { await device.close() } }
+        func requests(_ n: Int) async -> Bool {
+            await waitFor { await device.receivedRequests.count >= n }
+            return await device.receivedRequests.count >= n
+        }
+        func stored() async throws -> [String: Any] {
+            let raw = try await user.readResource(uri: "infsketch://doc/d/raw")
+            let blob = try #require(raw[0].blob)
+            let bytes = try #require(Data(base64Encoded: blob))
+            return try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        }
+
+        let batch = Task { try await agent.callTool(name: "batch", arguments: [
+            "docId": "d", "ops": [["tool": "add_arrow", "arguments": ["canvasPoints": [[0, 0], [10, 0]]]]]]) }
+        let withArrow = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"arrow"}"#.utf8)
+        // Twice the batch's op runs, and twice the document changes under it before its write.
+        for run in 1...2 {
+            #expect(await requests(run))
+            let (_, userError) = try await user.callTool(name: "set_paper", arguments: ["docId": "d", "light": run == 1 ? "#FFEEC0" : "#C0EEFF"])
+            #expect(userError != true)
+            let pending = try #require(await device.receivedRequests.last)
+            try await device.sendReply(requestId: pending.requestId, docId: "d", bytes: withArrow, meta: Data(#"{"arrowId":"A1"}"#.utf8))
+        }
+        // The third request is the merge: the document as it is now, with the two other versions.
+        #expect(await requests(3))
+        let merge = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: merge.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "mergeEdit")
+        #expect(Data(base64Encoded: spec["theirs"] as? String ?? "") == withArrow, "the batch's result")
+        let base = try #require(JSONSerialization.jsonObject(with: Data(base64Encoded: spec["base"] as? String ?? "") ?? Data()) as? [String: Any])
+        #expect(base["marker"] == nil, "the document the second run started from")
+        let now = try #require(JSONSerialization.jsonObject(with: merge.docBytes) as? [String: Any])
+        #expect(now["marker"] == nil && now["backgroundColor"] != nil, "the document as the user has it now: \(now.keys.sorted())")
+
+        let merged = Data(#"{"aaa001_thumbnailData":"","placedTextsData":[],"marker":"merged"}"#.utf8)
+        try await device.sendReply(requestId: merge.requestId, docId: "d", bytes: merged,
+                                   meta: Data(#"{"conflicts":\#(conflicts)}"#.utf8))
+        let (content, isError) = try await batch.value
+        if conflicts == 0 {
+            #expect(isError != true, "\(toolResultText(content))")
+            #expect(try await stored()["marker"] as? String == "merged")
+            let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+            #expect(reply["seq"] != nil && (reply["results"] as? [[String: Any]])?.first?["id"] as? String == "A1")
+            // ONE undo entry, back to the document as the user had it.
+            let (undone, undoError) = try await agent.callTool(name: "undo_last_edit", arguments: ["docId": "d"])
+            #expect(undoError != true, "\(toolResultText(undone))")
+            let back = try await stored()
+            #expect(back["marker"] == nil && back["backgroundColor"] != nil)
+        } else {
+            #expect(isError == true)
+            #expect(toolResultText(content).contains("wrote NOTHING") && toolResultText(content).contains("send it again"))
+            #expect(try await stored()["marker"] == nil, "a merge that dropped part of the batch is not written")
+        }
         await server.stop()
     }
 

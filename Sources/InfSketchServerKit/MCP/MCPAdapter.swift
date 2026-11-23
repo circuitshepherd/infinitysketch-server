@@ -3969,7 +3969,10 @@ public actor MCPAdapter {
                 needs a device costs a round trip (roughly a tenth of a second), so keep a batch \
                 to a few hundred ops at most (limit \(maxBatchOps)). If the document changes \
                 while the batch runs — the user draws — the batch is run once more on the new \
-                document by itself; if it changes again, docChangedDuringOp and nothing is written. \
+                document by itself; if it changes again, the batch's result is merged into the \
+                document as it then is and written, as long as the user and the batch did not \
+                change the same element. Only then — or when the document changes a third time — \
+                the answer is docChangedDuringOp with nothing written: send the batch again. \
                 A batch you cancel stops at its next op and writes nothing.
 
                 REPLY: one JSON object `{seq, results}` — `results` holds one entry per op, in \
@@ -6562,6 +6565,36 @@ public actor MCPAdapter {
         "list_grids", "find_elements", "list_tags", "snap_points",
     ]
 
+    /// A batch's `result` (made from `base`) merged into the document as it is NOW and written,
+    /// for a batch whose own write was refused twice. The device merges (`mergeEdit`: base, the
+    /// document now, the result) and says how many conflicts it met; the merge is written only
+    /// with NONE — a conflict is an element both the user and the batch changed, where the merge
+    /// keeps the user's, so the batch would not be wholly in what is written and the agent must
+    /// not be told it is. Written under the bytes the merge was made from; nil for a conflict, a
+    /// device that cannot merge, or a document that changed yet again — the caller then answers
+    /// as it always did ("send it again"). ONE undo entry, from the document as the user had it.
+    private func writingMerged(docId: String, base: Data, result: Data) async -> Int? {
+        // `base` and the result are whole documents and travel as bundle parts, as `revertMerge`'s do.
+        let envelope: [String: Value] = ["op": .string("mergeEdit")]
+        guard let current = await manager.currentBytesOrFetch(docId: docId), current != base else { return nil }
+        struct MergeMeta: Decodable { let conflicts: Int }
+        do {
+            let spec = try JSONEncoder().encode(Value.object(envelope))
+            let out = try await broker.requestStrokeOp(
+                docId: docId, docBytes: current, spec: spec, capability: "mergeDocs+mergeEdit",
+                specParts: [.base: base, .theirs: result])
+            guard let meta = out.meta.flatMap({ try? JSONDecoder().decode(MergeMeta.self, from: $0) }),
+                  meta.conflicts == 0 else { return nil }
+            guard case .accepted(let seq) = await manager.submitOpeningSession(
+                docId: docId, createIfMissing: false, opId: "mcp-\(UUID().uuidString)",
+                payload: OpPayload(type: "fullDoc", data: out.bytes), expectation: .matchBytes(current)) else { return nil }
+            await history.record(docId: docId, before: current, after: out.bytes)
+            return seq
+        } catch {
+            return nil
+        }
+    }
+
     private struct BatchOp {
         let tool: String
         var arguments: [String: Value]
@@ -6682,6 +6715,13 @@ public actor MCPAdapter {
                         return Self.errorResult("unexpectedServerResponse")
                     }
                     if reason == "docChangedDuringOp", attempt == 0 { continue }
+                    // Twice: the user keeps drawing. Running the ops a third time would only
+                    // lose the race again, so the result is MERGED into the document as it is
+                    // now — when that takes nothing from either side.
+                    if reason == "docChangedDuringOp",
+                       let seq = await writingMerged(docId: docId, base: original, result: context.bytes) {
+                        return reply(seq: seq)
+                    }
                     return Self.errorResult("\(reason) — the batch wrote NOTHING"
                                             + (reason == "docChangedDuringOp" ? " (the document changed twice while it ran); send it again" : ""))
                 }
