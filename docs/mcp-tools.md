@@ -1,6 +1,6 @@
 # InfinitySketch MCP tools
 
-76 tools, served over streamable HTTP at `/mcp`.
+77 tools, served over streamable HTTP at `/mcp`.
 
 <!-- Generated from MCPAdapter.toolDefinitions. Do not edit by hand: run
      INFSKETCH_REGENERATE_DOCS=1 swift test --filter ToolReferenceTests -->
@@ -156,6 +156,7 @@ Read-only. `render_sketch` also renders ephemeral candidate strokes that are nev
 | Tool | Summary |
 |---|---|
 | [`render_sketch`](#render_sketch) | Renders a region of a document, specific strokes, and/or ephemeral candidate strokes that are not written to the document — use it to preview a stroke before committing it with… |
+| [`export_sketch`](#export_sketch) | Renders a document for PUBLISHING and writes the PNG to a file: the paper without the grid, in the appearance you name, the content with a narrow margin. |
 | [`get_tool`](#get_tool) | Report the tool picker's CURRENT tool on the connected device — `isInkingTool`, and when true `inkType`, `toolWidth`, `pickerDialWidth` and `color` (#RRGGBBAA). |
 | [`diff_docs`](#diff_docs) | What differs between a document and a BASE copy of it, element by element — read-only. |
 
@@ -176,7 +177,7 @@ Takes no arguments.
 
 ### `list_open_docs`
 
-What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities, kinds}, openDocs: [{docId, name, seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" for an app that does not say) and `openOn` lists the kinds that have that document open. The SERVER picks the device for a call — one that has the document open is preferred; only render_sketch lets you ask for a kind (`device`).
+What is OPEN right now, and on what. Read-only, no device round trip, no docId needed. Returns `{devices: {count, capabilities, kinds, preferredKind?}, openDocs: [{docId, name, seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" for an app that does not say) and `openOn` lists the kinds that have that document open. The SERVER picks the device for a call — one that has the document open is preferred, and `preferredKind`, present when the server was started with `--prefer-device`, names the kind that is given the work first; only render_sketch and export_sketch let you ask for a kind yourself (`device`). A write's structured reply says which kind did it (`device`).
 
 CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human says may be shared by several documents (a shared name is refused ambiguousName), or may be an older name the document no longer carries. `openDocs` is the truth: those are the documents on a user's screen, and their `docId`s are what the selection tools, and every write to an open document, will accept.
 
@@ -306,7 +307,7 @@ Each item of `dots`:
 
 ### `fill_region`
 
-Fill a closed path with a solid area — one call instead of the hundreds of closely spaced strokes you would otherwise compute yourself. The strokes are generated on the device and are ORDINARY strokes: the user can erase part of the fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, exactly like anything they drew.
+Fill a closed path with a solid area — one call instead of the hundreds of closely spaced strokes you would otherwise compute yourself. The strokes are generated on the device and are ORDINARY strokes: the user can erase part of the fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, exactly like anything they drew. Being strokes, a fill lies BELOW every arrow, text and formula: for a face that must cover a line, or one flat color at any size with an exact edge, place an object instead (add_shape, or add_arrow with `closed` and `filled`).
 
 `canvasPoints` is the boundary in canvas coordinates, closed by repeating the first point (an unclosed path is closed for you). Concave shapes fill correctly, and a path that returns through itself leaves a hole rather than blocking it out.
 
@@ -327,6 +328,7 @@ TWO HONEST LIMITS. The document still carries every stroke, so a large fill is g
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Omit to inherit the user's pen. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 | `drawnWidth` | number | no | How wide each pass and the border DRAW, in canvas points (the Properties panel's Drawn width). Omit to inherit the user's pen. A hatch's spacing is spacingRatio × this. |
+| `edge` | string — `centered`, `inside` | no | Where the ink ends. "centered" (default): border and pass ends are centred on canvasPoints, so the ink reaches half a drawnWidth past it. "inside": the region is first shrunk by half a drawnWidth, so the ink ends ON canvasPoints — a face filled with wide passes (drawnWidth 3 or more renders flat at any scale) then stays inside its outline. Its OUTWARD corners come out rounded by half the width, since a round pen cannot reach into a corner (a sharp-cornered face is add_shape's). A region narrower than drawnWidth has nothing left inside and is refused. |
 | `inkType` | string — `pen`, `pencil`, `marker`, `monoline`, `fountainPen`, `watercolor`, `crayon` | no | Defaults to pen, which is opaque and even. A constant-width pen IS a monoline and lists as `monoline` (the app derives the name from the uniform sizes; PencilKit's archive records it as pen), so a fill lists as `monoline` whichever of the two you ask for. |
 | `spacingRatio` | number | no | At or below 1 a solid fill (default 0.4; lower is denser); above 1 hatching, lines spacingRatio × drawnWidth apart. |
 | `tags` | array | no | Durable tags for the filled area, so you can find it again with find_elements after this call's ids are gone — which is how you reshape a fill: delete it and fill the new outline under the same tag. A hatched fill gets them too: it is several strokes, and a tag is a set. |
@@ -1366,6 +1368,21 @@ Each item of `strokes`:
 | `drawnWidth` | number | no | How wide the stroke DRAWS, in canvas points — the ink you see, the Properties panel's Drawn width; 5 matches a 5 pt grid. Not scaled by a later transform (canvasInkBounds shows the extent on screen). OMIT IT to inherit the width of the tool the user currently has selected (see get_tool's toolWidth). |
 | `inkType` | string — `pen`, `pencil`, `marker`, `monoline`, `fountainPen`, `watercolor`, `crayon` | no | The ink to draw with. OMIT IT to inherit the ink the user currently has selected (see get_tool); pen when no inking tool is selected. THEY DIFFER IN CHARACTER, not only in name, and you cannot see that from a listing: `pen` is opaque and even — reach for it for solid fills, flat colour, and anything you layer; `marker` is wide and TRANSLUCENT, so colours build where strokes overlap and whatever is underneath shows through (painting a solid area in marker leaves the paper visible between passes); `pencil` is textured; `fountainPen`, `watercolor` and `crayon` are expressive — try them and look. Each ink has a thinnest width it can draw (below it a stroke is effectively INVISIBLE), so a drawnWidth under it is raised and the reply says so. A pen whose width is CONSTANT is a monoline, and lists as one — including every pen you author with a single `drawnWidth`. Monoline is not a different rendered ink but a tool behaviour ("hold the width constant whatever the pressure"), PencilKit's archive records it as pen, and the app derives the name back from the uniform sizes, so `pen` with one width and `monoline` are the same stroke and read back as `monoline`. A pen reads back as `pen` only when its per-point `stampSize` varies. |
 | `smooth` | boolean | no | How to read `points`. DEFAULT false: they are a POLYLINE — straight segments, sharp corners, which is almost certainly what you mean. Set true to have them treated as spline knots and smoothly interpolated (useful for a curve given as a few sparse points) — PKStrokePath splines THROUGH its control points, so a sparse polyline misread as knots renders as a rounded teardrop, not the shape you asked for. Note reshape_strokes defaults the OTHER way. A polyline too corner-dense to fit the 4000-point canonical budget fails loudly — send fewer points, or split the shape into several strokes. smooth: true is NOT the escape from that: it skips the budget (the verbatim path has no point cap of its own, only the message-size limit) precisely BECAUSE it does no corner work at all, so every sharp corner then comes out rounded. |
+
+### `export_sketch`
+
+Renders a document for PUBLISHING and writes the PNG to a file: the paper without the grid, in the appearance you name, the content with a narrow margin. It is render_sketch with the defaults a posted image needs, so none of them can be forgotten — render_sketch is for looking and aligning (the grid is on, the appearance is whatever device opened the document last, the image is small). Read-only. The image may be up to 16 megapixels, four times render_sketch's ceiling, because it goes to a file and never into the reply; without `scale` or `maxPixels` it is about 8 megapixels. `appearance` is REQUIRED: an export must not depend on who opened the document last. A text in the system font is laid out differently on a Mac than on an iPad or iPhone (render_sketch's description), so name `device` when exports must match from one day to the next. REQUIRES a connected device with the `exportRender` capability. REPLY: ONE JSON object — the render's metadata (`canvasRect`, `pixelSize`, `scale`, `appearance`, `renderedBy`, …) with `filePath` (absolute, on the server's machine) and `renderUrl` (relative to this server; download it when you are not on that machine). The server names the file and keeps its render directory bounded, oldest first: copy the file soon. PNG only — a vector format is not built.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `appearance` | string — `light`, `dark` | yes | Which appearance to export: the light page or the dark one. Required. |
+| `docId` | string | yes | The document (its id, or its name when no other document has that name) to export. |
+| `background` | string — `paper`, `transparent` | no | "paper" (default): the document's paper color for `appearance`. "transparent": no paper. The grid is never exported — use render_sketch with "paper+grid" to see it. |
+| `canvasRect` | array | no | [x, y, width, height] in canvas points: exactly this part. Omitted: everything in the document, with `padding` round it. |
+| `device` | string — `mac`, `ipad`, `iphone` | no | Export on a device of this kind, or fail with noDeviceAvailable when none is connected. Omitted, the server picks. |
+| `maxPixels` | number | no | Pixel budget when `scale` is omitted. Default 8000000, at most 16000000. |
+| `padding` | number | no | The margin round the content when `canvasRect` is omitted, in canvas points. Default 40. |
+| `scale` | number | no | Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`. |
 
 ### `get_tool`
 

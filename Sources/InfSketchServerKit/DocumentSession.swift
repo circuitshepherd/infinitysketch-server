@@ -105,6 +105,10 @@ public struct SessionConfig: Sendable {
     /// (`DeviceCommandBroker.deviceWait`). Zero — the default, and every test's — answers at
     /// once; `main.swift` sets 15 s.
     public var deviceWait: Duration
+    /// The kind of device (`mac`, `ipad`, `iphone`) an agent's work is given to while one is
+    /// connected and able (`--prefer-device`; `DeviceCommandBroker.preferredKind`). nil: the
+    /// broker's own choice.
+    public var preferredDeviceKind: String?
     public init(
         gracePeriod: Duration = .seconds(60),
         outboundBufferLimit: Int = 256,
@@ -126,9 +130,11 @@ public struct SessionConfig: Sendable {
         writeStallTimeout: Duration = .seconds(30),
         allowedHostNames: [String] = [],
         unsubscribeRoutingGrace: Duration = .seconds(5),
-        deviceWait: Duration = .zero
+        deviceWait: Duration = .zero,
+        preferredDeviceKind: String? = nil
     ) {
         self.deviceWait = deviceWait
+        self.preferredDeviceKind = preferredDeviceKind
         self.unsubscribeRoutingGrace = unsubscribeRoutingGrace
         self.allowedHostNames = allowedHostNames
         self.writeStallTimeout = writeStallTimeout

@@ -248,7 +248,8 @@ enum AgentGuide {
     - **A write answers twice: a text, and the same as `structuredContent`.** The text differs \
       from tool to tool; the object has one shape — `message`, `seq`, `id` for the element made \
       or touched (always `id`), and whatever else the reply names (`canvasBounds`, `ids`, \
-      `createdArrowIds`, `notes`). A script should read the object.
+      `createdArrowIds`, `notes`) — and `device`, the kind of device (mac, ipad, iphone) that did \
+      the work. A script should read the object.
     - **Bytes are not content.** A device that only opens a document rewrites its thumbnail, \
       viewport and appearance, so the raw bytes change when nobody edited anything. To learn \
       whether — and what — a user changed, keep a copy when you finish and call `diff_docs` \

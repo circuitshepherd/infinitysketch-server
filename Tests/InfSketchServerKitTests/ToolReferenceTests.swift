@@ -104,7 +104,7 @@ enum ToolReference {
               blurb: "Read-only. `render_sketch` also renders ephemeral candidate strokes that are "
                    + "never written anywhere — synthesize, render, refine, then commit. `diff_docs` "
                    + "says what differs from a copy you kept — what the user changed.",
-              tools: ["render_sketch", "get_tool", "diff_docs"]),
+              tools: ["render_sketch", "export_sketch", "get_tool", "diff_docs"]),
     ]
 
     // MARK: - Emitting

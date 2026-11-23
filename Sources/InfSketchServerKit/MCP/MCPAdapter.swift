@@ -1247,7 +1247,10 @@ public actor MCPAdapter {
                 closely spaced strokes you would otherwise compute yourself. The strokes are \
                 generated on the device and are ORDINARY strokes: the user can erase part of the \
                 fill, select inside it, restyle it, and it ink-adapts on a dark/light flip, \
-                exactly like anything they drew.
+                exactly like anything they drew. Being strokes, a fill lies BELOW every arrow, \
+                text and formula: for a face that must cover a line, or one flat color at any \
+                size with an exact edge, place an object instead (add_shape, or add_arrow with \
+                `closed` and `filled`).
 
                 `canvasPoints` is the boundary in canvas coordinates, closed by repeating the \
                 first point (an unclosed path is closed for you). Concave shapes fill correctly, \
@@ -1338,6 +1341,10 @@ public actor MCPAdapter {
                         "type": "number",
                         "description": "Direction of the passes; 0 is horizontal.",
                     ]),
+                    "edge": .object([
+                        "type": "string", "enum": .array(["centered", "inside"].map(Value.string)),
+                        "description": "Where the ink ends. \"centered\" (default): border and pass ends are centred on canvasPoints, so the ink reaches half a drawnWidth past it. \"inside\": the region is first shrunk by half a drawnWidth, so the ink ends ON canvasPoints — a face filled with wide passes (drawnWidth 3 or more renders flat at any scale) then stays inside its outline. Its OUTWARD corners come out rounded by half the width, since a round pen cannot reach into a corner (a sharp-cornered face is add_shape's). A region narrower than drawnWidth has nothing left inside and is refused.",
+                    ]),
                     "border": .object([
                         "type": "boolean",
                         "description": """
@@ -1384,12 +1391,15 @@ public actor MCPAdapter {
             name: "list_open_docs",
             description: """
                 What is OPEN right now, and on what. Read-only, no device round trip, no docId \
-                needed. Returns `{devices: {count, capabilities, kinds}, openDocs: [{docId, name, \
+                needed. Returns `{devices: {count, capabilities, kinds, preferredKind?}, openDocs: [{docId, name, \
                 seq, subscribers, openOn}]}` — `docId` is the document's id, `name` its label. \
                 `kinds` counts the connected devices by kind (`{"mac": 1, "ipad": 1}`; "unknown" \
                 for an app that does not say) and `openOn` lists the kinds that have that \
                 document open. The SERVER picks the device for a call — one that has the document \
-                open is preferred; only render_sketch lets you ask for a kind (`device`).
+                open is preferred, and `preferredKind`, present when the server was started with \
+                `--prefer-device`, names the kind that is given the work first; only \
+                render_sketch and export_sketch let you ask for a kind yourself (`device`). A \
+                write's structured reply says which kind did it (`device`).
 
                 CALL THIS INSTEAD OF GUESSING WHICH DOCUMENT THE USER MEANS. The name a human \
                 says may be shared by several documents (a shared name is refused \
@@ -2836,6 +2846,65 @@ public actor MCPAdapter {
             ])
         ),
         Tool(
+            name: "export_sketch",
+            description: """
+                Renders a document for PUBLISHING and writes the PNG to a file: the paper \
+                without the grid, in the appearance you name, the content with a narrow margin. \
+                It is render_sketch with the defaults a posted image needs, so none of them can \
+                be forgotten — render_sketch is for looking and aligning (the grid is on, the \
+                appearance is whatever device opened the document last, the image is small). \
+                Read-only. The image may be up to 16 megapixels, four times render_sketch's \
+                ceiling, because it goes to a file and never into the reply; without `scale` or \
+                `maxPixels` it is about 8 megapixels. \
+                `appearance` is REQUIRED: an export must not depend on who opened the document \
+                last. A text in the system font is laid out differently on a Mac than on an iPad \
+                or iPhone (render_sketch's description), so name `device` when exports must \
+                match from one day to the next. \
+                REQUIRES a connected device with the `exportRender` capability. \
+                REPLY: ONE JSON object — the render's metadata (`canvasRect`, `pixelSize`, \
+                `scale`, `appearance`, `renderedBy`, …) with `filePath` (absolute, on the \
+                server's machine) and `renderUrl` (relative to this server; download it when \
+                you are not on that machine). The server names the file and keeps its render \
+                directory bounded, oldest first: copy the file soon. PNG only — a vector \
+                format is not built.
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to export."]),
+                    "appearance": .object([
+                        "type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                        "description": "Which appearance to export: the light page or the dark one. Required.",
+                    ]),
+                    "canvasRect": .object([
+                        "type": "array", "items": .object(["type": "number"]), "minItems": 4, "maxItems": 4,
+                        "description": "[x, y, width, height] in canvas points: exactly this part. Omitted: everything in the document, with `padding` round it.",
+                    ]),
+                    "padding": .object([
+                        "type": "number",
+                        "description": "The margin round the content when `canvasRect` is omitted, in canvas points. Default 40.",
+                    ]),
+                    "background": .object([
+                        "type": "string", "enum": .array(["paper", "transparent"].map(Value.string)),
+                        "description": "\"paper\" (default): the document's paper color for `appearance`. \"transparent\": no paper. The grid is never exported — use render_sketch with \"paper+grid\" to see it.",
+                    ]),
+                    "scale": .object([
+                        "type": "number",
+                        "description": "Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`.",
+                    ]),
+                    "maxPixels": .object([
+                        "type": "number",
+                        "description": "Pixel budget when `scale` is omitted. Default 8000000, at most 16000000.",
+                    ]),
+                    "device": .object([
+                        "type": "string", "enum": .array(["mac", "ipad", "iphone"].map(Value.string)),
+                        "description": "Export on a device of this kind, or fail with noDeviceAvailable when none is connected. Omitted, the server picks.",
+                    ]),
+                ]),
+                "required": .array(["docId", "appearance"].map(Value.string)),
+            ])
+        ),
+        Tool(
             name: "get_strokes",
             description: """
                 Reads strokes in full fidelity: every point with its size, opacity, \
@@ -4003,12 +4072,30 @@ public actor MCPAdapter {
         let (resolved, unresolved, refusal) = await resolvingDocRefs(arguments)
         if let refusal { return refusal }
         let arguments = resolved
-        let result = try await dispatchCallTool(name: name, arguments: arguments, unresolvedKeys: unresolved)
+        // Which kind of device the call's work was given to (`DeviceCommandBroker.servedBy`).
+        let served = DeviceCommandBroker.ServedBy()
+        var result = try await DeviceCommandBroker.$servedBy.withValue(served) {
+            try await dispatchCallTool(name: name, arguments: arguments, unresolvedKeys: unresolved)
+        }
+        result = Self.naming(device: served.kind, in: result)
         if Self.liveSelectionWriteTools.contains(name), Self.mayHaveChangedTheDocument(result),
            let docId = arguments?["docId"]?.stringValue {
             await history.recordLiveSelectionChange(docId: docId)
         }
         return await enrichedError(result, tool: name, arguments: arguments)
+    }
+
+    /// A write's structured reply with the KIND of device that did its work as `device`
+    /// (improvement note D2: no reply said which device had worked, and a device's kind decides
+    /// how it lays text out — a `placeBy` center is where THAT device measured it). Only the
+    /// structured form: a write's text stays as it is, and a read's reply is its listing. A
+    /// render's metadata says `renderedBy` already. No device, an error or no structured form:
+    /// unchanged.
+    static func naming(device kind: String?, in result: CallTool.Result) -> CallTool.Result {
+        guard let kind, result.isError != true, case .object(var fields)? = result.structuredContent,
+              fields["device"] == nil else { return result }
+        fields["device"] = .string(kind)
+        return CallTool.Result(content: result.content, structuredContent: .object(fields), isError: result.isError)
     }
 
     /// Whether a live-selection write may have landed on the device. A success did; so may an op
@@ -4383,6 +4470,7 @@ public actor MCPAdapter {
         case "set_grid_origin": return await callSetGridOrigin(arguments)
         case "reorder_grids": return await callReorderGrids(arguments)
         case "render_sketch": return await callRenderSketch(arguments)
+        case "export_sketch": return await callExportSketch(arguments)
         case "get_strokes": return await callGetStrokes(arguments)
         case "snap_points": return await callSnapPoints(arguments)
         case "transform_strokes": return await callTransformStrokes(arguments)
@@ -6619,6 +6707,7 @@ public actor MCPAdapter {
         guard let drawnWidth, drawnWidth < 3, (spacingRatio ?? 0.4) <= 1 else { return nil }
         return "a solid fill this thin shows stripes in a small image (below about 2 pixels per canvas point), "
             + "whatever its spacingRatio; drawnWidth 3 or more renders flat, and reaches half its width past the outline"
+            + " unless edge is \"inside\" — or place the face as an object (add_shape, filled), which is flat at any size"
     }
 
     /// The first text of a result — a tool's reply or its error reason.
@@ -6675,9 +6764,37 @@ public actor MCPAdapter {
     /// (stroke shape, unknown strokeIds, degenerate rect, pixel budget) is
     /// the device's job, surfaced verbatim as `deviceFailed: <reason>`.
     private func callRenderSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        await renderSketch(arguments, export: false)
+    }
+
+    /// The pixel budget of an export without `scale` or `maxPixels`, and its ceiling (the
+    /// device's, `SketchRenderer.filePixelCeiling` — said here for the tool's text and tests).
+    static let exportDefaultMaxPixels = 8_000_000
+    static let exportPixelCeiling = 16_000_000
+    /// An export's margin round the content, in canvas points.
+    static let exportDefaultPadding = 40
+
+    /// `export_sketch` (improvement note D3): a render with the defaults a published image
+    /// needs — no grid, a stated appearance, a narrow margin, written to a file, a larger pixel
+    /// ceiling — so that none of the four can be forgotten. ONE render path: it is
+    /// `renderSketch` with `export: true`, which sets what the caller left out.
+    private func callExportSketch(_ arguments: [String: Value]?) async -> CallTool.Result {
+        guard case .string(let appearance)? = arguments?["appearance"], ["light", "dark"].contains(appearance) else {
+            return Self.errorResult(arguments?["appearance"] == nil
+                ? "missingArgument: appearance — \"light\" or \"dark\": an export states which page it is, it never takes the last opener's"
+                : "invalidArgument: appearance must be \"light\" or \"dark\"")
+        }
+        if let background = arguments?["background"], background != .string("paper"), background != .string("transparent") {
+            return Self.errorResult("invalidArgument: background must be \"paper\" or \"transparent\" — an export never shows the grid (render_sketch does)")
+        }
+        return await renderSketch(arguments, export: true)
+    }
+
+    private func renderSketch(_ arguments: [String: Value]?, export: Bool) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
-            let writeToFile = try Self.boolArg(arguments, "writeToFile", default: false)
+            // An export is always a file: it may be four times the size an inline image may be.
+            let writeToFile = try export || Self.boolArg(arguments, "writeToFile", default: false)
 
             guard let docBytes = await documentBytes(docId: docId) else {
                 return Self.errorResult("unknownDoc")
@@ -6690,6 +6807,16 @@ public actor MCPAdapter {
             for key in Self.renderSpecParameterNames {
                 if let value = arguments?[key] {
                     specFields[key] = value
+                }
+            }
+            if export {
+                // What a published image needs and the caller did not say. `forFile` raises the
+                // device's pixel ceiling: the image goes to a file, never into a reply.
+                specFields["forFile"] = .bool(true)
+                if specFields["background"] == nil { specFields["background"] = .string("paper") }
+                if specFields["padding"] == nil { specFields["padding"] = .int(Self.exportDefaultPadding) }
+                if specFields["scale"] == nil, specFields["maxPixels"] == nil {
+                    specFields["maxPixels"] = .int(Self.exportDefaultMaxPixels)
                 }
             }
 
@@ -6744,7 +6871,10 @@ public actor MCPAdapter {
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
                                                            if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "")
-                                                           + (closesAPath ? "+closedPaths" : "") + kind)
+                                                           + (closesAPath ? "+closedPaths" : "")
+                                                           // An app without it would ignore `forFile` and
+                                                           // hand back an image a quarter the size.
+                                                           + (export ? "+exportRender" : "") + kind)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -8622,7 +8752,7 @@ public actor MCPAdapter {
                 "op": .string("fillRegion"),
                 "canvasPoints": .array(points),
             ]
-            for key in ["color", "drawnWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance"] {
+            for key in ["color", "drawnWidth", "inkType", "spacingRatio", "angleDeg", "border", "tags", "colorAppearance", "edge"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
@@ -8631,7 +8761,10 @@ public actor MCPAdapter {
 
             let out: DeviceCommandBroker.StrokeOpReply
             do {
-                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec)
+                // An app without `fillEdge` would ignore `edge` and let the ink reach past the
+                // outline, with a success reply.
+                out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
+                                                       capability: envelope["edge"] == nil ? "authorStrokes" : "authorStrokes+fillEdge")
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -8733,8 +8866,11 @@ public actor MCPAdapter {
         }
         open.sort { ($0["docId"] as? String ?? "") < ($1["docId"] as? String ?? "") }
 
+        var devices: [String: Any] = ["count": deviceCount, "capabilities": capabilities.sorted(), "kinds": kinds]
+        // The kind the server gives work to first, when it was started with one (`--prefer-device`).
+        if let preferred = broker.preferredKind { devices["preferredKind"] = preferred }
         let payload: [String: Any] = [
-            "devices": ["count": deviceCount, "capabilities": capabilities.sorted(), "kinds": kinds],
+            "devices": devices,
             "openDocs": open,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),

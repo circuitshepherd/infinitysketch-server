@@ -62,6 +62,7 @@ func die(_ message: String) -> Never {
 }
 
 var allowedHostNames: [String] = []
+var preferredDeviceKind: String?
 var arguments = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = arguments.next() {
     switch argument {
@@ -99,6 +100,13 @@ while let argument = arguments.next() {
         // Check the version store (`.versions/`, `.blobs/`) and exit, without serving: every kept
         // version must rebuild to its hash. `scripts/fault-version-store` runs it after each kill.
         verifyVersions = true
+    case "--prefer-device":
+        // The kind of device an agent's work is given to while one is connected and able
+        // (`DeviceCommandBroker.preferredKind`): "the Mac does the work, the iPad shows it".
+        guard let value = arguments.next(), ["mac", "ipad", "iphone"].contains(value) else {
+            die("--prefer-device requires mac, ipad or iphone")
+        }
+        preferredDeviceKind = value
     case "--no-keep-awake":
         // While an agent works (a tool call within the last ten minutes) the server holds off
         // this machine's idle standby — an agent's session ends when its host goes to sleep
@@ -113,6 +121,7 @@ while let argument = arguments.next() {
     default:
         let usage = "usage: infsketch-server [--port N] [--docs DIR] [--no-open] [--verbose]"
             + " [--telemetry FILE] [--allow-host NAME] [--no-keep-awake] [--verify-versions]"
+            + " [--prefer-device mac|ipad|iphone]"
         // `--help` is a request, not a failure: it exits 0 and never holds the window.
         if argument == "--help" { print(usage); exit(0) }
         die(usage)
@@ -156,7 +165,8 @@ if let limit = AcceptResilience.raiseFileDescriptorLimit(), limit.new != limit.o
 let server = InfSketchServer(port: port, docsDirectory: docsDirectory,
                              // 15 s: an agent's call that finds no device waits that long for one
                              // (`DeviceCommandBroker.deviceWait`) — the app is back within 8 s.
-                             config: SessionConfig(allowedHostNames: allowedHostNames, deviceWait: .seconds(15)),
+                             config: SessionConfig(allowedHostNames: allowedHostNames, deviceWait: .seconds(15),
+                                                   preferredDeviceKind: preferredDeviceKind),
                              hostAwake: keepHostAwake ? SystemHostAwake() : NoHostAwake())
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
 

@@ -48,7 +48,9 @@ days, matching the iOS *Recently Deleted* window), `--no-open` (do not open a br
 `--allow-host NAME` (repeatable: a host name under which a browser page may open the live channel —
 IP addresses, `localhost`, `*.local` names and this machine's own name are allowed already; add the
 name of a reverse proxy or an `/etc/hosts` entry you browse to. A proxy must pass `Host` through),
-`--no-keep-awake` (see below), `--verbose` (diagnostic lines, including when each device connected
+`--no-keep-awake` (see below), `--prefer-device mac|ipad|iphone` (an agent's work goes to a device
+of that kind while one is connected — for "the Mac draws, the iPad shows it"; without one of that
+kind any connected device does it), `--verbose` (diagnostic lines, including when each device connected
 and why its connection closed, and when the machine came back from standby).
 
 **While an agent works, the server keeps this machine awake.** An agent's drawing is made by a

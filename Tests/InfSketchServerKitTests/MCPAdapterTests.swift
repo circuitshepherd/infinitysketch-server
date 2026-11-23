@@ -818,7 +818,7 @@ actor FakeStrokeOpDevice {
         let names = Set(tools.map(\.name))
         #expect(names == [
             "add_text", "edit_text", "remove_text", "replace_doc", "create_doc",
-            "draw_strokes", "delete_strokes", "list_strokes", "render_sketch",
+            "draw_strokes", "delete_strokes", "list_strokes", "render_sketch", "export_sketch",
             "get_strokes", "transform_strokes", "restyle_strokes", "reshape_strokes",
             "snap_points", "list_fonts", "list_docs", "list_open_docs", "tag_elements", "find_elements",
             "transform_elements", "undo_last_edit", "fill_region", "draw_dots", "list_tags",
@@ -1475,6 +1475,62 @@ actor FakeStrokeOpDevice {
     /// A device says its kind with a hello word (`kind:mac`). `list_open_docs` counts the kinds
     /// apart from the abilities, and `render_sketch`'s `device` asks for one — read by the server,
     /// never relayed.
+    /// `--prefer-device mac` (improvement note D2: "the Mac does the work, the iPad shows the
+    /// result"): work any capable device can do goes to one of that kind while one is connected,
+    /// whichever device spoke last; with none of that kind, to the ordinary choice. A request
+    /// that names a kind itself is not overruled.
+    @Test func aPreferredKindOfDeviceGetsTheWork() async throws {
+        let (server, port, task) = try await startServer(config: SessionConfig(preferredDeviceKind: "mac"))
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let reply = FakeStrokeOpDevice.AutoReply.bytesWithMeta(bytes: Fixtures.docBytes, meta: Data(#"{"arrowId":"A"}"#.utf8))
+        let mac = try await FakeStrokeOpDevice(port: port, autoReply: reply, capabilities: ["authorStrokes", "arrows", "kind:mac"])
+        defer { Task { await mac.close() } }
+        // Connected LAST, so the most recently active: without a preference the work is its.
+        let ipad = try await FakeStrokeOpDevice(port: port, autoReply: reply, capabilities: ["authorStrokes", "arrows", "kind:ipad"])
+        defer { Task { await ipad.close() } }
+
+        let line: Value = .array([.array([0, 0]), .array([50, 0])])
+        let (_, isError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(isError != true)
+        #expect(await mac.receivedRequests.count == 1)
+        #expect(await ipad.receivedRequests.isEmpty)
+
+        let (listed, _) = try await client.callTool(name: "list_open_docs", arguments: [:])
+        let listing = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(listed).utf8)) as? [String: Any])
+        #expect((listing["devices"] as? [String: Any])?["preferredKind"] as? String == "mac")
+
+        // A render that asks for the iPad gets the iPad.
+        _ = try await client.callTool(name: "render_sketch", arguments: ["docId": "d", "device": "ipad"])
+        #expect(await ipad.receivedRequests.count == 1)
+        #expect(await mac.receivedRequests.count == 1)
+
+        // With no Mac connected the work is done by what is there.
+        await mac.close()
+        try await Task.sleep(for: .milliseconds(200))
+        let (_, laterError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": line])
+        #expect(laterError != true)
+        #expect(await ipad.receivedRequests.count == 2)
+        await server.stop()
+    }
+
+    /// A write's structured reply names the kind of device that did the work; its text does not
+    /// change, and an error or a reply without a structured form is left as it is.
+    @Test func aWritesStructuredReplyNamesTheDevice() {
+        let write = MCPAdapter.writeResult("added arrow to d at seq 3\narrowId: A1B2C3D4-0000-0000-0000-000000000001", seq: 3)
+        let named = MCPAdapter.naming(device: "mac", in: write)
+        guard case .object(let fields)? = named.structuredContent else { Issue.record("no structured content"); return }
+        #expect(fields["device"] == .string("mac") && fields["seq"] == .int(3))
+        #expect(named.content == write.content, "the text is what it was")
+        #expect(MCPAdapter.naming(device: nil, in: write).structuredContent == write.structuredContent)
+        let plain = CallTool.Result(content: [.text(text: "[]", annotations: nil, _meta: nil)])
+        #expect(MCPAdapter.naming(device: "mac", in: plain).structuredContent == nil)
+        let failed = CallTool.Result(content: [.text(text: "deviceTimeout", annotations: nil, _meta: nil)],
+                                     structuredContent: .object(["message": "x"]), isError: true)
+        #expect(MCPAdapter.naming(device: "mac", in: failed).structuredContent == .object(["message": "x"]))
+    }
+
     @Test func aRenderCanAskForAKindOfDeviceAndTheKindsAreListed() async throws {
         let (server, port, task) = try await startServer()  // seeds doc "d"
         defer { task.cancel() }
@@ -4030,6 +4086,110 @@ actor FakeStrokeOpDevice {
         #expect((httpResponse as? HTTPURLResponse)?.statusCode == 200)
         #expect(downloaded == pngBytes)
 
+        await server.stop()
+    }
+
+    /// fill_region's `edge` reaches only a `fillEdge` device: another would ignore it and let the
+    /// ink reach past the outline. A fill without it still reaches every device.
+    @Test func aFillsEdgeGoesOnlyToADeviceThatKnowsIt() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes))
+        defer { Task { await old.close() } }
+        let square: Value = .array([.array([0, 0]), .array([50, 0]), .array([50, 50]), .array([0, 50])])
+        let (refused, isError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d", "canvasPoints": square, "edge": "inside"])
+        #expect(isError == true && toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("fillEdge"))
+        let (_, plainError) = try await client.callTool(name: "fill_region", arguments: ["docId": "d", "canvasPoints": square])
+        #expect(plainError != true)
+        await old.close()
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["authorStrokes", "fillEdge"])
+        defer { Task { await device.close() } }
+        let (_, edgeError) = try await client.callTool(name: "fill_region", arguments: [
+            "docId": "d", "canvasPoints": square, "edge": "inside"])
+        #expect(edgeError != true)
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["edge"] as? String == "inside")
+        await server.stop()
+    }
+
+    // MARK: - export_sketch (improvement note D3)
+
+    /// An export is a render with the defaults a published image needs — the paper without the
+    /// grid, a stated appearance, a narrow margin, a larger pixel budget — written to a file.
+    /// It goes only to an `exportRender` device: another would ignore `forFile` and hand back an
+    /// image a quarter the size.
+    @Test func exportSketchRendersWithPostingDefaultsIntoAFile() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: Data(#"{"scale":4.0}"#.utf8)))
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "dark"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("exportRender"))
+        #expect(await old.receivedRequests.isEmpty)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pngBytes, meta: Data(#"{"scale":4.0}"#.utf8)),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "dark"])
+        #expect(isError != true)
+        #expect(toolResultImage(content) == nil, "an export is a file, never an inline image")
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let path = try #require(reply["filePath"] as? String)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pngBytes)
+        #expect((reply["renderUrl"] as? String)?.hasPrefix("/api/renders/") == true)
+        #expect(reply["scale"] as? Double == 4.0)
+
+        let first = try #require(await device.receivedRequests.first)
+        let spec = try #require(JSONSerialization.jsonObject(with: first.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "render")
+        #expect(spec["forFile"] as? Bool == true)
+        #expect(spec["background"] as? String == "paper", "no grid unless render_sketch is asked for one")
+        #expect(spec["appearance"] as? String == "dark")
+        #expect(spec["padding"] as? Int == MCPAdapter.exportDefaultPadding)
+        #expect(spec["maxPixels"] as? Int == MCPAdapter.exportDefaultMaxPixels)
+
+        // What the caller says wins, and a scale leaves the budget out.
+        _ = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "scale": 6, "padding": 12, "background": "transparent",
+            "canvasRect": .array([0, 0, 100, 50])])
+        let second = try #require(await device.receivedRequests.last)
+        let said = try #require(JSONSerialization.jsonObject(with: second.spec) as? [String: Any])
+        #expect(said["scale"] as? Double == 6 && said["maxPixels"] == nil && said["padding"] as? Double == 12)
+        #expect(said["background"] as? String == "transparent" && said["canvasRect"] as? [Double] == [0, 0, 100, 50])
+        await server.stop()
+    }
+
+    /// The appearance is the caller's to state, and the grid is not exportable.
+    @Test func exportSketchRefusesWhatWouldMakeTheImageDependOnChance() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data([1]), meta: Data("{}".utf8)),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await device.close() } }
+        let (noAppearance, e1) = try await client.callTool(name: "export_sketch", arguments: ["docId": "d"])
+        #expect(e1 == true)
+        let (grid, e2) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "dark", "background": "paper+grid"])
+        #expect(e2 == true && toolResultText(grid).contains("never shows the grid"))
+        _ = noAppearance
+        #expect(await device.receivedRequests.isEmpty)
         await server.stop()
     }
 
