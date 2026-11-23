@@ -260,11 +260,13 @@ enum AgentGuide {
       outline. It lies among the arrows, texts and formulas, so a face can cover a line. \
       `fill_region` and `draw_dots` make STROKES, which always lie below every object — right \
       for hatching and for marks the user edits like their own pen strokes.
-    - **The system font is not the same on every device.** A text without a `family` is set 4 \
+    - **The system font is not the same on every device.** A new text is in Inter, the font \
+      the app bundles (`Inter Variable`), and is laid out the same everywhere; so is any other \
+      named family, and a formula. A text in the SYSTEM font — `list_texts` says \
+      `family: "System"`; every text made before the app had its own font is one — is set 4 \
       to 5 % wider on a Mac than on an iPad or iPhone below 20 pt, and its lines are spaced \
       differently, so a wrapped caption can break at another word and an export depends on \
-      which device rendered it (`renderedBy`). Give `family` (Helvetica Neue, for one) to a \
-      text that must not move; a named family and a formula are laid out the same everywhere.
+      which device rendered it (`renderedBy`). Give such a text a `family` if it must not move.
     - **Errors carry the answer.** `unknownDoc` lists the documents that exist; \
       `noSelectionActive` names what IS open; `deviceTimeout` and `deviceDisconnected` say \
       whether the call can have changed anything. Read the whole message before retrying.

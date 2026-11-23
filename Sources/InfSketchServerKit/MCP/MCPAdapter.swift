@@ -615,10 +615,10 @@ public actor MCPAdapter {
     /// overrides.
     private static let textStyleProperties: [String: Value] = [
         "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
-        "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
+        "fontSize": .object(["type": "number", "description": "Point size, 1–512. A NEW text or span without one is 17 pt."]),
         "bold": .object(["type": "boolean"]),
         "italic": .object(["type": "boolean"]),
-        "family": .object(["type": "string", "description": "A font family name from list_fonts. An unknown family fails with unknownFont. Name one (for example Helvetica Neue) for a text that must be laid out the same on every device: without a family the text is in the system font, which a Mac sets 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
+        "family": .object(["type": "string", "description": "A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
     ]
 
     /// One `spans` array entry: required `text`, plus every whole-field
@@ -800,7 +800,9 @@ public actor MCPAdapter {
                 needs a connected device; plain text does not. Returns the new text's id so you \
                 can edit it. Colours: #RRGGBB(AA), light-canonical (see colorAppearance to \
                 author for the dark canvas). Font families come from list_fonts — call it \
-                before setting a `family`. `anchor` picks the point of the box that stays put \
+                before setting a `family`; without one the text is in Inter, the font the app \
+                bundles, at 17 pt unless `fontSize` says otherwise, and is the same on every \
+                device. `anchor` picks the point of the box that stays put \
                 as the text grows, as the app's anchor grid does (needs a device). `wordWrap` / \
                 `wrapWidth` wrap it at a fixed width and `layer` puts it in front of or behind the \
                 strokes (both need a device). Formulas: write the LaTeX between `$…$` and set \
@@ -1425,8 +1427,10 @@ public actor MCPAdapter {
             description: """
                 The font families installed on the connected device, sorted. Call this before \
                 setting a `family` on add_text/edit_text — an unknown family is rejected with \
-                unknownFont. A named family is laid out the same on a Mac, an iPad and an \
-                iPhone; the system font (no family) is not. REQUIRES a connected device — fails with noDeviceAvailable if none \
+                unknownFont. `Inter Variable` is the font the app bundles and the default of a \
+                new text. A named family is laid out the same on a Mac, an iPad and an \
+                iPhone; the device's own system font (`family: "System"`, not in this list) is \
+                not. REQUIRES a connected device — fails with noDeviceAvailable if none \
                 is connected and deviceTimeout if it doesn't respond in time. Read-only: it \
                 never writes to the document, so there is no seq assigned and nothing to retry.
                 """,
@@ -1813,8 +1817,8 @@ public actor MCPAdapter {
                 it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, \
                 `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, \
                 fontSize, family, bold, italic} each) and no top-level style. `color` is \
-                light-canonical and ABSENT for the automatic color; `family` is absent for the \
-                system font. `alignment` is left / center / right / justified / natural, or mixed. \
+                light-canonical and ABSENT for the automatic color; `family` is `System` for the \
+                device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. \
                 `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
                 (the text's own points, before its transform). `inlineMath` is true when every $…$ \
                 in the text shows as a typeset formula (add_text / edit_text set it).
@@ -2673,11 +2677,12 @@ public actor MCPAdapter {
                 to this server, e.g. /api/renders/<name>.png — join it to the address you reached \
                 this server on and download it, which is what to do when you are NOT on the \
                 server's machine). The metadata's `renderedBy` names the kind of device that made \
-                the image ("mac", "ipad", "iphone"). A text in the SYSTEM font (no `family`) is \
+                the image ("mac", "ipad", "iphone"). A text in the SYSTEM font (list_texts: \
+                `family: "System"` — every text made before the app had its own font) is \
                 set differently on a Mac: 4 to 5 % wider below 20 pt and with another line \
                 height, so a wrapped line can break at another word; an iPad and an iPhone set \
-                it alike. A text in a named family (Helvetica Neue, …) and a formula are the \
-                same on every device. So compare an image of system-font text only with one \
+                it alike. A text in Inter (the default of a new text) or another named family, \
+                and a formula, are the same on every device. So compare an image of system-font text only with one \
                 from the same kind, or ask for one with `device`.
                 """,
             inputSchema: .object([

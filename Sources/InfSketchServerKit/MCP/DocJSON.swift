@@ -1,4 +1,5 @@
 import Foundation
+import InfSketchWire
 
 /// Pure `JSONSerialization` manipulation of `.infsketch` document JSON, scoped to
 /// placed-text entries (`placedTextsData`). No UIKit, no Codable model of the app's
@@ -103,6 +104,11 @@ public enum DocJSON {
     /// false). The key is written only when true, and writing it raises the document to format 7
     /// (`writeInlineMath`); false and nil on a document without the default write exactly the
     /// entry this wrote before formulas existed.
+    ///
+    /// **The font** (2026-11-23): in a document of format 8 or newer the run names the font the
+    /// app bundles, at a fixed size (`AgentTextDefaults`), so the text is the same on every
+    /// device. In an older document the run has no attributes, as always: an app that old does
+    /// not have the font, and each device shows the text in its own system font.
     public static func addText(
         to bytes: Data,
         id: UUID,
@@ -133,6 +139,11 @@ public enum DocJSON {
             // a new text goes in front of the strokes, where texts have always been.
             entry["kind"] = ElementKind.text.rawValue
             entry["layer"] = "front"
+        }
+        let version = (doc["formatVersion"] as? NSNumber)?.intValue ?? (doc["formatVersion"] as? Int) ?? 1
+        if version >= AgentTextDefaults.firstFormatWithTheFont {
+            let font: [String: Any] = ["NSFont": AgentTextDefaults.fontAttribute]
+            entry["text"] = [text, font] as [Any]
         }
         let formulas = inlineMath ?? ((doc["newTextsInlineMath"] as? Bool) ?? false)
         writeInlineMath(formulas, into: &entry, doc: &doc)

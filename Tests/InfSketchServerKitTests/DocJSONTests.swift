@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import InfSketchServerKit
+import InfSketchWire
 
 @Suite struct DocJSONTests {
     static let fixture: Data = Data(#"""
@@ -802,5 +803,67 @@ import Testing
         #expect(throws: DocJSON.DocJSONError.textNotFound) {
             _ = try DocJSON.setInlineMath(in: deviceBytes, textId: "nope", to: true)
         }
+    }
+
+    // MARK: - The font of a plain text (document format 8)
+
+    /// The format-6 document at another format version.
+    static func document(format: Int) -> Data {
+        Data(String(decoding: format6, as: UTF8.self)
+            .replacingOccurrences(of: "\"formatVersion\": 6,", with: "\"formatVersion\": \(format),")
+            .utf8)
+    }
+
+    /// From format 8 on every app that opens the document bundles Inter, and the server's own
+    /// text names it: the same font file on every device, where a run without a font is each
+    /// device's system font.
+    @Test func aPlainTextInAFormat8DocumentNamesTheBundledFont() throws {
+        let id = UUID()
+        let out = try DocJSON.addText(to: Self.document(format: 8), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let runs = try #require(try Self.entry(out, id.uuidString)["text"] as? [Any])
+        #expect(runs.count == 2)
+        #expect(runs.first as? String == "Label")
+        let attributes = try #require(runs.last as? [String: Any])
+        #expect(attributes.count == 1)
+        #expect(attributes["NSFont"] as? String == AgentTextDefaults.fontAttribute)
+        #expect(try Self.formatVersion(out) == 8)
+    }
+
+    /// An app of an older format does not have the font: it would show a substitute and store
+    /// the substitute at its next save. So an older document gets the run it always got, and
+    /// its format version is not raised for it.
+    @Test(arguments: [6, 7])
+    func aPlainTextInAnOlderDocumentHasNoFont(format: Int) throws {
+        let id = UUID()
+        let out = try DocJSON.addText(to: Self.document(format: format), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let runs = try #require(try Self.entry(out, id.uuidString)["text"] as? [Any])
+        #expect(runs.first as? String == "Label")
+        #expect((runs.last as? [String: Any])?.isEmpty == true)
+        #expect(try Self.formatVersion(out) == format)
+    }
+
+    /// New characters of a text the server gave the font keep it (the first run's attributes
+    /// are copied as they are).
+    @Test func newCharactersOfSuchATextKeepTheFont() throws {
+        let id = UUID()
+        let added = try DocJSON.addText(to: Self.document(format: 8), id: id, text: "Label", x: 1, y: 2, pinned: false)
+        let edited = try DocJSON.editText(in: added, textId: id.uuidString, newText: "Caption", x: nil, y: nil)
+        let runs = try #require(try Self.entry(edited, id.uuidString)["text"] as? [Any])
+        #expect(runs.first as? String == "Caption")
+        #expect((runs.last as? [String: Any])?["NSFont"] as? String == AgentTextDefaults.fontAttribute)
+    }
+
+    /// The archive this side carries and cannot make: it has to be a keyed archive that names
+    /// the family's regular face at the default size. That it DECODES to that font is the
+    /// app's test (`BundledInterFontTests`); this one runs on every platform the server does.
+    @Test func theFontAttributeIsAnArchiveOfTheDefaultFont() throws {
+        let data = try #require(Data(base64Encoded: AgentTextDefaults.fontAttribute))
+        let plist = try #require(try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        #expect(plist["$archiver"] as? String == "NSKeyedArchiver")
+        let objects = try #require(plist["$objects"] as? [Any])
+        #expect(objects.contains { $0 as? String == "InterVariable" })
+        #expect(objects.contains { ($0 as? NSNumber)?.doubleValue == AgentTextDefaults.fontSize && !($0 is String) })
+        #expect(AgentTextDefaults.family == "Inter Variable")
+        #expect(AgentTextDefaults.firstFormatWithTheFont <= DocJSON.knownFormatVersion)
     }
 }
