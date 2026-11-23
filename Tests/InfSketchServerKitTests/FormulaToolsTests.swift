@@ -76,8 +76,8 @@ import MCP
         }
         // A newer document is refused, as by every edit.
         let newer = Data(String(decoding: Self.document, as: UTF8.self)
-            .replacingOccurrences(of: "\"formatVersion\": 7", with: "\"formatVersion\": 8").utf8)
-        #expect(throws: DocJSON.DocJSONError.documentFormatNewer(file: 8)) {
+            .replacingOccurrences(of: "\"formatVersion\": 7", with: "\"formatVersion\": \(DocJSON.knownFormatVersion + 1)").utf8)
+        #expect(throws: DocJSON.DocJSONError.documentFormatNewer(file: DocJSON.knownFormatVersion + 1)) {
             _ = try DocJSON.removeFormula(from: newer, formulaId: Self.formula)
         }
     }
@@ -106,8 +106,10 @@ import MCP
         #expect(DocJSON.elementIds(.formula, in: Data("not json".utf8)).isEmpty)
     }
 
-    @Test func theFormatVersionStaysSeven() throws {
-        #expect(DocJSON.knownFormatVersion == 7)
+    /// An edit here never changes the version the document says (8 is the newest these edits
+    /// know: closed paths and filled shapes, 2026-11-23).
+    @Test func anEditKeepsTheDocumentsFormatVersion() throws {
+        #expect(DocJSON.knownFormatVersion == 8)
         let out = try DocJSON.removeFormula(from: Self.document, formulaId: Self.formula)
         #expect((try Self.object(out)["formatVersion"] as? NSNumber)?.intValue == 7)
     }

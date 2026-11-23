@@ -831,7 +831,7 @@ actor FakeStrokeOpDevice {
             "reorder_grids", "set_pinned", "set_layer", "set_paper", "copy_elements", "reorder_elements", "diff_docs", "batch",
             "fetch_doc", "delete_doc", "restyle_selection", "delete_selection", "draw_selection", "get_tool",
             "restore_stroke_widths", "reset_element_transforms",
-            "list_arrows", "list_arrow_presets", "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
+            "list_arrows", "list_arrow_presets", "add_arrow", "add_shape", "reshape_arrow", "restyle_arrows", "remove_arrow",
             "save_arrow_preset", "rename_arrow_preset", "delete_arrow_preset", "move_arrow_preset",
             "restore_arrow_presets", "get_new_arrow_style", "set_new_arrow_style",
             "list_formulas", "add_formula", "edit_formula", "remove_formula",
@@ -2991,6 +2991,81 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A closed or filled path, and add_shape, reach only a `closedPaths` device: an app from
+    /// before format 8 would ignore `closed` and `filled` and answer success with an open arrow,
+    /// and does not know `addShape` at all. A plain add_arrow still reaches it.
+    @Test func closedPathsGoOnlyToADeviceThatDrawsThem() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["arrows", "authorStrokes"])
+        defer { Task { await old.close() } }
+        let triangle: Value = .array([.array([0, 0]), .array([50, 0]), .array([25, 40])])
+        for arguments: [String: Value] in [
+            ["docId": "d", "canvasPoints": triangle, "closed": true],
+            ["docId": "d", "canvasPoints": triangle, "closed": true, "filled": true],
+        ] {
+            let (refused, isError) = try await client.callTool(name: "add_arrow", arguments: arguments)
+            #expect(isError == true)
+            #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"))
+            #expect(toolResultText(refused).contains("closedPaths"), "the refusal names the missing part: \(toolResultText(refused))")
+        }
+        let (shapeRefused, shapeIsError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "dot", "canvasX": 10, "canvasY": 10, "diameter": 4])
+        #expect(shapeIsError == true && toolResultText(shapeRefused).hasPrefix("noDeviceAvailable"))
+        let (reshapeRefused, reshapeIsError) = try await client.callTool(name: "reshape_arrow", arguments: [
+            "docId": "d", "arrowId": .string(UUID().uuidString), "closed": true])
+        #expect(reshapeIsError == true && toolResultText(reshapeRefused).hasPrefix("noDeviceAvailable"))
+        let (previewRefused, previewIsError) = try await client.callTool(name: "render_sketch", arguments: [
+            "docId": "d", "arrows": .array([.object(["canvasPoints": triangle, "closed": true])])])
+        #expect(previewIsError == true && toolResultText(previewRefused).hasPrefix("noDeviceAvailable"))
+        #expect(await old.receivedRequests.isEmpty)
+        let (_, plainIsError) = try await client.callTool(name: "add_arrow", arguments: ["docId": "d", "canvasPoints": triangle])
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+        await old.close()
+
+        let meta = try JSONEncoder().encode(["arrowId": "A1B2C3D4-0000-0000-0000-000000000001",
+                                             "canvasBounds": "8.000, 8.000, 4.000, 4.000", "drawnWidth": "2.0"])
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta),
+                                                  capabilities: ["arrows", "closedPaths"])
+        defer { Task { await device.close() } }
+        let (added, addedIsError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "dot", "canvasX": 10, "canvasY": 10, "diameter": 4, "color": "#FF0000"])
+        #expect(addedIsError != true)
+        let text = toolResultText(added)
+        #expect(text.hasPrefix("added shape to "))
+        #expect(text.contains("arrowId: A1B2C3D4-0000-0000-0000-000000000001"))
+        #expect(text.contains("canvasBounds: [8.000, 8.000, 4.000, 4.000]") && text.contains("drawnWidth: 2.0"))
+        let shapeRequest = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: shapeRequest.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addShape" && spec["shape"] as? String == "dot")
+        #expect(spec["diameter"] as? Double == 4 && spec["color"] as? String == "#FF0000")
+        // The structured form: the id under `id`, the bounds as numbers.
+        let structured = try #require(MCPAdapter.structuredReply(text, seq: 3))
+        guard case .object(let fields) = structured else { Issue.record("not an object"); return }
+        #expect(fields["id"] == .string("A1B2C3D4-0000-0000-0000-000000000001"))
+        guard case .array(let bounds)? = fields["canvasBounds"] else { Issue.record("canvasBounds is no array"); return }
+        #expect(bounds.compactMap { Double($0) } == [8, 8, 4, 4], "the box as four numbers: \(bounds)")
+
+        let (_, closedIsError) = try await client.callTool(name: "add_arrow", arguments: [
+            "docId": "d", "canvasPoints": triangle, "closed": true, "filled": true])
+        #expect(closedIsError != true)
+        let closedRequest = try #require(await device.receivedRequests.last)
+        let closedSpec = try #require(JSONSerialization.jsonObject(with: closedRequest.spec) as? [String: Any])
+        #expect(closedSpec["closed"] as? Bool == true && closedSpec["filled"] as? Bool == true)
+        await server.stop()
+    }
+
+    /// add_shape runs inside a batch like add_arrow, and is a plain bytes op: a lost device
+    /// cannot have changed anything.
+    @Test func addShapeIsBatchableAndABytesOp() {
+        #expect(MCPAdapter.batchableTools.contains("add_shape"))
+        #expect(!MCPAdapter.liveSelectionWriteTools.contains("add_shape"))
+        #expect(!MCPAdapter.deviceSettingWriteTools.contains("add_shape"))
+    }
+
     /// restore_stroke_widths names what it was given (whole-branch review #5).
     @Test func restoreWidthsNamesStrokesAndArrows() {
         let arrow = UUID().uuidString
@@ -5126,7 +5201,7 @@ actor FakeStrokeOpDevice {
         let expected: Set<String> = ["draw_strokes", "draw_selection", "fill_region",
                                      "draw_dots", "restyle_strokes", "restyle_selection",
                                      "add_text", "edit_text", "render_sketch",
-                                     "add_arrow", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
+                                     "add_arrow", "add_shape", "restyle_arrows", "save_arrow_preset", "set_new_arrow_style",
                                      "add_formula", "edit_formula"]
         let declaring = Set(MCPAdapter.toolDefinitions
             .filter { MCPAdapter.declaredArguments(of: $0).contains("colorAppearance") }

@@ -253,6 +253,17 @@ enum AgentGuide {
       viewport and appearance, so the raw bytes change when nobody edited anything. To learn \
       whether — and what — a user changed, keep a copy when you finish and call `diff_docs` \
       against it.
+    - **A shape that stacks with lines is an object, not a fill.** `add_shape` places a \
+      rectangle, an ellipse, a circle, a polygon or a solid dot as ONE arrow object with a closed \
+      path (`filled: true` paints the inside); `add_arrow` takes `closed` and `filled` for any \
+      outline. It lies among the arrows, texts and formulas, so a face can cover a line. \
+      `fill_region` and `draw_dots` make STROKES, which always lie below every object — right \
+      for hatching and for marks the user edits like their own pen strokes.
+    - **The system font is not the same on every device.** A text without a `family` is set 4 \
+      to 5 % wider on a Mac than on an iPad or iPhone below 20 pt, and its lines are spaced \
+      differently, so a wrapped caption can break at another word and an export depends on \
+      which device rendered it (`renderedBy`). Give `family` (Helvetica Neue, for one) to a \
+      text that must not move; a named family and a formula are laid out the same everywhere.
     - **Errors carry the answer.** `unknownDoc` lists the documents that exist; \
       `noSelectionActive` names what IS open; `deviceTimeout` and `deviceDisconnected` say \
       whether the call can have changed anything. Read the whole message before retrying.

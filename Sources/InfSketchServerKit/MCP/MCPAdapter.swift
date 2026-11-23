@@ -618,7 +618,7 @@ public actor MCPAdapter {
         "fontSize": .object(["type": "number", "description": "Point size, 1–512."]),
         "bold": .object(["type": "boolean"]),
         "italic": .object(["type": "boolean"]),
-        "family": .object(["type": "string", "description": "A font family name from list_fonts. An unknown family fails with unknownFont."]),
+        "family": .object(["type": "string", "description": "A font family name from list_fonts. An unknown family fails with unknownFont. Name one (for example Helvetica Neue) for a text that must be laid out the same on every device: without a family the text is in the system font, which a Mac sets 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
     ]
 
     /// One `spans` array entry: required `text`, plus every whole-field
@@ -1415,7 +1415,8 @@ public actor MCPAdapter {
             description: """
                 The font families installed on the connected device, sorted. Call this before \
                 setting a `family` on add_text/edit_text — an unknown family is rejected with \
-                unknownFont. REQUIRES a connected device — fails with noDeviceAvailable if none \
+                unknownFont. A named family is laid out the same on a Mac, an iPad and an \
+                iPhone; the system font (no family) is not. REQUIRES a connected device — fails with noDeviceAvailable if none \
                 is connected and deviceTimeout if it doesn't respond in time. Read-only: it \
                 never writes to the document, so there is no seq assigned and nothing to retry.
                 """,
@@ -1825,7 +1826,11 @@ public actor MCPAdapter {
                 REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, \
                 headsLinked, dashPattern, \
-                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags}`. \
+                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags, closed, filled}`. \
+                `closed` true: the path runs on from its last node to its first — a rectangle, a \
+                circle, a dot (add_shape makes them) — so it has NO ends: the two heads and anchors \
+                are kept but not drawn, and every node, the first too, is a point the line turns at. \
+                `filled` true: the inside is painted in the line's color. \
                 `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
                 join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
                 `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and \
@@ -2034,7 +2039,12 @@ public actor MCPAdapter {
                 has set. `color` is light-canonical \
                 (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with \
                 the `arrows` capability. `keepsWidth` (default true, as for the user's own arrows) \
-                decides whether a later scale changes the arrow's width. REPLY: the seq and \
+                decides whether a later scale changes the arrow's width. `closed: true` (three \
+                points or more) joins the last point to the first with a real corner there — an \
+                outline with no seam and no heads — and `filled: true` beside it paints the inside \
+                in the line's color: a face that stacks with the other objects, which a fill_region \
+                (strokes, always below every object) cannot. For a rectangle, an ellipse, a circle \
+                or a dot use add_shape. REPLY: the seq and \
                 `arrowId`. \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -2088,8 +2098,84 @@ public actor MCPAdapter {
                         "description": "Durable tags for the new arrow (see tag_elements); find it again later with find_elements.",
                     ]),
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
+                    "closed": closedPathProperty,
+                    "filled": filledPathProperty,
                 ]),
                 "required": .array(["docId"].map(Value.string)),
+            ])
+        ),
+        Tool(
+            name: "add_shape",
+            description: """
+                Places a closed shape as ONE object: a `rectangle` or `ellipse` (`canvasRect`), a \
+                `circle` (`canvasX`, `canvasY`, `radius`), a `polygon` (`canvasPoints`) or a solid \
+                `dot` (`canvasX`, `canvasY`, `diameter`). It is an ARROW object with a closed path — \
+                list_arrows shows it (`closed: true`), restyle_arrows, reshape_arrow, \
+                transform_elements, set_layer, tag_elements and remove_arrow work on it, and it \
+                stacks with the other objects (a later one lies on top; reorder_elements). That is \
+                the difference to fill_region and draw_dots, which make STROKES: those always lie \
+                below every arrow, text and formula. \
+                The geometry is the LINE'S CENTER: a rectangle of `canvasRect` drawn 2 wide \
+                reaches 1 past it on every side. `filled: true` paints the inside too, in the \
+                line's color, once (a translucent shape is even); for a face without a visible \
+                border give the line the face's color. A `dot` is always solid and exactly \
+                `diameter` across, ink to ink — its line is `drawnWidth`, but at most half the \
+                diameter. A closed path has no ends: there are no heads. \
+                Every style field you omit takes the user's new-arrow style, or the app's own with \
+                `styleBase: "factory"` — pass that from a script. `color` is light-canonical \
+                (`colorAppearance: "dark"` for a dark-authored hex). REQUIRES a device with the \
+                `arrows` and `closedPaths` capabilities (an app from before closed paths is told to \
+                update). Many shapes in one edit: `batch`. \
+                REPLY: the seq, `arrowId`, `canvasBounds: [left, top, width, height]` — the ink's \
+                box — and `drawnWidth`. \(writeToolCaveats)
+                """,
+            inputSchema: .object([
+                "type": "object",
+                "properties": .object([
+                    "docId": .object(["type": "string", "description": "The document (its id, or its name when no other document has that name) to modify."]),
+                    "shape": .object(["type": "string", "enum": .array(["rectangle", "ellipse", "circle", "polygon", "dot"].map(Value.string)),
+                                      "description": "What to place. Each shape takes its own geometry arguments and refuses the others by name."]),
+                    "canvasRect": .object(["type": "array", "items": .object(["type": "number"]), "minItems": 4, "maxItems": 4,
+                                           "description": "rectangle / ellipse: [x, y, width, height] of the line's center, in canvas points; width and height above 0. An ellipse is the one inscribed in it."]),
+                    "canvasX": .object(["type": "number", "description": "circle / dot: the center's x, in canvas points."]),
+                    "canvasY": .object(["type": "number", "description": "circle / dot: the center's y, in canvas points."]),
+                    "radius": .object(["type": "number", "description": "circle: the radius of the line's center, in canvas points, above 0. The ink reaches half a drawnWidth past it."]),
+                    "diameter": .object(["type": "number", "minimum": 1, "maximum": 2000,
+                                         "description": "dot: how wide the solid dot is, ink to ink, in canvas points (1–2000)."]),
+                    "canvasPoints": .object([
+                        "type": "array",
+                        "description": "polygon: [[x, y], …] — at least three corners in canvas points. The path closes from the last to the first; do not repeat the first.",
+                        "items": .object(["type": "array", "items": .object(["type": "number"])]),
+                    ]),
+                    "filled": .object(["type": "boolean", "description": "Paint the inside too, in the line's color (default false). A dot is always filled."]),
+                    "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40). For a dot: at most half its diameter is used."]),
+                    "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
+                                            "description": "The line type: dash, gap, dash, gap … in line widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid. Round a closed path the pattern closes on itself: a whole number of periods, and with dashCorners a dash centered on every corner. Not for a dot."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. The line's color, and the fill's."]),
+                    "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
+                                                "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
+                    "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
+                    "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets: its line width, line type and corners are applied first, the other fields override it."]),
+                    "styleBase": styleBaseProperty,
+                    "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)),
+                                      "description": "front (above the strokes) or back (behind strokes and grids). Default: the layer the user's own new arrows go to."]),
+                    "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
+                                              "description": "How a dashed line's pattern is laid: fitGaps (default), fitPattern or exact — as add_arrow's."]),
+                    "dashCorners": .object(["type": "boolean", "description": "Fit modes only (default true): each side between two corners fitted on its own, a dash centered on every corner."]),
+                    "dashAnchor": .object(["type": "string", "enum": .array(["start", "end", "center"].map(Value.string)),
+                                           "description": "Where an `exact` pattern starts."]),
+                    "dashOffset": .object(["type": "number", "minimum": -50, "maximum": 50, "description": "Shifts the pattern, in line widths (−50…50; default 0)."]),
+                    "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)),
+                                           "description": "How every corner of a rectangle or polygon turns: round (default), miter (sharp) or bevel."]),
+                    "cornerMiterLimit": .object(["type": "number", "minimum": 1, "maximum": 20,
+                                                 "description": "A sharp (miter) corner's limit in half line widths (1–20; default 10); alone it makes the corners sharp."]),
+                    "keepsWidth": .object(["type": "boolean", "description": "true (default): a later scale moves the shape's points and keeps its line width; false: the width scales too."]),
+                    "tags": .object([
+                        "type": "array", "items": .object(["type": "string"]),
+                        "description": "Durable tags for the new shape (see tag_elements); find it again later with find_elements.",
+                    ]),
+                ]),
+                "required": .array(["docId", "shape"].map(Value.string)),
             ])
         ),
         Tool(
@@ -2099,7 +2185,9 @@ public actor MCPAdapter {
                 shape: corner / smooth) — keeping its id, style, layer, tags \
                 and place in the stacking order. Read the current nodes with list_arrows, change what \
                 you need, send them back. A pinned arrow is reshaped too, as transform_elements moves \
-                one (pinning protects it from the user's touches). REQUIRES a device with the `arrows` capability. \
+                one (pinning protects it from the user's touches). `closed` / `filled` close or open \
+                the path and fill it or not; with one of them the geometry may be left out, and the \
+                points stay. REQUIRES a device with the `arrows` capability. \
                 \(writeToolCaveats)
                 """,
             inputSchema: .object([
@@ -2113,6 +2201,8 @@ public actor MCPAdapter {
                         "items": .object(["type": "array", "items": .object(["type": "number"])]),
                     ]),
                     "nodes": MCPAdapter.arrowNodesProperty,
+                    "closed": closedPathProperty,
+                    "filled": filledPathProperty,
                 ]),
                 "required": .array(["docId", "arrowId"].map(Value.string)),
             ])
@@ -2573,9 +2663,12 @@ public actor MCPAdapter {
                 to this server, e.g. /api/renders/<name>.png — join it to the address you reached \
                 this server on and download it, which is what to do when you are NOT on the \
                 server's machine). The metadata's `renderedBy` names the kind of device that made \
-                the image ("mac", "ipad", "iphone"): devices lay text out a little differently \
-                (up to about 4 % in width, and a wrapped line can break at another word), so \
-                compare an image only with one from the same kind.
+                the image ("mac", "ipad", "iphone"). A text in the SYSTEM font (no `family`) is \
+                set differently on a Mac: 4 to 5 % wider below 20 pt and with another line \
+                height, so a wrapped line can break at another word; an iPad and an iPhone set \
+                it alike. A text in a named family (Helvetica Neue, …) and a formula are the \
+                same on every device. So compare an image of system-font text only with one \
+                from the same kind, or ask for one with `device`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -4279,6 +4372,7 @@ public actor MCPAdapter {
         case "get_new_arrow_style": return await callArrowPresetOp(arguments, op: "getNewArrowStyle")
         case "set_new_arrow_style": return await callArrowPresetOp(arguments, op: "setNewArrowStyle")
         case "add_arrow": return await callArrowWrite(arguments, op: "addArrow")
+        case "add_shape": return await callArrowWrite(arguments, op: "addShape")
         case "restyle_arrows": return await callArrowWrite(arguments, op: "restyleArrows")
         case "reshape_arrow": return await callArrowWrite(arguments, op: "reshapeArrow")
         case "list_images": return await callListImages(arguments)
@@ -5605,6 +5699,18 @@ public actor MCPAdapter {
         ])
     }
 
+    /// `closed` on add_arrow / reshape_arrow (format 8).
+    static var closedPathProperty: Value {
+        .object(["type": "boolean",
+                 "description": "true: a CLOSED path — the line runs on from the last point to the first and turns there like at every corner, so there is no seam, no ends and no heads. Needs three points. false: open it again (its heads return). Omitted: an open path for add_arrow, unchanged for reshape_arrow."])
+    }
+
+    /// `filled` on add_arrow / reshape_arrow.
+    static var filledPathProperty: Value {
+        .object(["type": "boolean",
+                 "description": "true: the area a closed path encloses is painted too, in the line's color and together with the line (a translucent shape is even). Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`."])
+    }
+
     /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
     /// as for `transform_elements`), the result written back under the byte CAS.
     private func callArrowWrite(_ arguments: [String: Value]?, op: String) async -> CallTool.Result {
@@ -5614,12 +5720,18 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string(op)]
-            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes"] : op == "addArrow"
+            let keys = op == "reshapeArrow" ? ["arrowId", "canvasPoints", "nodes", "closed", "filled"]
+                : op == "addShape"
+                ? ["shape", "canvasRect", "canvasX", "canvasY", "radius", "diameter", "canvasPoints", "filled",
+                   "drawnWidth", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
+                   "styleBase"]
+                : op == "addArrow"
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
-                   "styleBase"]
+                   "styleBase", "closed", "filled"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
@@ -5636,9 +5748,13 @@ public actor MCPAdapter {
                 // call that names tags goes only to a device that writes them.
                 let tagged: Bool = { if case .array(let t)? = envelope["tags"] { return !t.isEmpty }; return false }()
                 // The same for `styleBase`: ignored, the arrow would take the user's style.
+                // And for a closed path: an app from before format 8 would ignore `closed` and
+                // `filled` and answer success with an open arrow; `addShape` it does not know at all.
+                let closes = op == "addShape" || envelope["closed"] != nil || envelope["filled"] != nil
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
                                                        capability: (tagged ? "arrows+arrowTags" : "arrows")
-                                                           + (envelope["styleBase"] == nil ? "" : "+styleBase"))
+                                                           + (envelope["styleBase"] == nil ? "" : "+styleBase")
+                                                           + (closes ? "+closedPaths" : ""))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5648,12 +5764,16 @@ public actor MCPAdapter {
                 docId: docId, createIfMissing: false, fullDoc: out.bytes, expectedBytes: bytes
             ) { seq in
                 var summary = op == "addArrow" ? "added arrow to \(docId) at seq \(seq)"
+                    : op == "addShape" ? "added shape to \(docId) at seq \(seq)"
                     : op == "reshapeArrow" ? "reshaped arrow in \(docId) at seq \(seq)"
                     : "restyled arrows in \(docId) at seq \(seq)"
                 if let meta = out.meta,
-                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta),
-                   let id = decoded["arrowId"] {
-                    summary += "\narrowId: \(id)"
+                   let decoded = try? JSONDecoder().decode([String: String].self, from: meta) {
+                    if let id = decoded["arrowId"] { summary += "\narrowId: \(id)" }
+                    // A shape's ink box and the line width it was given (a dot's may be less
+                    // than the one asked for).
+                    if let bounds = decoded["canvasBounds"] { summary += "\ncanvasBounds: [\(bounds)]" }
+                    if let width = decoded["drawnWidth"] { summary += "\ndrawnWidth: \(width)" }
                 }
                 return summary
             }
@@ -6342,7 +6462,7 @@ public actor MCPAdapter {
     /// document-level tools (create, replace, delete, merge, undo) are not edits of one copy.
     static let batchableTools: Set<String> = [
         "add_text", "edit_text", "remove_text", "add_image", "remove_image",
-        "add_arrow", "reshape_arrow", "restyle_arrows", "remove_arrow",
+        "add_arrow", "add_shape", "reshape_arrow", "restyle_arrows", "remove_arrow",
         "add_formula", "edit_formula", "remove_formula",
         "draw_strokes", "draw_dots", "fill_region", "delete_strokes",
         "transform_strokes", "restyle_strokes", "reshape_strokes", "restore_stroke_widths",
@@ -6611,10 +6731,20 @@ public actor MCPAdapter {
                     guard case .array(let items)? = arguments?["arrows"] else { return false }
                     return items.contains { if case .object(let fields) = $0 { return fields["styleBase"] != nil }; return false }
                 }()
+                // An ephemeral arrow that is a closed or filled path: an app from before format 8
+                // would ignore the two keys and preview an open arrow.
+                let closesAPath: Bool = {
+                    guard case .array(let items)? = arguments?["arrows"] else { return false }
+                    return items.contains {
+                        if case .object(let fields) = $0 { return fields["closed"] != nil || fields["filled"] != nil }
+                        return false
+                    }
+                }()
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
-                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "") + kind)
+                                                           if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "")
+                                                           + (closesAPath ? "+closedPaths" : "") + kind)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {

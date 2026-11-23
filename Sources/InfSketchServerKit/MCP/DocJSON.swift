@@ -59,7 +59,8 @@ public enum DocJSON {
     }
 
     /// The newest `.infsketch` format version the edits in this file understand — the app's
-    /// `SketchDocData.currentFormatVersion` at this server's release (7: a text's `inlineMath` and
+    /// `SketchDocData.currentFormatVersion` at this server's release (8: an arrow's `closed` and
+    /// `filled`, which no edit here reads or writes; 7: a text's `inlineMath` and
     /// the document's `newTextsInlineMath`, formulas; 6: one mixed `placedObjects` list, arrows). A document that says it is NEWER is REFUSED by every edit here, as the app
     /// refuses it: a format change can move where elements live, and an edit made on the old
     /// shape answers not-found for elements that exist, or writes a key the newer app no longer
@@ -67,7 +68,7 @@ public enum DocJSON {
     /// finds nothing, and tells the agent the text is not there. The document itself stays an
     /// opaque payload for sync; only these direct edits read its shape. **Raise this together
     /// with the app's format version, in the same paired release.**
-    public static let knownFormatVersion = 7
+    public static let knownFormatVersion = 8
 
     // MARK: - Read
 

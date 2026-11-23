@@ -61,7 +61,7 @@ import Testing
             .replacingOccurrences(of: "\"formatVersion\": 5", with: "\"formatVersion\": \(DocJSON.knownFormatVersion)").utf8)
         #expect(try Self.ids(try DocJSON.removeText(from: current, textId: Self.t1)) == [Self.i1, Self.t2])
         // The app's file format at this server's release — raise both together.
-        #expect(DocJSON.knownFormatVersion == 7)
+        #expect(DocJSON.knownFormatVersion == 8)
     }
 
     @Test func theSummaryReadsTextsFromTheList() throws {
