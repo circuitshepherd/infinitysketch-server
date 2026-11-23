@@ -299,6 +299,8 @@ actor Connection {
                 }
                 emit(result.snapshot.addressed(to: docId))
                 docSubscriptions[docId] = (result.token, pump(result.events, docId: docId, token: result.token))
+                // A live-state op may be waiting for exactly this (`DeviceCommandBroker.resubscribeWait`).
+                await broker.noteSubscribed(docId: docId)
             } catch {
                 // M2c-3 (F3): a DOCID-CARRYING failure, not a bare `.error`. The app's transport
                 // fails all pending subscribes on a docId-less `.error`, so a failed download

@@ -166,6 +166,7 @@ let server = InfSketchServer(port: port, docsDirectory: docsDirectory,
                              // 15 s: an agent's call that finds no device waits that long for one
                              // (`DeviceCommandBroker.deviceWait`) — the app is back within 8 s.
                              config: SessionConfig(allowedHostNames: allowedHostNames, deviceWait: .seconds(15),
+                                                   resubscribeWait: .seconds(5),
                                                    preferredDeviceKind: preferredDeviceKind),
                              hostAwake: keepHostAwake ? SystemHostAwake() : NoHostAwake())
 print("infsketch-server \(ServerInfo.version) — http://localhost:\(port)  docs: \(docsDirectory.path)")
