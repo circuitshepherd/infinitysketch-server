@@ -356,8 +356,13 @@ public actor DeviceCommandBroker {
     /// Requests waiting for a just-connected device to subscribe, right now.
     public var requestsWaitingForASubscription: Int { subscriptionWaiters.count }
 
+    /// How many subscriptions each document has had reported — so a request can tell that one
+    /// landed while it was asking who has the document open (`performRequest`).
+    private var subscriptionsReported: [String: UInt64] = [:]
+
     /// `WSAdapter` reports every subscription that succeeded.
     public func noteSubscribed(docId: String) {
+        subscriptionsReported[docId, default: 0] &+= 1
         for (id, waiter) in subscriptionWaiters where waiter.docId == docId {
             subscriptionWaiters.removeValue(forKey: id)
             waiter.continuation.resume()
@@ -365,15 +370,18 @@ public actor DeviceCommandBroker {
     }
 
     /// Until when a live-state op on a document nobody has open may still wait: `resubscribeWait`
-    /// after the hello of the newest connection that could serve it. nil when that has passed.
-    private func resubscribeDeadline(capability: String, deviceId: String?) -> ContinuousClock.Instant? {
+    /// after the hello of the newest connection that could serve it — and never longer than
+    /// `resubscribeWait` after the request itself began (`requestBegan`), so a device that keeps
+    /// reconnecting cannot hold one request for ever. nil when that has passed.
+    func resubscribeDeadline(capability: String, deviceId: String?,
+                             requestBegan: ContinuousClock.Instant) -> ContinuousClock.Instant? {
         guard resubscribeWait > .zero else { return nil }
         let needs = Self.parts(of: capability)
         let newest = connections
             .filter { needs.isSubset(of: $0.capabilities) && (deviceId == nil || $0.deviceId == deviceId) }
             .map(\.registeredAt).max()
         guard let newest else { return nil }
-        let deadline = newest.advanced(by: resubscribeWait)
+        let deadline = min(newest.advanced(by: resubscribeWait), requestBegan.advanced(by: resubscribeWait))
         return ContinuousClock.now < deadline ? deadline : nil
     }
 
@@ -780,14 +788,22 @@ public actor DeviceCommandBroker {
         let routing = deviceId == nil ? Routing.for(capability: capability) : .any
         var open: Set<UUID>?
         if routing != .any, let subscriberLookup {
+            let requestBegan = ContinuousClock.now
+            var reported = subscriptionsReported[docId, default: 0]
             open = await subscriberLookup(docId)
             // A live-state op, and no capable device has the document open: one that has JUST
             // connected may be about to say so (`resubscribeWait`).
             if routing == .requireOpen {
                 while pickConnection(capability: capability, deviceId: deviceId, excluding: [], within: open ?? []) == nil,
-                      let deadline = resubscribeDeadline(capability: capability, deviceId: deviceId) {
-                    ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)': a device has just connected and has not subscribed yet; waiting for it")
-                    await waitForASubscription(to: docId, until: deadline)
+                      let deadline = resubscribeDeadline(capability: capability, deviceId: deviceId,
+                                                         requestBegan: requestBegan) {
+                    // A subscription reported WHILE the lookup above was under way is not waited
+                    // for — it has happened, and nothing would report it again: ask again at once.
+                    if subscriptionsReported[docId, default: 0] == reported {
+                        ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)': a device has just connected and has not subscribed yet; waiting for it")
+                        await waitForASubscription(to: docId, until: deadline)
+                    }
+                    reported = subscriptionsReported[docId, default: 0]
                     open = await subscriberLookup(docId)
                 }
             }
