@@ -36,6 +36,32 @@ struct RenderFileStoreTests {
         #expect(pngFiles(dir).count == 1)
     }
 
+    /// An export's PDF page is a render like a picture: written under its own extension, read
+    /// back by its name, counted and evicted with the pictures. Nothing else is a render — the
+    /// reader serves only the listed types, so a file of another type could never be fetched.
+    @Test func aPdfIsARenderToo() throws {
+        let (store, dir) = try makeStore(byteBudget: 250)
+        let pdf = Data("%PDF-1.3 page".utf8) + Data(repeating: 0x20, count: 87)   // 100 bytes
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let url = try store.write(docId: "Sheet", bytes: pdf, fileExtension: "pdf", now: t0)
+        #expect(url.pathExtension == "pdf" && url.lastPathComponent.hasPrefix("Sheet_"))
+        #expect(store.read(name: url.lastPathComponent) == pdf)
+        #expect(RenderFileStore.contentType(forName: url.lastPathComponent) == "application/pdf")
+        #expect(RenderFileStore.contentType(forName: "a.png") == "image/png")
+        #expect(RenderFileStore.contentType(forName: "a.txt") == nil && RenderFileStore.contentType(forName: "a") == nil)
+        #expect(store.read(name: "notes.txt") == nil)
+        #expect(throws: (any Error).self) { try store.write(docId: "Sheet", bytes: pdf, fileExtension: "txt") }
+
+        // The PDF counts toward the budget and goes first, being the oldest.
+        let hundred = Data(repeating: 0xAB, count: 100)
+        _ = try store.write(docId: "a", png: hundred, now: t0.addingTimeInterval(1))
+        let last = try store.write(docId: "b", png: hundred, now: t0.addingTimeInterval(2))
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        #expect(!left.contains(url.lastPathComponent), "the oldest render, a PDF, was evicted: \(left)")
+        #expect(left.contains(last.lastPathComponent) && left.count == 2)
+    }
+
     /// The path has to be absolute: the agent reads it from a tool reply and hands it to some other
     /// program, which has no idea what the server's working directory is. `add_image` refuses a
     /// relative path for the same reason rather than resolving one.

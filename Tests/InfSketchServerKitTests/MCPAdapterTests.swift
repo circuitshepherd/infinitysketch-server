@@ -3134,6 +3134,85 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A fill color of its own reaches only a `fillColor` device: an app without the word decodes
+    /// the spec IGNORING `fillColor` / `fillOpacity` and answers success with a shape filled in
+    /// its line's color. The same call without them still reaches it.
+    @Test func aFillColorGoesOnlyToADeviceThatPaintsIt() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        _ = server
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["arrows", "authorStrokes", "closedPaths", "arrowPresetWrites"])
+        defer { Task { await old.close() } }
+        let box: [String: Value] = ["docId": "d", "shape": "rectangle", "canvasRect": .array([0, 0, 40, 30]), "filled": true]
+        let triangle: Value = .array([.array([0, 0]), .array([50, 0]), .array([25, 40])])
+        let id = Value.string(UUID().uuidString)
+        let calls: [(String, [String: Value])] = [
+            ("add_shape", box.merging(["fillColor": "#FFFFFF"]) { a, _ in a }),
+            ("add_shape", box.merging(["fillOpacity": 0.3]) { a, _ in a }),
+            ("add_arrow", ["docId": "d", "canvasPoints": triangle, "closed": true, "filled": true, "fillColor": "#FFFFFF"]),
+            ("restyle_arrows", ["docId": "d", "ids": .array([id]), "fillColor": "line"]),
+            ("set_new_arrow_style", ["docId": "d", "fillColor": "#FFFFFF"]),
+            ("render_sketch", ["docId": "d", "arrows": .array([.object(["canvasPoints": triangle, "closed": true, "filled": true, "fillOpacity": 0.5])])]),
+            ("render_sketch", ["docId": "d", "restyle": .object(["arrowIds": .array([id]), "fillColor": "#FF0000"])]),
+        ]
+        for (tool, arguments) in calls {
+            let (refused, isError) = try await client.callTool(name: tool, arguments: arguments)
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"), "\(tool): \(toolResultText(refused))")
+            #expect(toolResultText(refused).contains("fillColor"), "the refusal names the missing part: \(toolResultText(refused))")
+        }
+        #expect(await old.receivedRequests.isEmpty)
+        // Without a fill color the same shape reaches the older app.
+        let (_, plainIsError) = try await client.callTool(name: "add_shape", arguments: box)
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["arrows", "closedPaths", "fillColor"])
+        defer { Task { await device.close() } }
+        let (_, addedIsError) = try await client.callTool(name: "add_shape", arguments:
+            box.merging(["fillColor": "#FFFFFF80", "fillOpacity": 0.25, "colorAppearance": "dark"]) { a, _ in a })
+        #expect(addedIsError != true)
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addShape")
+        #expect(spec["fillColor"] as? String == "#FFFFFF80" && spec["fillOpacity"] as? Double == 0.25)
+        #expect(spec["colorAppearance"] as? String == "dark")
+        let (_, restyledIsError) = try await client.callTool(name: "restyle_arrows", arguments: [
+            "docId": "d", "ids": .array([id]), "fillColor": "line"])
+        #expect(restyledIsError != true)
+        let restyleRequest = try #require(await device.receivedRequests.last)
+        let restyle = try #require(JSONSerialization.jsonObject(with: restyleRequest.spec) as? [String: Any])
+        #expect(restyle["op"] as? String == "restyleArrows" && restyle["fillColor"] as? String == "line")
+    }
+
+    /// A shape that took its fill color from the user's new-arrow style says so in its reply.
+    @Test func anInheritedFillColorIsNamedInTheReply() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        _ = server
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let meta = try JSONEncoder().encode(["arrowId": "A1B2C3D4-0000-0000-0000-000000000002",
+                                             "canvasBounds": "0.000, 0.000, 40.000, 30.000", "drawnWidth": "2.0",
+                                             "inheritedFillColor": "#FFFFFF80"])
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta),
+                                                  capabilities: ["arrows", "closedPaths"])
+        defer { Task { await device.close() } }
+        let (added, isError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "rectangle", "canvasRect": .array([0, 0, 40, 30]), "filled": true])
+        #expect(isError != true)
+        let text = toolResultText(added)
+        #expect(text.contains("fillColor: #FFFFFF80") && text.contains("new-arrow style"), "\(text)")
+        let structured = try #require(MCPAdapter.structuredReply(text, seq: 3))
+        guard case .object(let fields) = structured else { Issue.record("not an object"); return }
+        #expect(fields["fillColor"] == .string("#FFFFFF80"))
+    }
+
     /// A closed or filled path, and add_shape, reach only a `closedPaths` device: an app from
     /// before format 8 would ignore `closed` and `filled` and answer success with an open arrow,
     /// and does not know `addShape` at all. A plain add_arrow still reaches it.
@@ -4257,6 +4336,67 @@ actor FakeStrokeOpDevice {
         let said = try #require(JSONSerialization.jsonObject(with: second.spec) as? [String: Any])
         #expect(said["scale"] as? Double == 6 && said["maxPixels"] == nil && said["padding"] as? Double == 12)
         #expect(said["background"] as? String == "transparent" && said["canvasRect"] as? [Double] == [0, 0, 100, 50])
+        await server.stop()
+    }
+
+    /// `format: "pdf"` is the same export as a PDF page: it goes only to an `exportPdf` device
+    /// (another would ignore the key and hand back a PNG), carries no pixel budget, and its file
+    /// ends in .pdf.
+    @Test func exportSketchWritesAPdfThroughADeviceThatExportsPdf() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pdfBytes = Data("%PDF-1.3 one page".utf8)
+        let meta = Data(#"{"format":"pdf","pageSize":[300,200],"strokeScale":4.0}"#.utf8)
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pdfBytes, meta: meta),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "light", "format": "pdf"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("exportPdf"))
+        #expect(await old.receivedRequests.isEmpty)
+        // The same device still exports a picture.
+        let (_, pngIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "light", "format": "png"])
+        #expect(pngIsError != true)
+        let pngRequest = try #require(await old.receivedRequests.last)
+        let pngSpec = try #require(JSONSerialization.jsonObject(with: pngRequest.spec) as? [String: Any])
+        #expect(pngSpec["format"] == nil && pngSpec["maxPixels"] as? Int == MCPAdapter.exportDefaultMaxPixels)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pdfBytes, meta: meta),
+            capabilities: ["authorStrokes", "exportRender", "exportPdf"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "pdf", "scale": 6])
+        #expect(isError != true)
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let path = try #require(reply["filePath"] as? String)
+        #expect(path.hasSuffix(".pdf"))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pdfBytes)
+        #expect((reply["renderUrl"] as? String)?.hasSuffix(".pdf") == true)
+        #expect(reply["format"] as? String == "pdf" && reply["pageSize"] as? [Double] == [300, 200])
+
+        let pdfRequest = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: pdfRequest.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "render" && spec["format"] as? String == "pdf")
+        #expect(spec["forFile"] as? Bool == true && spec["background"] as? String == "paper")
+        #expect(spec["padding"] as? Int == MCPAdapter.exportDefaultPadding)
+        #expect(spec["scale"] as? Double == 6 && spec["maxPixels"] == nil, "a page has no pixel budget")
+
+        // What is not a format, and a budget for a page, are refused before a device is asked.
+        let asked = await device.receivedRequests.count
+        let (svg, e1) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "svg"])
+        #expect(e1 == true && toolResultText(svg).contains("format"))
+        let (budget, e2) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "pdf", "maxPixels": 1_000_000])
+        #expect(e2 == true && toolResultText(budget).contains("maxPixels"))
+        #expect(await device.receivedRequests.count == asked)
         await server.stop()
     }
 

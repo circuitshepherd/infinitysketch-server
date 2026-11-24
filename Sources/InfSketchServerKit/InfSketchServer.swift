@@ -469,12 +469,14 @@ public final class InfSketchServer: Sendable {
                 return HTTPResponse(statusCode: .notFound)
             }
             guard let renders = self.renderFileStore,
+                  let contentType = RenderFileStore.contentType(forName: parts[prefixParts]),
                   let png = renders.read(name: parts[prefixParts])
             else {
                 return HTTPResponse(statusCode: .notFound)
             }
             return self.headAware(request, headers: [
-                .contentType: "image/png",
+                // A picture, or an export's PDF page: by the name, from the store's own list.
+                .contentType: contentType,
                 // A render's name carries a millisecond stamp and a random token, so the bytes at
                 // a given URL never change — but the file is evicted on a byte budget, so a cached
                 // 200 would outlive the resource. no-store keeps "gone" honest.

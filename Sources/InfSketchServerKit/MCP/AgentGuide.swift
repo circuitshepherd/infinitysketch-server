@@ -258,7 +258,8 @@ enum AgentGuide {
       against it.
     - **A shape that stacks with lines is an object, not a fill.** `add_shape` places a \
       rectangle, an ellipse, a circle, a polygon or a solid dot as ONE arrow object with a closed \
-      path (`filled: true` paints the inside); `add_arrow` takes `closed` and `filled` for any \
+      path (`filled: true` paints the inside — in the line's color, or in `fillColor`, so a \
+      white box with a black border is one object); `add_arrow` takes `closed` and `filled` for any \
       outline. It lies among the arrows, texts and formulas, so a face can cover a line. \
       `fill_region` and `draw_dots` make STROKES, which always lie below every object — right \
       for hatching and for marks the user edits like their own pen strokes.

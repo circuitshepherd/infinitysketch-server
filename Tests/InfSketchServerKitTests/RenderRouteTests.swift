@@ -65,6 +65,23 @@ import FoundationNetworking
         await server.stop()
     }
 
+    /// An export's PDF is served as a PDF, by its name.
+    @Test func aWrittenPdfIsServedAsAPdf() async throws {
+        let (server, port, task, renders) = try await startServer()
+        defer { task.cancel() }
+        let pdf = Data("%PDF-1.3 one page".utf8)
+        let written = try renders.write(docId: "sheet", bytes: pdf, fileExtension: "pdf")
+
+        let path = RenderFileStore.urlPath(forName: written.lastPathComponent)
+        let (body, response) = try await get(URL(string: "http://127.0.0.1:\(port)\(path)")!)
+
+        #expect(response.statusCode == 200)
+        #expect(body == pdf)
+        #expect((response.value(forHTTPHeaderField: "Content-Type") ?? "").hasPrefix("application/pdf"))
+
+        await server.stop()
+    }
+
     /// Renders are scratch and the directory evicts on a byte budget, so a 404 here is an ORDINARY
     /// state — the tool's own description tells the caller to read the path soon.
     @Test func anEvictedOrUnknownRenderIs404() async throws {
