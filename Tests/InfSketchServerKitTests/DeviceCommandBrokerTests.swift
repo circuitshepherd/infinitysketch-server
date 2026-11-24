@@ -1203,6 +1203,13 @@ private actor SentBox {
     }
 }
 
+/// Counts calls from any thread.
+private final class AskCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func bumpAndGet() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}
+
 /// Who has a document open, as the test says it (the broker asks through `SubscriberLookup`).
 private actor OpenBox {
     private var open: Set<UUID> = []
@@ -1297,6 +1304,54 @@ private actor OpenBox {
         guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sent.awaitMessage() else {
             Issue.record("the device is asked once it has the document"); return
         }
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+    }
+
+    /// The wait is bounded per REQUEST: a device that says hello again and again does not keep
+    /// one request waiting for ever (review of 2026-11-24 — the bound was per hello only).
+    @Test func theWaitNeverOutlastsItsRequest() async {
+        let wait = Duration.seconds(30)
+        let broker = DeviceCommandBroker(resubscribeWait: wait)
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { _ in }   // a hello just now
+        let now = ContinuousClock.now
+        // A request that began a whole wait ago is over, however fresh the newest hello is.
+        #expect(await broker.resubscribeDeadline(capability: "controlSelection", deviceId: nil,
+                                                 requestBegan: now.advanced(by: .seconds(-31))) == nil)
+        // A request that begins now waits at most `wait` from now — and at most `wait` from the hello.
+        let deadline = await broker.resubscribeDeadline(capability: "controlSelection", deviceId: nil, requestBegan: now)
+        #expect(deadline != nil && deadline! <= now.advanced(by: wait))
+        // A request that began 20 s ago has 10 s left, not 30.
+        let late = await broker.resubscribeDeadline(capability: "controlSelection", deviceId: nil,
+                                                    requestBegan: now.advanced(by: .seconds(-20)))
+        #expect(late != nil && late! <= now.advanced(by: .seconds(10)))
+        // Nothing that could serve the op: no wait at all.
+        #expect(await broker.resubscribeDeadline(capability: "controlSelection+arrows", deviceId: nil, requestBegan: now) == nil)
+    }
+
+    /// A subscription that is reported WHILE the request is asking who has the document open is
+    /// not waited for a second time: nothing would report it again, and the request used to sit
+    /// out the rest of the wait (review of 2026-11-24).
+    @Test func aSubscriptionReportedDuringTheLookupIsNotMissed() async throws {
+        let broker = DeviceCommandBroker(resubscribeWait: .seconds(30))
+        let open = OpenBox(), sent = SentBox(), asked = AskCounter()
+        let device = UUID()
+        await broker.register(connectionId: device, capabilities: ["controlSelection"]) { msg in Task { await sent.set(msg) } }
+        await broker.setSubscriberLookup { _ in
+            // The first answer is "nobody" — and before it is back with the broker, the device
+            // subscribes and that is reported.
+            let before = await open.get()
+            if asked.bumpAndGet() == 1 {
+                await open.set([device])
+                await broker.noteSubscribed(docId: "D")
+            }
+            return before
+        }
+        let task = Task { try await selectionOp(broker) }
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sent.awaitMessage() else {
+            Issue.record("the request waited although the subscription had been reported"); return
+        }
+        #expect(await broker.requestsWaitingForASubscription == 0)
         await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
         _ = try await task.value
     }
