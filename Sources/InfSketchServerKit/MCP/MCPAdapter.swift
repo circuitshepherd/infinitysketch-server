@@ -2918,7 +2918,10 @@ public actor MCPAdapter {
                 area in canvas points, on which texts are text (selectable, sharp at any zoom), \
                 arrows, shapes and formulas are vectors, and the strokes are one picture placed \
                 between the back and the front objects — ink has no vector form. `scale` is then \
-                that picture's pixels per canvas point (default 4) and `maxPixels` is not taken; \
+                the pixels per canvas point of that picture and of placed photos (default 4, from \
+                0.25 to 16; lowered for a very large or very long sheet, the metadata's \
+                `strokeScale` says what was used) and `maxPixels` is not taken. With `canvasRect` \
+                the page holds only what reaches into that part. \
                 the metadata is `format`, `canvasRect`, `pageSize` (PDF points; an area longer \
                 than 14400 is scaled down to it), `strokeScale`, `appearance`, `paperColor`, \
                 `renderedBy`.
@@ -2949,11 +2952,11 @@ public actor MCPAdapter {
                     ]),
                     "scale": .object([
                         "type": "number",
-                        "description": "Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`.",
+                        "description": "Pixels per canvas point, at most 16. Reduced when the image would pass 16 megapixels or 8192 pixels on a side; the metadata then names `requestedScale`. Omitted: the scale that fits `maxPixels`. For a PDF: the strokes' and photos' pixels per canvas point, 0.25 to 16, default 4.",
                     ]),
                     "maxPixels": .object([
                         "type": "number",
-                        "description": "Pixel budget when `scale` is omitted. Default 8000000, at most 16000000.",
+                        "description": "Pixel budget when `scale` is omitted. Default 8000000, at most 16000000. Not taken for a PDF.",
                     ]),
                     "device": .object([
                         "type": "string", "enum": .array(["mac", "ipad", "iphone"].map(Value.string)),
