@@ -1876,11 +1876,13 @@ public actor MCPAdapter {
                 REPLY: an ARRAY of `{id, canvasPoints, nodes, canvasBounds, startHead, endHead, startAnchor, \
                 endAnchor, drawnWidth, unscaledWidth, keepsWidth, headLength, headAngle, endHeadLength, endHeadAngle, \
                 headsLinked, dashPattern, \
-                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, pinned, layer, tags, closed, filled}`. \
+                dashAlignment, dashCorners, dashAnchor, dashEndsOn, dashOffset, cornerJoin, cornerMiterLimit?, color, opacity, fillColor?, fillOpacity?, pinned, layer, tags, closed, filled}`. \
                 `closed` true: the path runs on from its last node to its first — a rectangle, a \
                 circle, a dot (add_shape makes them) — so it has NO ends: the two heads and anchors \
                 are kept but not drawn, and every node, the first too, is a point the line turns at. \
-                `filled` true: the inside is painted in the line's color. \
+                `filled` true: the inside is painted — in `fillColor` (light-canonical, with \
+                `fillOpacity`) when the shape has a fill color of its own, else in the line's color; \
+                the two keys are absent then. \
                 `cornerJoin` (round / miter / bevel) is how the corners turn while they share one — else the \
                 join a new corner gets — and each corner's own is `nodes[].join` (with `miterLimit` for a miter). \
                 `dashAlignment` (fitGaps / fitPattern / exact) with `dashCorners`, `dashAnchor`, `dashEndsOn` and \
@@ -1941,7 +1943,7 @@ public actor MCPAdapter {
                 overriding the source; `name` names it ("Preset N" when absent). With `replace: true` it OVERWRITES \
                 the style of the preset `id` or `name` names, keeping its place (and its name — unless both `id` \
                 and a new `name` are given). Every ArrowStyle field can be given, but a preset holds NO COLOR: \
-                `color` (light-canonical) and `opacity` are accepted but not saved, whatever the source. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
+                `color` (light-canonical), `opacity`, `fillColor` and `fillOpacity` are accepted but not saved, whatever the source. These are the user's DEVICE settings (app-wide on the connected device, not part of any \
                 document): no document is written and there is no undo step, and the user sees the change at once \
                 in every open Presets row. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{changed: {id, index, name}?, presets: [...]}` — `presets` is the resulting list exactly as \
                 list_arrow_presets reports it (`id`, `index`, `name`, `duplicateName` and every style field).
@@ -2044,7 +2046,7 @@ public actor MCPAdapter {
             description: """
                 Reads the user's NEW-ARROW STYLE — what their Arrow tool draws now, and what add_arrow's omitted \
                 fields take. Never writes. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. \
-                REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset.
+                REPLY: `{newArrowStyle: {…}}` with every style field, as list_arrow_presets reports a preset, plus `color`, `opacity` and — when the style has a fill color of its own — `fillColor`, `fillOpacity`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2059,7 +2061,8 @@ public actor MCPAdapter {
             description: """
                 Sets the user's NEW-ARROW STYLE — what their Arrow tool draws next — to `preset` (id or name) \
                 and/or the style fields given; what is not given stays — the color too with a `preset`, \
-                which holds none (`color` is light-canonical, `colorAppearance: "dark"` for a dark-authored hex). Use it to prepare the Arrow tool for the user. \
+                which holds none (`color` is light-canonical, `colorAppearance: "dark"` for a dark-authored hex). `fillColor` / `fillOpacity` \
+                set the color the tool's FILLED shapes get inside (`fillColor: "line"`: the line's). Use it to prepare the Arrow tool for the user. \
                 These are the user's DEVICE settings (app-wide on the connected device, not part of any \
                 document): no document is written and there is no undo step, and the user sees the change at once \
                 in the Arrow tool. Needs a device with the `arrowPresetWrites` capability; `docId` only routes. REPLY: `{newArrowStyle: {…}}`, the style now set.
@@ -2150,6 +2153,8 @@ public actor MCPAdapter {
                     "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling: true (the default for new arrows and the built-in presets) keeps the arrow's drawnWidth — and so its heads and dashes, which are in widths — when it is scaled (transform_elements, a live selection's scale); false scales the width with the arrow, and restore_stroke_widths can take that back (list_arrows' `unscaledWidth`)."]),
                     "closed": closedPathProperty,
                     "filled": filledPathProperty,
+                    "fillColor": fillColorProperty,
+                    "fillOpacity": fillOpacityProperty,
                 ]),
                 "required": .array(["docId"].map(Value.string)),
             ])
@@ -2167,8 +2172,9 @@ public actor MCPAdapter {
                 below every arrow, text and formula. \
                 The geometry is the LINE'S CENTER: a rectangle of `canvasRect` drawn 2 wide \
                 reaches 1 past it on every side. `filled: true` paints the inside too, in the \
-                line's color, once (a translucent shape is even); for a face without a visible \
-                border give the line the face's color. A `dot` is always solid and exactly \
+                line's color, once (a translucent shape is even) — or in `fillColor`, the inside's \
+                own color (with `fillOpacity`): a white box with a black border is one call. For a \
+                face without a visible border give the line the face's color. A `dot` is always solid and exactly \
                 `diameter` across, ink to ink — its line is `drawnWidth`, but at most half the \
                 diameter. A closed path has no ends: there are no heads. \
                 Every style field you omit takes the user's new-arrow style, or the app's own with \
@@ -2197,11 +2203,13 @@ public actor MCPAdapter {
                         "description": "polygon: [[x, y], …] — at least three corners in canvas points. The path closes from the last to the first; do not repeat the first.",
                         "items": .object(["type": "array", "items": .object(["type": "number"])]),
                     ]),
-                    "filled": .object(["type": "boolean", "description": "Paint the inside too, in the line's color (default false). A dot is always filled."]),
+                    "filled": .object(["type": "boolean", "description": "Paint the inside too — in the line's color, or in `fillColor` (default false). A dot is always filled."]),
+                    "fillColor": fillColorProperty,
+                    "fillOpacity": fillOpacityProperty,
                     "drawnWidth": .object(["type": "number", "description": "Line width in canvas points (0.5–40). For a dot: at most half its diameter is used."]),
                     "dashPattern": .object(["type": "array", "items": .object(["type": "number"]),
                                             "description": "The line type: dash, gap, dash, gap … in line widths (at most 8 numbers, each 0–50); a dash of 0 is a round dot. [] is solid. Round a closed path the pattern closes on itself: a whole number of periods, and with dashCorners a dash centered on every corner. Not for a dot."]),
-                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. The line's color, and the fill's."]),
+                    "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance); the alpha is the opacity. The line's color, and the fill's unless `fillColor` is given."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1 — the color's alpha (overrides the alpha of `color`)."]),
@@ -2265,7 +2273,9 @@ public actor MCPAdapter {
                 `headsLinked`, `dashPattern`, `dashAlignment`, \
                 `dashCorners`, `dashAnchor`, `dashEndsOn`, `dashOffset`, \
                 `color` (light-canonical, or `colorAppearance: "dark"`; its alpha sets the opacity \
-                too), `opacity` and `keepsWidth`; what you omit stays. Turning `keepsWidth` on leaves \
+                too), `opacity`, `keepsWidth`, and for FILLED shapes `fillColor` / `fillOpacity` \
+                (the inside's own color; `fillColor: "line"` takes it away; refused when a named \
+                arrow is not filled); what you omit stays. Turning `keepsWidth` on leaves \
                 the current width as it is (restore_stroke_widths takes an earlier scale back). \
                 ATOMIC: every id must resolve or nothing changes. Their points never change \
                 (move them with transform_elements' `arrowIds`). REQUIRES a device with the \
@@ -2297,6 +2307,8 @@ public actor MCPAdapter {
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light."]),
                     "opacity": .object(["type": "number", "description": "0…1."]),
+                    "fillColor": fillColorProperty,
+                    "fillOpacity": fillOpacityProperty,
                     "preset": .object(["type": "string", "description": "A preset name from list_arrow_presets (any letter case): its shape is applied first — each arrow keeps its own layer and its own color and opacity (a preset holds none) — and the other fields override it."]),
                     "dashAlignment": .object(["type": "string", "enum": .array(["fitGaps", "fitPattern", "exact"].map(Value.string)),
                                               "description": "How a dashed shaft's pattern is laid: fitGaps (default — dashes exact, gaps adjusted, ends as dashEndsOn), fitPattern (dashes and gaps scaled together; dots stay dots), exact (unchanged from dashAnchor, cut where it lands). With the fit modes `dashCorners` (default true) fits each run between corners on its own. Ignored for a solid line."]),
@@ -5770,7 +5782,8 @@ public actor MCPAdapter {
             let out: DeviceCommandBroker.StrokeOpReply
             do {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
-                                                       capability: "arrowPresetWrites")
+                                                       capability: "arrowPresetWrites"
+                                                           + (Self.namesAFill(envelope) ? "+fillColor" : ""))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -5794,7 +5807,15 @@ public actor MCPAdapter {
     static let arrowStyleKeys = ["startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth", "headLength",
                                  "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                                  "dashPattern", "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset",
-                                 "color", "colorAppearance", "opacity", "layer", "keepsWidth", "cornerJoin", "cornerMiterLimit"]
+                                 "color", "colorAppearance", "opacity", "fillColor", "fillOpacity",
+                                 "layer", "keepsWidth", "cornerJoin", "cornerMiterLimit"]
+
+    /// Whether a call's fields name a fill color of its own (`fillColor` / `fillOpacity`): such a
+    /// call goes only to a device with the `fillColor` capability — an app without it decodes the
+    /// spec IGNORING the two keys and answers success with a shape filled in its line's color.
+    static func namesAFill(_ fields: [String: Value]) -> Bool {
+        fields["fillColor"].map { !$0.isNull } == true || fields["fillOpacity"].map { !$0.isNull } == true
+    }
 
     static func mergeProperties(_ a: [String: Value], _ b: [String: Value]) -> [String: Value] {
         a.merging(b) { first, _ in first }
@@ -5824,6 +5845,8 @@ public actor MCPAdapter {
             "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
             "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)), "description": "\"dark\" when `color` was chosen for a dark page."]),
             "opacity": .object(["type": "number", "description": "0…1."]),
+            "fillColor": fillColorProperty,
+            "fillOpacity": fillOpacityProperty,
             "layer": .object(["type": "string", "enum": .array(["front", "back"].map(Value.string)), "description": "Where an arrow in this style goes: front or back."]),
             "keepsWidth": .object(["type": "boolean", "description": "Keep width when scaling (default true)."]),
             "cornerJoin": .object(["type": "string", "enum": .array(["round", "miter", "bevel"].map(Value.string)), "description": "How corners turn: round (default), miter (sharp) or bevel."]),
@@ -5861,10 +5884,22 @@ public actor MCPAdapter {
                  "description": "true: a CLOSED path — the line runs on from the last point to the first and turns there like at every corner, so there is no seam, no ends and no heads. Needs three points. false: open it again (its heads return). Omitted: an open path for add_arrow, unchanged for reshape_arrow."])
     }
 
+    /// `fillColor` on the tools that style an arrow: a filled shape's own fill color.
+    static var fillColorProperty: Value {
+        .object(["type": "string",
+                 "description": "A FILLED shape's own fill color: #RRGGBB or #RRGGBBAA (the alpha is the fill's opacity), light-canonical like `color` (`colorAppearance` applies to it too) — so a white box with a black border is ONE object. \"line\": no color of its own, the inside is the line's color again. Omitted: the user's new-arrow style on an add (normally the line's color), unchanged on a restyle. Only a filled shape shows it; given for anything else it is refused. Needs a device with the `fillColor` capability."])
+    }
+
+    /// `fillOpacity`, the fill's opacity alone.
+    static var fillOpacityProperty: Value {
+        .object(["type": "number", "minimum": 0, "maximum": 1,
+                 "description": "0…1 — how opaque a filled shape's INSIDE is, apart from its line (overrides the alpha of `fillColor`). Without a fill color of its own the inside takes the line's color first, so `fillOpacity: 0.2` alone is a faint face in the line's color under a solid border."])
+    }
+
     /// `filled` on add_arrow / reshape_arrow.
     static var filledPathProperty: Value {
         .object(["type": "boolean",
-                 "description": "true: the area a closed path encloses is painted too, in the line's color and together with the line (a translucent shape is even). Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`."])
+                 "description": "true: the area a closed path encloses is painted too — in the line's color and together with the line (a translucent shape is even), or in `fillColor` when that is given. Needs a closed path; opening a filled path takes `filled: false` beside `closed: false`."])
     }
 
     /// `add_arrow` / `restyle_arrows` — the arguments are relayed verbatim (the device validates,
@@ -5881,17 +5916,18 @@ public actor MCPAdapter {
                 ? ["shape", "canvasRect", "canvasX", "canvasY", "radius", "diameter", "canvasPoints", "filled",
                    "drawnWidth", "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashCorners", "dashAnchor", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
-                   "styleBase"]
+                   "styleBase", "fillColor", "fillOpacity"]
                 : op == "addArrow"
                 ? ["canvasPoints", "nodes", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "layer", "preset", "keepsWidth", "opacity",
                    "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit", "tags",
-                   "styleBase", "closed", "filled"]
+                   "styleBase", "closed", "filled", "fillColor", "fillOpacity"]
                 : ["ids", "startHead", "endHead", "startAnchor", "endAnchor", "drawnWidth",
                    "headLength", "headAngle", "endHeadLength", "endHeadAngle", "headsLinked",
                    "dashPattern", "color", "colorAppearance", "opacity", "preset", "keepsWidth",
-                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit"]
+                   "dashAlignment", "dashCorners", "dashAnchor", "dashEndsOn", "dashOffset", "cornerJoin", "cornerMiterLimit",
+                   "fillColor", "fillOpacity"]
             for key in keys {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
@@ -5910,7 +5946,8 @@ public actor MCPAdapter {
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: bytes, spec: spec,
                                                        capability: (tagged ? "arrows+arrowTags" : "arrows")
                                                            + (envelope["styleBase"] == nil ? "" : "+styleBase")
-                                                           + (closes ? "+closedPaths" : ""))
+                                                           + (closes ? "+closedPaths" : "")
+                                                           + (Self.namesAFill(envelope) ? "+fillColor" : ""))
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -6988,11 +7025,18 @@ public actor MCPAdapter {
                         return false
                     }
                 }()
+                // The same for a fill color of its own, on an ephemeral arrow or in `restyle`.
+                let namesAFill: Bool = {
+                    if case .object(let fields)? = arguments?["restyle"], Self.namesAFill(fields) { return true }
+                    guard case .array(let items)? = arguments?["arrows"] else { return false }
+                    return items.contains { if case .object(let fields) = $0 { return Self.namesAFill(fields) }; return false }
+                }()
                 out = try await broker.requestStrokeOp(docId: docId, docBytes: docBytes, spec: spec,
                                                        capability: Self.joiningFormulas(
                                                            wantsArrows ? "authorStrokes+arrows" : "authorStrokes",
                                                            if: wantsFormulas) + (namesStyleBase ? "+styleBase" : "")
                                                            + (closesAPath ? "+closedPaths" : "")
+                                                           + (namesAFill ? "+fillColor" : "")
                                                            // An app without it would ignore `forFile` and
                                                            // hand back an image a quarter the size.
                                                            + (export ? "+exportRender" : "")

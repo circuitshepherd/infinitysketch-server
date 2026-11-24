@@ -3134,6 +3134,62 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A fill color of its own reaches only a `fillColor` device: an app without the word decodes
+    /// the spec IGNORING `fillColor` / `fillOpacity` and answers success with a shape filled in
+    /// its line's color. The same call without them still reaches it.
+    @Test func aFillColorGoesOnlyToADeviceThatPaintsIt() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        _ = server
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                               capabilities: ["arrows", "authorStrokes", "closedPaths", "arrowPresetWrites"])
+        defer { Task { await old.close() } }
+        let box: [String: Value] = ["docId": "d", "shape": "rectangle", "canvasRect": .array([0, 0, 40, 30]), "filled": true]
+        let triangle: Value = .array([.array([0, 0]), .array([50, 0]), .array([25, 40])])
+        let id = Value.string(UUID().uuidString)
+        let calls: [(String, [String: Value])] = [
+            ("add_shape", box.merging(["fillColor": "#FFFFFF"]) { a, _ in a }),
+            ("add_shape", box.merging(["fillOpacity": 0.3]) { a, _ in a }),
+            ("add_arrow", ["docId": "d", "canvasPoints": triangle, "closed": true, "filled": true, "fillColor": "#FFFFFF"]),
+            ("restyle_arrows", ["docId": "d", "ids": .array([id]), "fillColor": "line"]),
+            ("set_new_arrow_style", ["docId": "d", "fillColor": "#FFFFFF"]),
+            ("render_sketch", ["docId": "d", "arrows": .array([.object(["canvasPoints": triangle, "closed": true, "filled": true, "fillOpacity": 0.5])])]),
+            ("render_sketch", ["docId": "d", "restyle": .object(["arrowIds": .array([id]), "fillColor": "#FF0000"])]),
+        ]
+        for (tool, arguments) in calls {
+            let (refused, isError) = try await client.callTool(name: tool, arguments: arguments)
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(refused).hasPrefix("noDeviceAvailable"), "\(tool): \(toolResultText(refused))")
+            #expect(toolResultText(refused).contains("fillColor"), "the refusal names the missing part: \(toolResultText(refused))")
+        }
+        #expect(await old.receivedRequests.isEmpty)
+        // Without a fill color the same shape reaches the older app.
+        let (_, plainIsError) = try await client.callTool(name: "add_shape", arguments: box)
+        #expect(plainIsError != true)
+        #expect(await old.receivedRequests.count == 1)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["arrows", "closedPaths", "fillColor"])
+        defer { Task { await device.close() } }
+        let (_, addedIsError) = try await client.callTool(name: "add_shape", arguments:
+            box.merging(["fillColor": "#FFFFFF80", "fillOpacity": 0.25, "colorAppearance": "dark"]) { a, _ in a })
+        #expect(addedIsError != true)
+        let request = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: request.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "addShape")
+        #expect(spec["fillColor"] as? String == "#FFFFFF80" && spec["fillOpacity"] as? Double == 0.25)
+        #expect(spec["colorAppearance"] as? String == "dark")
+        let (_, restyledIsError) = try await client.callTool(name: "restyle_arrows", arguments: [
+            "docId": "d", "ids": .array([id]), "fillColor": "line"])
+        #expect(restyledIsError != true)
+        let restyleRequest = try #require(await device.receivedRequests.last)
+        let restyle = try #require(JSONSerialization.jsonObject(with: restyleRequest.spec) as? [String: Any])
+        #expect(restyle["op"] as? String == "restyleArrows" && restyle["fillColor"] as? String == "line")
+    }
+
     /// A closed or filled path, and add_shape, reach only a `closedPaths` device: an app from
     /// before format 8 would ignore `closed` and `filled` and answer success with an open arrow,
     /// and does not know `addShape` at all. A plain add_arrow still reaches it.
