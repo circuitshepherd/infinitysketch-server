@@ -47,12 +47,15 @@ jobs:
       # The MSVC environment is what supplies `link.exe`; without it the toolchain reports itself
       # invalid before compiling anything.
       - uses: ilammy/msvc-dev-cmd@v1
-      - run: swift build
+      # MSVC 14.52 (the windows-2025-vs2026 image of 2026-11-16, VS 18.12) refuses any Clang older
+      # than 22 in its STL headers (STL1000), and the Swift 6.3.3 toolchain carries Clang 21; only
+      # swift-crypto's BoringSSL C++ includes them. The define is Microsoft's documented escape.
+      - run: swift build -Xcc -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -Xcxx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
       # Serial on purpose: the runner has 2 vCPUs and slow file writes, and the version-store
       # tests write thousands of files synchronously. Run in parallel they held the cooperative
       # threads for 15-60 s at a time, and every test with a time bound in it then failed together
       # (2026-10-11: 18 to 53 failures per run, a different count each time, none on Linux or macOS).
-      - run: swift test --no-parallel
+      - run: swift test --no-parallel -Xcc -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -Xcxx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 
   # Builds the self-contained "unzip and run" package: the release executable plus the Swift
   # redistributable runtime, so a user needs no Swift, no Visual Studio and no Developer Mode.

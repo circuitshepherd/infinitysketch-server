@@ -216,7 +216,9 @@ enum AgentGuide {
     with `inlineMath: true` (`add_text`), each formula between `$` signs. **A source that does \
     not typeset is stored, not refused**: `typeset: false` and the parser's `message` come back, \
     the app shows the source as plain text, and you correct it with `edit_formula` — which keeps \
-    the baseline's left end in place, so a changed source never jumps. `list_formulas` reports \
+    the formula's anchor in place, so a changed source never jumps. The anchor is the baseline's \
+    left end unless `anchor` picks another point of the box (`{row: "baseline", column: \
+    "center"}` keeps a centered formula centered). `list_formulas` reports \
     each one's `canvasBounds` and `canvasBaseline` as measured by the device; `remove_formula` works on a closed \
     document. Move, copy, reorder and select formulas with the element and selection tools' \
     `formulaIds`, and their ids work in `set_layer`, `set_pinned` and `tag_elements`. The color \

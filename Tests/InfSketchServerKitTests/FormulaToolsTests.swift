@@ -387,6 +387,57 @@ extension MCPAdapterTests {
         await server.stop()
     }
 
+    /// A formula's `anchor` is relayed only to a device that knows it (`formulas+formulaAnchor`):
+    /// an app without it ignores the key and answers success with no anchor stored. A call
+    /// without it still reaches a `formulas` device.
+    @Test func aFormulasAnchorGoesOnlyToADeviceThatHasAnchors() async throws {
+        let (server, port, task) = try await startServer()
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                               capabilities: ["formulas", "placeBy"])
+        for (tool, arguments) in [
+            ("edit_formula", ["docId": "d", "id": .string(D.formula), "anchor": ["row": "baseline", "column": "center"]] as [String: Value]),
+            ("edit_formula", ["docId": "d", "id": .string(D.formula), "anchor": "automatic"]),
+            ("add_formula", ["docId": "d", "latex": "x", "canvasX": 1, "canvasY": 2, "anchor": ["row": "top", "column": "right"]]),
+        ] {
+            let (refused, refusedError) = try await client.callTool(name: tool, arguments: arguments)
+            #expect(refusedError == true, "\(tool)")
+            #expect(text(refused).contains("formulaAnchor"), "\(tool): \(text(refused))")
+        }
+        #expect(await old.receivedRequests.isEmpty, "the older app is never asked")
+        let (stillFine, stillFineError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "latex": "y"])
+        #expect(stillFineError != true, "\(text(stillFine))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Self.reply, meta: Self.meta),
+                                                  capabilities: ["formulas", "formulaAnchor"])
+        defer { Task { await device.close() } }
+        let (edited, editedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "anchor": ["row": "baseline", "column": "center"]])
+        #expect(editedError != true, "\(text(edited))")
+        let editSpecRequest = try #require(await device.receivedRequests.last)
+        let editSpec = try #require(JSONSerialization.jsonObject(with: editSpecRequest.spec) as? [String: Any])
+        #expect((editSpec["anchor"] as? [String: String]) == ["row": "baseline", "column": "center"])
+
+        let (cleared, clearedError) = try await client.callTool(name: "edit_formula", arguments: [
+            "docId": "d", "id": .string(D.formula), "anchor": "automatic"])
+        #expect(clearedError != true, "\(text(cleared))")
+        let clearSpecRequest = try #require(await device.receivedRequests.last)
+        let clearSpec = try #require(JSONSerialization.jsonObject(with: clearSpecRequest.spec) as? [String: Any])
+        #expect(clearSpec["anchor"] as? String == "automatic")
+
+        let (added, addedError) = try await client.callTool(name: "add_formula", arguments: [
+            "docId": "d", "latex": "x", "canvasX": 1, "canvasY": 2, "anchor": ["row": "bottom", "column": "right"]])
+        #expect(addedError != true, "\(text(added))")
+        let addSpecRequest = try #require(await device.receivedRequests.last)
+        let addSpec = try #require(JSONSerialization.jsonObject(with: addSpecRequest.spec) as? [String: Any])
+        #expect((addSpec["anchor"] as? [String: String]) == ["row": "bottom", "column": "right"])
+        await server.stop()
+    }
+
     @Test func emptyAndTooLongAreRefusedBeforeTheDevice() async throws {
         let (server, port, task) = try await startServer()
         defer { task.cancel() }

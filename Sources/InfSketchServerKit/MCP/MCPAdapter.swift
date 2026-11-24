@@ -485,7 +485,7 @@ public actor MCPAdapter {
     // field-name drift here would never fail loudly; every agent would just
     // keep getting default-styled text. Pinned by the styled add/edit_text
     // envelope-contract tests (mirroring drawStrokesSpecEnvelopeMatchesCanonicalShape).
-    private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "spans"]
+    private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "weight", "spans"]
 
     /// The capability a text write needs: `authorText`, joined with the newer parts the call
     /// actually uses — an older app decodes an unknown key by ignoring it and answers success.
@@ -495,6 +495,16 @@ public actor MCPAdapter {
         if has("wordWrap") || has("wrapWidth") { parts.append("textWrap") }
         if has("layer") { parts.append("objectLayerWrites") }
         if has("placeBy") { parts.append("placeBy") }
+        // A `weight`, of the whole text or of a span: an app without it would set the text
+        // Regular (or by `bold`) and answer success.
+        let spanHasWeight: Bool = {
+            guard case .array(let spans)? = arguments?["spans"] else { return false }
+            return spans.contains { span in
+                guard case .object(let fields) = span, let weight = fields["weight"] else { return false }
+                return !weight.isNull
+            }
+        }()
+        if has("weight") || spanHasWeight { parts.append("textWeight") }
         return parts.joined(separator: "+")
     }
 
@@ -547,6 +557,28 @@ public actor MCPAdapter {
             otherwise draws differently after the user changed their tool. Needs a device with \
             the `styleBase` capability.
             """,
+    ])
+
+    /// A formula's `anchor` — the point of its box that stays put when its source or size changes
+    /// later. Relayed under `…+formulaAnchor`: an app without it would ignore the key and answer
+    /// success with the anchor unset.
+    private static let formulaAnchorProperty: Value = .object([
+        "description": .string("""
+            The point of the formula's box that stays put when its source or size changes             LATER: {row: "top"|"middle"|"baseline"|"bottom", column: "left"|"center"|"right"}, or             "automatic" (the default: the left end of the baseline). {row: "baseline", column:             "center"} keeps a centered formula centered when its source grows; a right column             grows to the left. It moves nothing by itself and does not say where the formula is             placed — that is `placeBy`. list_formulas reports it. Needs a device with the \
+            `formulaAnchor` capability.
+            """),
+        "anyOf": .array([
+            .object(["type": "string", "enum": .array([.string("automatic")])]),
+            .object([
+                "type": "object",
+                "properties": .object([
+                    "row": .object(["type": "string", "enum": .array(["top", "middle", "baseline", "bottom"].map(Value.string))]),
+                    "column": .object(["type": "string", "enum": .array(["left", "center", "right"].map(Value.string))]),
+                ]),
+                "required": .array(["row", "column"].map(Value.string)),
+                "additionalProperties": .bool(false),
+            ]),
+        ]),
     ])
 
     /// `placeBy` — which point of the box `canvasX` / `canvasY` name (texts and formulas). Device
@@ -616,8 +648,10 @@ public actor MCPAdapter {
     private static let textStyleProperties: [String: Value] = [
         "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
         "fontSize": .object(["type": "number", "description": "Point size, 1–512. A NEW text or span without one is 17 pt."]),
-        "bold": .object(["type": "boolean"]),
+        "bold": .object(["type": "boolean", "description": "The shortcut for `weight`: true is 700, false is 400."]),
         "italic": .object(["type": "boolean"]),
+        "weight": .object(["type": "integer", "enum": .array([100, 200, 300, 400, 500, 600, 700, 800, 900].map { Value.int($0) }),
+                           "description": "How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability."]),
         "family": .object(["type": "string", "description": "A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
     ]
 
@@ -1806,7 +1840,7 @@ public actor MCPAdapter {
                 never writes to the document. unknownDoc if the document doesn't exist.
 
                 REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, \
-                color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, \
+                color, fontSize, family, bold, italic, weight?, spans, alignment, wordWrap, wrapWidth, \
                 inlineMath}`. The box \
                 is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
                 picked anchor — the point of its box that stays put as the text grows — as \
@@ -1816,7 +1850,9 @@ public actor MCPAdapter {
                 such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so \
                 it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, \
                 `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, \
-                fontSize, family, bold, italic} each) and no top-level style. `color` is \
+                fontSize, family, bold, italic, weight?} each) and no top-level style. `weight` \
+                (100–900) is there only for a weight that is neither Regular nor Bold — those \
+                two are what `bold` says. `color` is \
                 light-canonical and ABSENT for the automatic color; `family` is `System` for the \
                 device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. \
                 `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
@@ -2304,13 +2340,15 @@ public actor MCPAdapter {
                 of that text (list_texts' `inlineMath`), not listed here.
 
                 REPLY: an ARRAY of `{id, latex, typeset, message?, canvasBounds, canvasBaseline, \
-                fontSize, color?, opacity, pinned, layer, tags}`. `latex` is the source as stored. \
+                fontSize, color?, opacity, pinned, layer, tags, anchor?}`. `latex` is the source as stored. \
                 `typeset` false means the engine cannot set it: the app shows the source as plain \
                 text and `message` is the parser's reason — fix it with edit_formula. \
                 `canvasBounds` is [left, top, width, height], the canvas-space bounding box of the \
                 typeset box as drawn (rotation and scale included), and `canvasBaseline` the \
                 canvas point at the left end of its baseline. `fontSize` is in points. `color` is light-canonical `#RRGGBBAA`, absent for Automatic (the \
-                paper's label color). `layer` is `front` or `back`.
+                paper's label color). `layer` is `front` or `back`. `anchor` is the picked \
+                `{row, column}` — the point of the box that stays put when the source or size \
+                changes — absent for automatic (the left end of the baseline).
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2331,7 +2369,8 @@ public actor MCPAdapter {
                 `canvasY` sit on one line, as text does. `fontSize` is the point size it is \
                 typeset at (1–2000); omitted, the user's text size, else 20. `placeBy` makes \
                 the coordinates name another point of the box — its center, its right end — so a \
-                centered formula is one call. `color` is \
+                centered formula is one call. `anchor` is the point that stays put when the \
+                source or size changes LATER (automatic: the left end of the baseline). `color` is \
                 light-canonical `#RRGGBB` or `#RRGGBBAA` (`colorAppearance: "dark"` for a \
                 dark-authored hex); omitted, the user's text color, else Automatic — black on \
                 light paper, white on dark. A source that does not typeset is STORED and \
@@ -2354,6 +2393,7 @@ public actor MCPAdapter {
                     "canvasX": .object(["type": "number", "description": "Canvas x-coordinate of the left end of the baseline (or of the point `placeBy` names)."]),
                     "canvasY": .object(["type": "number", "description": "Canvas y-coordinate of the baseline (or of the point `placeBy` names)."]),
                     "placeBy": placeByProperty(default: "the left end of the baseline"),
+                    "anchor": formulaAnchorProperty,
                     "styleBase": styleBaseProperty,
                     "fontSize": .object(["type": "number", "description": "Point size the formula is typeset at, 1–2000. Default: the user's text size, else 20."]),
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance). Default: the user's text color, else Automatic."]),
@@ -2374,11 +2414,12 @@ public actor MCPAdapter {
             description: """
                 Changes one formula object (list_formulas' `id`): any of `latex` (WITHOUT `$` \
                 markers), `fontSize` (points, 1–2000), `color` (light-canonical; \
-                `colorAppearance` only together with `color`) and a new place (`canvasX` and/or \
+                `colorAppearance` only together with `color`), `anchor` and a new place (`canvasX` and/or \
                 `canvasY`, naming the left end of the baseline as shown or the point `placeBy` \
-                says, whatever transform the formula carries) — give at least one. Without a new place the LEFT END \
-                OF THE BASELINE stays where it is on the canvas, also when the formula is rotated \
-                or scaled, so a longer source grows along its baseline (to the right on an unrotated formula). A source that does not typeset \
+                says, whatever transform the formula carries) — give at least one. Without a new place the formula's ANCHOR \
+                stays where it is on the canvas — automatic: the LEFT END OF THE BASELINE — also when the formula is rotated \
+                or scaled, so a longer source grows along its baseline (to the right on an unrotated formula with the automatic anchor). \
+                An `anchor` given in the same call is the one that stays put; alone it moves nothing. A source that does not typeset \
                 is stored and reported as on add_formula. formulaNotFound for an unknown id, \
                 invalidFontSize for a size outside 1–2000. An \
                 edit that changes nothing writes nothing. REQUIRES a device with the `formulas` \
@@ -2397,6 +2438,7 @@ public actor MCPAdapter {
                     "canvasX": .object(["type": "number", "description": "A new canvas x-coordinate for the left end of the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
                     "canvasY": .object(["type": "number", "description": "A new canvas y-coordinate for the baseline as shown (or for the point `placeBy` names). Needs a device with the `placeBy` capability."]),
                     "placeBy": placeByProperty(default: "the left end of the baseline"),
+                    "anchor": formulaAnchorProperty,
                     "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA, light-canonical (see colorAppearance)."]),
                     "colorAppearance": .object(["type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                                                 "description": "\"dark\" when `color` was chosen for a dark page. Default light. Only with `color`."]),
@@ -4579,7 +4621,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "weight", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4877,7 +4919,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "weight", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -5052,17 +5094,19 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("addFormula")]
-            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy", "styleBase"] {
+            for key in ["latex", "canvasX", "canvasY", "fontSize", "color", "colorAppearance", "layer", "tags", "placeBy", "styleBase", "anchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
             // An app without `placeBy` would ignore the key and place by the baseline; one
-            // without `styleBase` would take the user's text style.
+            // without `styleBase` would take the user's text style; one without `formulaAnchor`
+            // would store no anchor.
             return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
                                            capability: "formulas" + (envelope["placeBy"] == nil ? "" : "+placeBy")
-                                               + (envelope["styleBase"] == nil ? "" : "+styleBase"))
+                                               + (envelope["styleBase"] == nil ? "" : "+styleBase")
+                                               + (envelope["anchor"] == nil ? "" : "+formulaAnchor"))
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
@@ -5071,7 +5115,7 @@ public actor MCPAdapter {
     }
 
     /// `edit_formula` — like `add_formula`; the device refuses an edit that names none of
-    /// `latex` / `fontSize` / `color`, and `colorAppearance` without `color`.
+    /// `latex` / `fontSize` / `color` / a place / `anchor`, and `colorAppearance` without `color`.
     private func callEditFormula(_ arguments: [String: Value]?) async -> CallTool.Result {
         do {
             let docId = try Self.nonEmptyStringArg(arguments, "docId")
@@ -5084,17 +5128,18 @@ public actor MCPAdapter {
                 return Self.errorResult("unknownDoc")
             }
             var envelope: [String: Value] = ["op": .string("editFormula")]
-            for key in ["id", "latex", "fontSize", "color", "colorAppearance", "canvasX", "canvasY", "placeBy"] {
+            for key in ["id", "latex", "fontSize", "color", "colorAppearance", "canvasX", "canvasY", "placeBy", "anchor"] {
                 if let value = arguments?[key], !value.isNull { envelope[key] = value }
             }
             let spec: Data
             do { spec = try JSONEncoder().encode(Value.object(envelope)) }
             catch { return Self.errorResult("invalidArguments") }
             // A position is new with `placeBy`: an app without it would ignore all three keys
-            // and answer an edit that moved nothing.
+            // and answer an edit that moved nothing. The same for `anchor` and `formulaAnchor`.
             let places = ["canvasX", "canvasY", "placeBy"].contains { envelope[$0] != nil }
             return await relayFormulaWrite(docId: docId, bytes: bytes, spec: spec,
-                                           capability: places ? "formulas+placeBy" : "formulas")
+                                           capability: "formulas" + (places ? "+placeBy" : "")
+                                               + (envelope["anchor"] == nil ? "" : "+formulaAnchor"))
         } catch let error as ArgumentError {
             return Self.errorResult(error.reason)
         } catch {
