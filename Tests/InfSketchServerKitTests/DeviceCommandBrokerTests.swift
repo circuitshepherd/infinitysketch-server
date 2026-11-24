@@ -1203,6 +1203,129 @@ private actor SentBox {
     }
 }
 
+/// Who has a document open, as the test says it (the broker asks through `SubscriberLookup`).
+private actor OpenBox {
+    private var open: Set<UUID> = []
+    func set(_ ids: Set<UUID>) { open = ids }
+    func get() -> Set<UUID> { open }
+}
+
+/// A live-state op that finds a device which has JUST connected, and nobody with the document
+/// open, waits for that device to subscribe.
+///
+/// After a reconnect a device says hello first and subscribes to its open documents a moment
+/// later. An agent's selection call arriving in that moment was refused `documentNotOpen` for a
+/// document that had never left the user's screen.
+@Suite struct ResubscribeWaitTests {
+    typealias BrokerError = DeviceCommandBroker.DeviceCommandError
+
+    private func selectionOp(_ broker: DeviceCommandBroker) async throws -> DeviceCommandBroker.StrokeOpReply {
+        try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data(), capability: "controlSelection")
+    }
+
+    @Test func anOpForAJustConnectedDeviceIsServedWhenItSubscribes() async throws {
+        let broker = DeviceCommandBroker(resubscribeWait: .seconds(30))
+        let open = OpenBox(), sent = SentBox()
+        await broker.setSubscriberLookup { _ in await open.get() }
+        let device = UUID()
+        await broker.register(connectionId: device, capabilities: ["controlSelection"]) { msg in Task { await sent.set(msg) } }
+
+        let task = Task { try await selectionOp(broker) }
+        // The request is waiting — a state the broker reports, not a pause of the test's.
+        await waitFor { await broker.requestsWaitingForASubscription == 1 }
+        #expect(await broker.requestsWaitingForASubscription == 1)
+        #expect(await sent.all().isEmpty, "nothing is sent to a device that has not said it has the document")
+
+        // A subscription to ANOTHER document does not end it.
+        await broker.noteSubscribed(docId: "Other")
+        #expect(await broker.requestsWaitingForASubscription == 1)
+
+        await open.set([device])
+        await broker.noteSubscribed(docId: "D")
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sent.awaitMessage() else {
+            Issue.record("the device that subscribed is asked"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+        #expect(await broker.requestsWaitingForASubscription == 0)
+    }
+
+    /// The device does not have the document: the same answer as before, after the wait.
+    @Test func withoutASubscriptionItIsRefusedOnlyAfterTheWait() async {
+        let wait = Duration.milliseconds(300)
+        let broker = DeviceCommandBroker(resubscribeWait: wait)
+        await broker.setSubscriberLookup { _ in [] }
+        let before = ContinuousClock.now
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { _ in }
+        await #expect(throws: BrokerError.documentNotOpen) { _ = try await selectionOp(broker) }
+        #expect(ContinuousClock.now - before >= wait)
+        #expect(await broker.requestsWaitingForASubscription == 0)
+    }
+
+    /// A device that has been connected LONGER than the wait has said what it has open: the
+    /// answer comes at once. (The wait counts from its hello, not from the request.)
+    @Test func aDeviceConnectedLongerThanTheWaitIsNotWaitedOn() async throws {
+        let wait = Duration.seconds(2)
+        let broker = DeviceCommandBroker(resubscribeWait: wait)
+        await broker.setSubscriberLookup { _ in [] }
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { _ in }
+        try await Task.sleep(for: wait + .milliseconds(100))
+        let before = ContinuousClock.now
+        await #expect(throws: BrokerError.documentNotOpen) { _ = try await selectionOp(broker) }
+        #expect(ContinuousClock.now - before < .milliseconds(1500), "it waited \(ContinuousClock.now - before)")
+    }
+
+    /// A page that is merely WATCHING the document (subscribed, no capabilities) is not a device
+    /// that has it open: the wait goes on for the device.
+    @Test func aSubscriberThatCannotServeTheOpDoesNotEndTheWait() async throws {
+        let broker = DeviceCommandBroker(resubscribeWait: .seconds(30))
+        let open = OpenBox(), sent = SentBox()
+        await broker.setSubscriberLookup { _ in await open.get() }
+        let viewer = UUID(), device = UUID()
+        await broker.register(connectionId: viewer, capabilities: []) { _ in }
+        await broker.register(connectionId: device, capabilities: ["controlSelection"]) { msg in Task { await sent.set(msg) } }
+        await open.set([viewer])
+
+        let task = Task { try await selectionOp(broker) }
+        await waitFor { await broker.requestsWaitingForASubscription == 1 }
+        await broker.noteSubscribed(docId: "D")            // the viewer's own (re)subscription
+        await waitFor { await broker.requestsWaitingForASubscription == 1 }
+        #expect(await sent.all().isEmpty)
+
+        await open.set([viewer, device])
+        await broker.noteSubscribed(docId: "D")
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sent.awaitMessage() else {
+            Issue.record("the device is asked once it has the document"); return
+        }
+        await broker.handleReply(requestId: rid, bytes: nil, meta: Data("{}".utf8), failureReason: nil)
+        _ = try await task.value
+    }
+
+    /// Without the setting — every other test's broker — nothing waits.
+    @Test func withoutTheSettingTheAnswerIsAtOnce() async {
+        let broker = DeviceCommandBroker()
+        await broker.setSubscriberLookup { _ in [] }
+        await broker.register(connectionId: UUID(), capabilities: ["controlSelection"]) { _ in }
+        await #expect(throws: BrokerError.documentNotOpen) { _ = try await selectionOp(broker) }
+        #expect(await broker.requestsWaitingForASubscription == 0)
+    }
+
+    /// An op any device can serve never waits for a subscription.
+    @Test func anOpThatNeedsNoOpenDocumentDoesNotWait() async throws {
+        let broker = DeviceCommandBroker(resubscribeWait: .seconds(30))
+        let sent = SentBox()
+        await broker.setSubscriberLookup { _ in [] }
+        await broker.register(connectionId: UUID(), capabilities: ["authorStrokes"]) { msg in Task { await sent.set(msg) } }
+        let task = Task { try await broker.requestStrokeOp(docId: "D", docBytes: Data(), spec: Data()) }
+        guard case .strokeOpRequest(let rid, "D", _, _, _, _)? = await sent.awaitMessage() else {
+            Issue.record("sent at once"); return
+        }
+        #expect(await broker.requestsWaitingForASubscription == 0)
+        await broker.handleReply(requestId: rid, bytes: Data(), meta: nil, failureReason: nil)
+        _ = try await task.value
+    }
+}
+
 /// A request that finds no device connected WAITS a little for one, instead of failing at once.
 ///
 /// The devices come back within seconds of the host's standby ending, of the app returning to the

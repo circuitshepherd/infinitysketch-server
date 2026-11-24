@@ -137,6 +137,8 @@ public actor DeviceCommandBroker {
         let confirmAlive: @Sendable () -> Void
         /// When the peer last sent anything (fed by `noteActivity`); registration counts.
         var lastActivity: ContinuousClock.Instant
+        /// When it said hello (`resubscribeWait`).
+        let registeredAt: ContinuousClock.Instant
     }
 
     private struct PendingRequest {
@@ -217,11 +219,13 @@ public actor DeviceCommandBroker {
     private let quietAfter: Duration
 
     public init(createTimeout: Duration = .seconds(10), strokeOpTimeout: Duration = .seconds(20),
-                quietAfter: Duration = .seconds(30), deviceWait: Duration = .zero, preferredKind: String? = nil) {
+                quietAfter: Duration = .seconds(30), deviceWait: Duration = .zero,
+                resubscribeWait: Duration = .zero, preferredKind: String? = nil) {
         self.createTimeout = createTimeout
         self.strokeOpTimeout = strokeOpTimeout
         self.quietAfter = quietAfter
         self.deviceWait = deviceWait
+        self.resubscribeWait = resubscribeWait
         self.preferredKind = preferredKind
     }
 
@@ -333,6 +337,63 @@ public actor DeviceCommandBroker {
         for waiter in waiters.values { waiter.resume() }
     }
 
+    // MARK: - A device that has just connected and not yet said what it has open
+
+    /// How long after a device's hello a live-state op still waits for that device to subscribe
+    /// to the op's document, when no capable device has it open (`SessionConfig.resubscribeWait`;
+    /// zero — the default, and every test's — answers at once).
+    ///
+    /// After a reconnect a device says hello first and subscribes to its open documents a moment
+    /// later (its connect prologue runs in between). A selection op arriving in that moment found
+    /// a capable device and no subscriber, and was refused `documentNotOpen` for a document that
+    /// had never left the user's screen (spec `2026-11-14-standby-reconnect…`, offered as (a)).
+    /// The wait ends at the subscription, or `resubscribeWait` after the newest capable device's
+    /// hello — so a device that has been connected longer than that is asked nothing new, and the
+    /// answer for a document it does not have open comes at once, as before.
+    private let resubscribeWait: Duration
+    private var subscriptionWaiters: [UUID: (docId: String, continuation: CheckedContinuation<Void, Never>)] = [:]
+
+    /// Requests waiting for a just-connected device to subscribe, right now.
+    public var requestsWaitingForASubscription: Int { subscriptionWaiters.count }
+
+    /// `WSAdapter` reports every subscription that succeeded.
+    public func noteSubscribed(docId: String) {
+        for (id, waiter) in subscriptionWaiters where waiter.docId == docId {
+            subscriptionWaiters.removeValue(forKey: id)
+            waiter.continuation.resume()
+        }
+    }
+
+    /// Until when a live-state op on a document nobody has open may still wait: `resubscribeWait`
+    /// after the hello of the newest connection that could serve it. nil when that has passed.
+    private func resubscribeDeadline(capability: String, deviceId: String?) -> ContinuousClock.Instant? {
+        guard resubscribeWait > .zero else { return nil }
+        let needs = Self.parts(of: capability)
+        let newest = connections
+            .filter { needs.isSubset(of: $0.capabilities) && (deviceId == nil || $0.deviceId == deviceId) }
+            .map(\.registeredAt).max()
+        guard let newest else { return nil }
+        let deadline = newest.advanced(by: resubscribeWait)
+        return ContinuousClock.now < deadline ? deadline : nil
+    }
+
+    /// Suspends until a subscription to `docId` is reported or `deadline` passes.
+    private func waitForASubscription(to docId: String, until deadline: ContinuousClock.Instant) async {
+        let id = UUID()
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            await self?.endSubscriptionWait(id)
+        }
+        await withCheckedContinuation { continuation in
+            subscriptionWaiters[id] = (docId, continuation)
+        }
+        timeout.cancel()
+    }
+
+    private func endSubscriptionWait(_ id: UUID) {
+        subscriptionWaiters.removeValue(forKey: id)?.continuation.resume()
+    }
+
     /// WSAdapter calls at hello with the connection's full hello capability
     /// set. Most-recently-registered, capability-matching connection is
     /// preferred for new requests of a given kind.
@@ -355,7 +416,8 @@ public actor DeviceCommandBroker {
         connections.append(Connection(id: connectionId, deviceId: deviceId,
                                       capabilities: capabilities, send: send,
                                       confirmAlive: confirmAlive,
-                                      lastActivity: ContinuousClock.now))
+                                      lastActivity: ContinuousClock.now,
+                                      registeredAt: ContinuousClock.now))
         lastDeviceLeftAt = nil
         wakeDeviceWaiters()
     }
@@ -719,6 +781,16 @@ public actor DeviceCommandBroker {
         var open: Set<UUID>?
         if routing != .any, let subscriberLookup {
             open = await subscriberLookup(docId)
+            // A live-state op, and no capable device has the document open: one that has JUST
+            // connected may be about to say so (`resubscribeWait`).
+            if routing == .requireOpen {
+                while pickConnection(capability: capability, deviceId: deviceId, excluding: [], within: open ?? []) == nil,
+                      let deadline = resubscribeDeadline(capability: capability, deviceId: deviceId) {
+                    ServerLog.verbose("[DeviceCommandBroker] \(capability) on '\(docId)': a device has just connected and has not subscribed yet; waiting for it")
+                    await waitForASubscription(to: docId, until: deadline)
+                    open = await subscriberLookup(docId)
+                }
+            }
         }
         let now = ContinuousClock.now
         // A device with the document open first; for `.preferOpen`, any capable one after that.

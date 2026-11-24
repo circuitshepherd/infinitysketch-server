@@ -105,6 +105,10 @@ public struct SessionConfig: Sendable {
     /// (`DeviceCommandBroker.deviceWait`). Zero — the default, and every test's — answers at
     /// once; `main.swift` sets 15 s.
     public var deviceWait: Duration
+    /// How long after a device's hello a live-state op waits for that device to subscribe to the
+    /// op's document (`DeviceCommandBroker.resubscribeWait`). Zero — the default, and every
+    /// test's — answers at once; `main.swift` sets 5 s.
+    public var resubscribeWait: Duration
     /// The kind of device (`mac`, `ipad`, `iphone`) an agent's work is given to while one is
     /// connected and able (`--prefer-device`; `DeviceCommandBroker.preferredKind`). nil: the
     /// broker's own choice.
@@ -131,9 +135,11 @@ public struct SessionConfig: Sendable {
         allowedHostNames: [String] = [],
         unsubscribeRoutingGrace: Duration = .seconds(5),
         deviceWait: Duration = .zero,
+        resubscribeWait: Duration = .zero,
         preferredDeviceKind: String? = nil
     ) {
         self.deviceWait = deviceWait
+        self.resubscribeWait = resubscribeWait
         self.preferredDeviceKind = preferredDeviceKind
         self.unsubscribeRoutingGrace = unsubscribeRoutingGrace
         self.allowedHostNames = allowedHostNames

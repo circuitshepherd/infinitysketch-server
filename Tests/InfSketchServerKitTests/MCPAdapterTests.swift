@@ -460,6 +460,12 @@ actor FakeStrokeOpDevice {
         }
     }
 
+    /// Opens `docId` AFTER the hello — what a reconnected device does a moment later. The
+    /// `subscribed` snapshot is read, and passed over, by the pump.
+    func subscribe(to docId: String) async throws {
+        try await ws.send(.string(ClientMessage.subscribe(docId: docId, createIfMissing: false).jsonText()))
+    }
+
     /// Manually answers a recorded request — for the `opInProgress` scenario,
     /// which stalls the device (`autoReply: nil`) to hold a request in
     /// flight, then releases it once the collision has been observed.
@@ -7891,6 +7897,38 @@ actor FakeStrokeOpDevice {
         #expect(isError != true)
         #expect(toolResultText(content) == #"{"from":"ipad"}"#)
         #expect(await mac.receivedRequests.isEmpty)
+
+        await server.stop()
+    }
+
+    /// A device that has just (re)connected says hello first and opens its documents a moment
+    /// later. A selection op arriving in between waits for it (`resubscribeWait`) instead of
+    /// answering that the document is open nowhere — through the real socket: the subscription
+    /// the server handled is what ends the wait.
+    @Test func aSelectionOpWaitsForAJustConnectedDeviceToOpenTheDocument() async throws {
+        let (server, port, task) = try await startServer(config: SessionConfig(resubscribeWait: .seconds(30)))  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let ipad = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: Data(), meta: Data(#"{"from":"ipad"}"#.utf8)),
+            capabilities: ["controlSelection"])                // hello, and nothing open yet
+        defer { Task { await ipad.close() } }
+
+        async let answer = client.callTool(name: "get_selection", arguments: ["docId": "d"])
+        // The call is waiting — a state the broker reports, not a pause of the test's.
+        let broker = server.deviceCommandBroker
+        await waitFor { await broker.requestsWaitingForASubscription == 1 }
+        #expect(await broker.requestsWaitingForASubscription == 1)
+        #expect(await ipad.receivedRequests.isEmpty)
+
+        let subscribedAt = ContinuousClock.now
+        try await ipad.subscribe(to: "d")
+        let (content, isError) = try await answer
+        #expect(isError != true)
+        #expect(toolResultText(content) == #"{"from":"ipad"}"#)
+        // The SUBSCRIPTION ended the wait, not its 30 s running out (which serves the op too).
+        #expect(ContinuousClock.now - subscribedAt < .seconds(10), "answered \(ContinuousClock.now - subscribedAt) after the subscribe")
 
         await server.stop()
     }
