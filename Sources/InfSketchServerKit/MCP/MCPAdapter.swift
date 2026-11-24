@@ -485,7 +485,7 @@ public actor MCPAdapter {
     // field-name drift here would never fail loudly; every agent would just
     // keep getting default-styled text. Pinned by the styled add/edit_text
     // envelope-contract tests (mirroring drawStrokesSpecEnvelopeMatchesCanonicalShape).
-    private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "spans"]
+    private static let styleArgKeys = ["color", "fontSize", "bold", "italic", "family", "weight", "spans"]
 
     /// The capability a text write needs: `authorText`, joined with the newer parts the call
     /// actually uses — an older app decodes an unknown key by ignoring it and answers success.
@@ -495,6 +495,16 @@ public actor MCPAdapter {
         if has("wordWrap") || has("wrapWidth") { parts.append("textWrap") }
         if has("layer") { parts.append("objectLayerWrites") }
         if has("placeBy") { parts.append("placeBy") }
+        // A `weight`, of the whole text or of a span: an app without it would set the text
+        // Regular (or by `bold`) and answer success.
+        let spanHasWeight: Bool = {
+            guard case .array(let spans)? = arguments?["spans"] else { return false }
+            return spans.contains { span in
+                guard case .object(let fields) = span, let weight = fields["weight"] else { return false }
+                return !weight.isNull
+            }
+        }()
+        if has("weight") || spanHasWeight { parts.append("textWeight") }
         return parts.joined(separator: "+")
     }
 
@@ -638,8 +648,10 @@ public actor MCPAdapter {
     private static let textStyleProperties: [String: Value] = [
         "color": .object(["type": "string", "description": "#RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance."]),
         "fontSize": .object(["type": "number", "description": "Point size, 1–512. A NEW text or span without one is 17 pt."]),
-        "bold": .object(["type": "boolean"]),
+        "bold": .object(["type": "boolean", "description": "The shortcut for `weight`: true is 700, false is 400."]),
         "italic": .object(["type": "boolean"]),
+        "weight": .object(["type": "integer", "enum": .array([100, 200, 300, 400, 500, 600, 700, 800, 900].map { Value.int($0) }),
+                           "description": "How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability."]),
         "family": .object(["type": "string", "description": "A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height."]),
     ]
 
@@ -1828,7 +1840,7 @@ public actor MCPAdapter {
                 never writes to the document. unknownDoc if the document doesn't exist.
 
                 REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, \
-                color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, \
+                color, fontSize, family, bold, italic, weight?, spans, alignment, wordWrap, wrapWidth, \
                 inlineMath}`. The box \
                 is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's \
                 picked anchor — the point of its box that stays put as the text grows — as \
@@ -1838,7 +1850,9 @@ public actor MCPAdapter {
                 such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so \
                 it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, \
                 `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, \
-                fontSize, family, bold, italic} each) and no top-level style. `color` is \
+                fontSize, family, bold, italic, weight?} each) and no top-level style. `weight` \
+                (100–900) is there only for a weight that is neither Regular nor Bold — those \
+                two are what `bold` says. `color` is \
                 light-canonical and ABSENT for the automatic color; `family` is `System` for the \
                 device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. \
                 `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it \
@@ -4607,7 +4621,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("addText")]
-            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
+            for key in ["text", "canvasX", "canvasY", "pinned", "color", "fontSize", "bold", "italic", "family", "weight", "spans", "tags", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "layer", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }
@@ -4905,7 +4919,7 @@ public actor MCPAdapter {
             }
 
             var envelope: [String: Value] = ["op": .string("editText"), "textId": .string(textId)]
-            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
+            for key in ["text", "canvasX", "canvasY", "color", "fontSize", "bold", "italic", "family", "weight", "spans", "colorAppearance", "anchor", "anchorParagraphs", "wordWrap", "wrapWidth", "placeBy"] {
                 if let value = arguments?[key], !value.isNull {
                     envelope[key] = value
                 }

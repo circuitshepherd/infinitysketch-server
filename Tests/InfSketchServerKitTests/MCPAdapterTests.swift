@@ -6735,6 +6735,47 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// A text's `weight` — of the whole text or of one span — reaches only a device that says
+    /// `textWeight`: an older app would ignore the key and set the text Regular. It also takes
+    /// the device path (a weight is a font face, which the server cannot make). Calls without
+    /// it still reach the older app.
+    @Test func aTextWeightGoesOnlyToADeviceThatHasWeights() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let old = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes), capabilities: ["authorText"])
+        let weighted: [(String, [String: Value])] = [
+            ("add_text", ["text": "a", "canvasX": 0, "canvasY": 0, "weight": 500]),
+            ("add_text", ["canvasX": 0, "canvasY": 0, "spans": .array([.object(["text": "a"]), .object(["text": "b", "weight": 900])])]),
+            ("edit_text", ["textId": "T", "weight": 300]),
+        ]
+        for (tool, args) in weighted {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError == true, "\(tool)")
+            #expect(toolResultText(content).contains("textWeight"), "\(tool): \(toolResultText(content))")
+        }
+        #expect(await old.receivedRequests.isEmpty)
+        let (plain, plainError) = try await client.callTool(name: "add_text", arguments: [
+            "docId": "d", "text": "a", "canvasX": 0, "canvasY": 0, "bold": true])
+        #expect(plainError != true, "bold alone still reaches the older app: \(toolResultText(plain))")
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytes(Fixtures.docBytes),
+                                                  capabilities: ["authorText", "textWeight"])
+        defer { Task { await device.close() } }
+        for (tool, args) in weighted {
+            var a = args; a["docId"] = "d"
+            let (content, isError) = try await client.callTool(name: tool, arguments: a)
+            #expect(isError != true, "\(tool): \(toolResultText(content))")
+            let last = try #require(await device.receivedRequests.last)
+            let spec = try #require(JSONSerialization.jsonObject(with: last.spec) as? [String: Any])
+            for key in args.keys { #expect(spec[key] != nil, "\(tool) relays \(key)") }
+        }
+        await server.stop()
+    }
+
     /// The exact relayed envelope key set, string-literally (mirroring the
     /// styled add_text contract test): present-only optional keys, the FILE'S
     /// bytes relayed as the base64 string under `imageBytes`, and the new

@@ -440,7 +440,7 @@ REPLY: a line "added … at seq N" and a line `id: <the new text's id>`; when a 
 | `docId` | string | yes | The document (its id, or its name when no other document has that name) to modify. |
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
-| `bold` | boolean | no |  |
+| `bold` | boolean | no | The shortcut for `weight`: true is 700, false is 400. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
 | `colorAppearance` | string — `light`, `dark` | no | The appearance this call's colour hexes were authored in. Default "light" — the canonical space every colour on this surface speaks. Pass "dark" when you picked colours for how they look on the DARK canvas; the device converts them to the stored light-canonical form. |
 | `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
@@ -453,6 +453,7 @@ REPLY: a line "added … at seq N" and a line `id: <the new text's id>`; when a 
 | `spans` | array | no | Style parts of the text independently instead of a single `text` string. Each span is {text, color?, fontSize?, bold?, italic?, family?}; any whole-field color/fontSize/bold/italic/ family above is the base a span's own value overrides. Supply `text` OR `spans`, not both. Requires a connected device. |
 | `tags` | array | no | Durable tags for this text, so find_elements can reach it later. |
 | `text` | string | no | The text to place. Give `text` OR `spans`, exactly one of them. |
+| `weight` | integer | no | How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability. |
 | `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
 | `wrapWidth` | number | no | Wrap at this box width (turns wordWrap on), in the text's own points before its transform — the space fontSize is in, so canvas points for an unscaled text. At least 24, rounded to a whole point. Needs a connected device. |
 
@@ -461,11 +462,12 @@ Each item of `spans`:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | This span's text. |
-| `bold` | boolean | no |  |
+| `bold` | boolean | no | The shortcut for `weight`: true is 700, false is 400. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
 | `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
 | `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `italic` | boolean | no |  |
+| `weight` | integer | no | How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability. |
 
 ### `edit_text`
 
@@ -479,7 +481,7 @@ REPLY: a line "edited <id> at seq N"; when a device made the edit, also `canvasB
 | `textId` | string | yes | The id of the text entry to edit. |
 | `anchor` | — | no | The point of the text box that stays put when the text grows or shrinks: {row: "top"\|"middle"\|"bottom", column: "left"\|"center"\|"right"}, or "automatic" (the default: the first line's baseline keeps its place). A picked anchor does not move the text; it aligns its paragraphs to the anchor's column (see anchorParagraphs). list_texts reports it. Needs a connected device. |
 | `anchorParagraphs` | string — `all`, `reference`, `none` | no | Which paragraphs take a picked anchor's column: "all" (default), "reference" (only the first, or the last for the bottom row) or "none". A single paragraph always takes it. Only with a picked anchor. |
-| `bold` | boolean | no |  |
+| `bold` | boolean | no | The shortcut for `weight`: true is 700, false is 400. |
 | `canvasX` | number | no | New canvas-space x of the text box's top-left corner as shown (or of the point `placeBy` names). |
 | `canvasY` | number | no | New canvas-space y of the text box's top-left corner as shown (or of the point `placeBy` names). |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
@@ -491,6 +493,7 @@ REPLY: a line "edited <id> at seq N"; when a device made the edit, also `canvasB
 | `placeBy` | object | no | Which point of the box `canvasX` / `canvasY` name: {row: "top"\|"middle"\|"bottom"\| "baseline", column: "left"\|"center"\|"right"} — {row: "top", column: "center"} centers the box under the point, {row: "middle", column: "right"} ends it there. `baseline` is a point ON the first line's baseline (its left end, middle or right end). Default: the top-left corner. The box is the one the listing reports as `canvasBounds`. Needs a device with the `placeBy` capability. |
 | `spans` | array | no | Replace the text with independently-styled parts instead of a single `text` string. Same shape as add_text's `spans`. Requires a connected device. |
 | `text` | string | no | Replacement text. Plain (no style/spans), this resets formatting to plain defaults — see the tool description. Styled (with color/fontSize/bold/italic/family/spans), it replaces the characters with the new style instead. |
+| `weight` | integer | no | How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability. |
 | `wordWrap` | boolean | no | true: wrap lines at a fixed box width — `wrapWidth`, or the width the text has now; false: no wrapping, the box grows to the longest line (the default for a new text). Needs a connected device. |
 | `wrapWidth` | number | no | Wrap at this box width (turns wordWrap on), in the text's own points before its transform — the space fontSize is in, so canvas points for an unscaled text. At least 24, rounded to a whole point. Needs a connected device. |
 
@@ -499,11 +502,12 @@ Each item of `spans`:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | This span's text. |
-| `bold` | boolean | no |  |
+| `bold` | boolean | no | The shortcut for `weight`: true is 700, false is 400. |
 | `color` | string | no | #RRGGBB or #RRGGBBAA. Default: the document's automatic text colour. Light-canonical (the light-appearance value); see colorAppearance. |
 | `family` | string | no | A font family name from list_fonts, or `System` for the device's own system font. An unknown family fails with unknownFont. A NEW text or span without a family is in the app's own font, Inter (`Inter Variable`): the app bundles it, so the text is laid out the same on every device. The system font is not — a Mac sets it 4 to 5 % wider than an iPad or iPhone below 20 pt, with another line height. |
 | `fontSize` | number | no | Point size, 1–512. A NEW text or span without one is 17 pt. |
 | `italic` | boolean | no |  |
+| `weight` | integer | no | How heavy the letters are: 100 Thin, 200 Extra Light, 300 Light, 400 Regular, 500 Medium, 600 Semibold, 700 Bold, 800 Extra Bold, 900 Black. For Inter, the app's own font (a text or span without a `family`), which has all nine; with another family it fails by name — use `bold` there. It wins over `bold`. Needs a device with the `textWeight` capability. |
 
 ### `remove_text`
 
@@ -518,7 +522,7 @@ Removes a placed text entry from a document by id. Rejected with docChangedDurin
 
 Lists a document's placed texts, one per text — authored by a connected InfinitySketch device. REQUIRES a connected device — fails with noDeviceAvailable if none is connected and deviceTimeout if it doesn't respond in time. Returns the device's listing verbatim as text; this call never writes to the document. unknownDoc if the document doesn't exist.
 
-REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, color, fontSize, family, bold, italic, spans, alignment, wordWrap, wrapWidth, inlineMath}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, fontSize, family, bold, italic} each) and no top-level style. `color` is light-canonical and ABSENT for the automatic color; `family` is `System` for the device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it (the text's own points, before its transform). `inlineMath` is true when every $…$ in the text shows as a typeset formula (add_text / edit_text set it).
+REPLY: an ARRAY of `{id, text, canvasBounds, pinned, opacity, tags, anchor, layer, color, fontSize, family, bold, italic, weight?, spans, alignment, wordWrap, wrapWidth, inlineMath}`. The box is `canvasBounds` ([x, y, w, h], canvas space), NOT `bounds`. `anchor` is the text's picked anchor — the point of its box that stays put as the text grows — as {row: top|middle|bottom, column: left|center|right}; ABSENT means automatic (the first line's baseline keeps its place). `layer` is `front` (in front of the strokes) or `back` (behind strokes and grids); a document from before object layers has no such key and lists every text as `front`. The STYLE is add_text's own vocabulary, so it can be sent back: a text in one style has top-level `color`, `fontSize`, `family`, `bold`, `italic`; a text whose parts differ has `spans` instead ({text, color, fontSize, family, bold, italic, weight?} each) and no top-level style. `weight` (100–900) is there only for a weight that is neither Regular nor Bold — those two are what `bold` says. `color` is light-canonical and ABSENT for the automatic color; `family` is `System` for the device's system font (an app without its own font leaves it out). `alignment` is left / center / right / justified / natural, or mixed. `wordWrap` is true when the text wraps at a fixed width, then `wrapWidth` gives it (the text's own points, before its transform). `inlineMath` is true when every $…$ in the text shows as a typeset formula (add_text / edit_text set it).
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
