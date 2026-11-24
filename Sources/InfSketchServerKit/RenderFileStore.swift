@@ -20,7 +20,7 @@ public struct RenderFileStore: Sendable {
     private let directory: URL
     private let byteBudget: Int
 
-    /// - Parameter byteBudget: total bytes of PNG kept in the directory. 64 MB, matching the
+    /// - Parameter byteBudget: total bytes of renders kept in the directory. 64 MB, matching the
     ///   telemetry file's cap — big enough to hold a working session's renders, small enough that a
     ///   forgotten server cannot fill a disk.
     public init(directory: URL, byteBudget: Int = 64 * 1024 * 1024) {
@@ -34,11 +34,31 @@ public struct RenderFileStore: Sendable {
     /// cannot see.)
     @discardableResult
     public func write(docId: String, png: Data, now: Date = Date()) throws -> URL {
+        try write(docId: docId, bytes: png, fileExtension: "png", now: now)
+    }
+
+    /// The file types a render may be: a picture, or `export_sketch`'s PDF page. The ONE list
+    /// the writer, the reader, the pruner and the route's content type go by.
+    public static let contentTypes: [String: String] = ["png": "image/png", "pdf": "application/pdf"]
+
+    /// The content type of a render by its name, nil for a name that is not a render's.
+    public static func contentType(forName name: String) -> String? {
+        guard let dot = name.lastIndex(of: ".") else { return nil }
+        return contentTypes[String(name[name.index(after: dot)...])]
+    }
+
+    /// `write(docId:png:)` for either file type. An extension that is not a render's is refused:
+    /// this store's reader serves only what it lists, so the file could never be fetched.
+    @discardableResult
+    public func write(docId: String, bytes: Data, fileExtension: String, now: Date = Date()) throws -> URL {
+        guard Self.contentTypes[fileExtension] != nil else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory
             .appendingPathComponent(Self.basename(docId: docId, now: now))
-            .appendingPathExtension("png")
-        try png.write(to: url, options: .atomic)
+            .appendingPathExtension(fileExtension)
+        try bytes.write(to: url, options: .atomic)
         prune(keeping: url)
         return url.standardizedFileURL
     }
@@ -82,11 +102,11 @@ public struct RenderFileStore: Sendable {
     /// The bytes of a previously written render, or nil.
     ///
     /// `name` arrives from an HTTP path — the one place a caller picks part of a filesystem path
-    /// here — so it is checked rather than trusted: no separators, no `..`, and `.png` only, so the
-    /// route can never become a general file server. nil covers "evicted" as much as "never
+    /// here — so it is checked rather than trusted: no separators, no `..`, and a render's file
+    /// type only (`contentTypes`), so the route can never become a general file server. nil covers "evicted" as much as "never
     /// existed", and both are ordinary: renders are scratch and the directory has a byte budget.
     public func read(name: String) -> Data? {
-        guard name.hasSuffix(".png"),
+        guard Self.contentType(forName: name) != nil,
               !name.contains("/"), !name.contains("\\"), !name.contains(".."),
               !name.isEmpty
         else { return nil }
@@ -114,7 +134,7 @@ public struct RenderFileStore: Sendable {
             at: directory, includingPropertiesForKeys: [.fileSizeKey]) else { return }
 
         let entries = urls
-            .filter { $0.pathExtension == "png" }
+            .filter { Self.contentTypes[$0.pathExtension] != nil }
             .map { url in
                 (url: url,
                  size: (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0,

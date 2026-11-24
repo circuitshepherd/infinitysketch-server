@@ -4260,6 +4260,67 @@ actor FakeStrokeOpDevice {
         await server.stop()
     }
 
+    /// `format: "pdf"` is the same export as a PDF page: it goes only to an `exportPdf` device
+    /// (another would ignore the key and hand back a PNG), carries no pixel budget, and its file
+    /// ends in .pdf.
+    @Test func exportSketchWritesAPdfThroughADeviceThatExportsPdf() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let pdfBytes = Data("%PDF-1.3 one page".utf8)
+        let meta = Data(#"{"format":"pdf","pageSize":[300,200],"strokeScale":4.0}"#.utf8)
+        let old = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pdfBytes, meta: meta),
+            capabilities: ["authorStrokes", "exportRender"])
+        defer { Task { await old.close() } }
+        let (refused, refusedIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "light", "format": "pdf"])
+        #expect(refusedIsError == true)
+        #expect(toolResultText(refused).hasPrefix("noDeviceAvailable") && toolResultText(refused).contains("exportPdf"))
+        #expect(await old.receivedRequests.isEmpty)
+        // The same device still exports a picture.
+        let (_, pngIsError) = try await client.callTool(
+            name: "export_sketch", arguments: ["docId": "d", "appearance": "light", "format": "png"])
+        #expect(pngIsError != true)
+        let pngRequest = try #require(await old.receivedRequests.last)
+        let pngSpec = try #require(JSONSerialization.jsonObject(with: pngRequest.spec) as? [String: Any])
+        #expect(pngSpec["format"] == nil && pngSpec["maxPixels"] as? Int == MCPAdapter.exportDefaultMaxPixels)
+        await old.close()
+
+        let device = try await FakeStrokeOpDevice(
+            port: port, autoReply: .bytesWithMeta(bytes: pdfBytes, meta: meta),
+            capabilities: ["authorStrokes", "exportRender", "exportPdf"])
+        defer { Task { await device.close() } }
+        let (content, isError) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "pdf", "scale": 6])
+        #expect(isError != true)
+        let reply = try #require(JSONSerialization.jsonObject(with: Data(toolResultText(content).utf8)) as? [String: Any])
+        let path = try #require(reply["filePath"] as? String)
+        #expect(path.hasSuffix(".pdf"))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == pdfBytes)
+        #expect((reply["renderUrl"] as? String)?.hasSuffix(".pdf") == true)
+        #expect(reply["format"] as? String == "pdf" && reply["pageSize"] as? [Double] == [300, 200])
+
+        let pdfRequest = try #require(await device.receivedRequests.last)
+        let spec = try #require(JSONSerialization.jsonObject(with: pdfRequest.spec) as? [String: Any])
+        #expect(spec["op"] as? String == "render" && spec["format"] as? String == "pdf")
+        #expect(spec["forFile"] as? Bool == true && spec["background"] as? String == "paper")
+        #expect(spec["padding"] as? Int == MCPAdapter.exportDefaultPadding)
+        #expect(spec["scale"] as? Double == 6 && spec["maxPixels"] == nil, "a page has no pixel budget")
+
+        // What is not a format, and a budget for a page, are refused before a device is asked.
+        let asked = await device.receivedRequests.count
+        let (svg, e1) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "svg"])
+        #expect(e1 == true && toolResultText(svg).contains("format"))
+        let (budget, e2) = try await client.callTool(name: "export_sketch", arguments: [
+            "docId": "d", "appearance": "light", "format": "pdf", "maxPixels": 1_000_000])
+        #expect(e2 == true && toolResultText(budget).contains("maxPixels"))
+        #expect(await device.receivedRequests.count == asked)
+        await server.stop()
+    }
+
     /// The appearance is the caller's to state, and the grid is not exportable.
     @Test func exportSketchRefusesWhatWouldMakeTheImageDependOnChance() async throws {
         let (server, port, task) = try await startServer()

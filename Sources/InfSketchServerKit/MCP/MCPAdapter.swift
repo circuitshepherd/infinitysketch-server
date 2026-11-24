@@ -2895,7 +2895,8 @@ public actor MCPAdapter {
         Tool(
             name: "export_sketch",
             description: """
-                Renders a document for PUBLISHING and writes the PNG to a file: the paper \
+                Renders a document for PUBLISHING and writes it to a file — a PNG, or with \
+                `format: "pdf"` a PDF page: the paper \
                 without the grid, in the appearance you name, the content with a narrow margin. \
                 It is render_sketch with the defaults a posted image needs, so none of them can \
                 be forgotten — render_sketch is for looking and aligning (the grid is on, the \
@@ -2912,8 +2913,15 @@ public actor MCPAdapter {
                 `scale`, `appearance`, `renderedBy`, …) with `filePath` (absolute, on the \
                 server's machine) and `renderUrl` (relative to this server; download it when \
                 you are not on that machine). The server names the file and keeps its render \
-                directory bounded, oldest first: copy the file soon. PNG only — a vector \
-                format is not built.
+                directory bounded, oldest first: copy the file soon. \
+                PDF (`format: "pdf"`, needs a device with `exportPdf`): ONE page of the same \
+                area in canvas points, on which texts are text (selectable, sharp at any zoom), \
+                arrows, shapes and formulas are vectors, and the strokes are one picture placed \
+                between the back and the front objects — ink has no vector form. `scale` is then \
+                that picture's pixels per canvas point (default 4) and `maxPixels` is not taken; \
+                the metadata is `format`, `canvasRect`, `pageSize` (PDF points; an area longer \
+                than 14400 is scaled down to it), `strokeScale`, `appearance`, `paperColor`, \
+                `renderedBy`.
                 """,
             inputSchema: .object([
                 "type": "object",
@@ -2922,6 +2930,10 @@ public actor MCPAdapter {
                     "appearance": .object([
                         "type": "string", "enum": .array(["light", "dark"].map(Value.string)),
                         "description": "Which appearance to export: the light page or the dark one. Required.",
+                    ]),
+                    "format": .object([
+                        "type": "string", "enum": .array(["png", "pdf"].map(Value.string)),
+                        "description": "\"png\" (default): a picture. \"pdf\": one page with texts, arrows, shapes and formulas as vectors and the strokes as a picture.",
                     ]),
                     "canvasRect": .object([
                         "type": "array", "items": .object(["type": "number"]), "minItems": 4, "maxItems": 4,
@@ -6880,6 +6892,14 @@ public actor MCPAdapter {
         if let background = arguments?["background"], background != .string("paper"), background != .string("transparent") {
             return Self.errorResult("invalidArgument: background must be \"paper\" or \"transparent\" — an export never shows the grid (render_sketch does)")
         }
+        if let format = arguments?["format"] {
+            guard format == .string("png") || format == .string("pdf") else {
+                return Self.errorResult("invalidArgument: format must be \"png\" or \"pdf\"")
+            }
+            if format == .string("pdf"), arguments?["maxPixels"] != nil {
+                return Self.errorResult("invalidArgument: maxPixels — a PDF page has no pixel budget; `scale` sets its strokes' pixels per canvas point")
+            }
+        }
         return await renderSketch(arguments, export: true)
     }
 
@@ -6902,13 +6922,18 @@ public actor MCPAdapter {
                     specFields[key] = value
                 }
             }
+            // `format` is export_sketch's alone (render_sketch answers with a picture in its
+            // reply): it is relayed here, never through `renderSpecParameterNames`.
+            let pdf = export && arguments?["format"] == .string("pdf")
             if export {
                 // What a published image needs and the caller did not say. `forFile` raises the
                 // device's pixel ceiling: the image goes to a file, never into a reply.
                 specFields["forFile"] = .bool(true)
                 if specFields["background"] == nil { specFields["background"] = .string("paper") }
                 if specFields["padding"] == nil { specFields["padding"] = .int(Self.exportDefaultPadding) }
-                if specFields["scale"] == nil, specFields["maxPixels"] == nil {
+                if pdf {
+                    specFields["format"] = .string("pdf")
+                } else if specFields["scale"] == nil, specFields["maxPixels"] == nil {
                     specFields["maxPixels"] = .int(Self.exportDefaultMaxPixels)
                 }
             }
@@ -6967,7 +6992,10 @@ public actor MCPAdapter {
                                                            + (closesAPath ? "+closedPaths" : "")
                                                            // An app without it would ignore `forFile` and
                                                            // hand back an image a quarter the size.
-                                                           + (export ? "+exportRender" : "") + kind)
+                                                           + (export ? "+exportRender" : "")
+                                                           // An app without it would ignore `format`
+                                                           // and hand back a PNG named .pdf.
+                                                           + (pdf ? "+exportPdf" : "") + kind)
             } catch let error as DeviceCommandBroker.DeviceCommandError {
                 return Self.strokeOpErrorResult(error)
             } catch {
@@ -6992,7 +7020,7 @@ public actor MCPAdapter {
                 }
                 let url: URL
                 do {
-                    url = try renderFileStore.write(docId: docId, png: out.bytes)
+                    url = try renderFileStore.write(docId: docId, bytes: out.bytes, fileExtension: pdf ? "pdf" : "png")
                 } catch {
                     return Self.errorResult("renderFileWriteFailed: \(error)")
                 }
