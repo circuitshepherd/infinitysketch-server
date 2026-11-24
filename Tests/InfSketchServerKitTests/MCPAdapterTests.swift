@@ -3190,6 +3190,29 @@ actor FakeStrokeOpDevice {
         #expect(restyle["op"] as? String == "restyleArrows" && restyle["fillColor"] as? String == "line")
     }
 
+    /// A shape that took its fill color from the user's new-arrow style says so in its reply.
+    @Test func anInheritedFillColorIsNamedInTheReply() async throws {
+        let (server, port, task) = try await startServer()  // seeds doc "d"
+        defer { task.cancel() }
+        _ = server
+        let client = try await connectedClient(port: port)
+        defer { Task { await client.disconnect() } }
+        let meta = try JSONEncoder().encode(["arrowId": "A1B2C3D4-0000-0000-0000-000000000002",
+                                             "canvasBounds": "0.000, 0.000, 40.000, 30.000", "drawnWidth": "2.0",
+                                             "inheritedFillColor": "#FFFFFF80"])
+        let device = try await FakeStrokeOpDevice(port: port, autoReply: .bytesWithMeta(bytes: Fixtures.docBytes, meta: meta),
+                                                  capabilities: ["arrows", "closedPaths"])
+        defer { Task { await device.close() } }
+        let (added, isError) = try await client.callTool(name: "add_shape", arguments: [
+            "docId": "d", "shape": "rectangle", "canvasRect": .array([0, 0, 40, 30]), "filled": true])
+        #expect(isError != true)
+        let text = toolResultText(added)
+        #expect(text.contains("fillColor: #FFFFFF80") && text.contains("new-arrow style"), "\(text)")
+        let structured = try #require(MCPAdapter.structuredReply(text, seq: 3))
+        guard case .object(let fields) = structured else { Issue.record("not an object"); return }
+        #expect(fields["fillColor"] == .string("#FFFFFF80"))
+    }
+
     /// A closed or filled path, and add_shape, reach only a `closedPaths` device: an app from
     /// before format 8 would ignore `closed` and `filled` and answer success with an open arrow,
     /// and does not know `addShape` at all. A plain add_arrow still reaches it.

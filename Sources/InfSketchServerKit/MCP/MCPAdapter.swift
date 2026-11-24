@@ -5887,13 +5887,13 @@ public actor MCPAdapter {
     /// `fillColor` on the tools that style an arrow: a filled shape's own fill color.
     static var fillColorProperty: Value {
         .object(["type": "string",
-                 "description": "A FILLED shape's own fill color: #RRGGBB or #RRGGBBAA (the alpha is the fill's opacity), light-canonical like `color` (`colorAppearance` applies to it too) — so a white box with a black border is ONE object. \"line\": no color of its own, the inside is the line's color again. Omitted: the user's new-arrow style on an add (normally the line's color), unchanged on a restyle. Only a filled shape shows it; given for anything else it is refused. Needs a device with the `fillColor` capability."])
+                 "description": "A FILLED shape's own fill color: #RRGGBB or #RRGGBBAA (the alpha is the fill's opacity), light-canonical like `color` (`colorAppearance` applies to it too) — so a white box with a black border is ONE object. \"line\": no color of its own, the inside is the line's color again. Omitted on an add: with `color` given the inside is that color too; with neither, the shape takes the user's new-arrow style whole — normally the line's color, and when that style has a fill color the reply names it (`fillColor`). Omitted on a restyle: unchanged. Only a filled shape shows it; given for anything else it is refused. Needs a device with the `fillColor` capability."])
     }
 
     /// `fillOpacity`, the fill's opacity alone.
     static var fillOpacityProperty: Value {
         .object(["type": "number", "minimum": 0, "maximum": 1,
-                 "description": "0…1 — how opaque a filled shape's INSIDE is, apart from its line (overrides the alpha of `fillColor`). Without a fill color of its own the inside takes the line's color first, so `fillOpacity: 0.2` alone is a faint face in the line's color under a solid border."])
+                 "description": "0…1 — how opaque a filled shape's INSIDE is, apart from its line (overrides the alpha of `fillColor`). Without a fill color of its own the inside takes the line's color first, so `color` with `fillOpacity: 0.2` is a faint face in the line's color under a solid border."])
     }
 
     /// `filled` on add_arrow / reshape_arrow.
@@ -5967,6 +5967,12 @@ public actor MCPAdapter {
                     // than the one asked for).
                     if let bounds = decoded["canvasBounds"] { summary += "\ncanvasBounds: [\(bounds)]" }
                     if let width = decoded["drawnWidth"] { summary += "\ndrawnWidth: \(width)" }
+                    // A fill color the call did not name: said, so that a white inside under a
+                    // border the agent chose is no surprise.
+                    if let fill = decoded["inheritedFillColor"] {
+                        summary += "\nfillColor: \(fill)"
+                        summary += "\nnote: the fill color is the user's new-arrow style's; pass fillColor (a hex, or \"line\" for the line's color) to choose it"
+                    }
                 }
                 return summary
             }
